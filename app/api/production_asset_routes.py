@@ -656,7 +656,8 @@ _CAPTION_ANIM_FPS = float(os.environ.get("DAN_CAPTION_ANIM_FPS", "20"))
 
 
 def _render_caption_overlays(
-    captions: list[dict[str, Any]], output_width: int, output_height: int, job_dir: Path
+    captions: list[dict[str, Any]], output_width: int, output_height: int, job_dir: Path,
+    fps: float = 30.0,
 ) -> list[dict[str, Any]]:
     """Render designed captions by screenshotting the Next.js /caption-frame route (same
     <CaptionLayer> as the live preview => pixel parity). A STATIC caption -> one transparent PNG;
@@ -667,6 +668,16 @@ def _render_caption_overlays(
     specs: list[dict[str, Any]] = []
     for i, cap in enumerate(captions):
         text = str(cap.get("text") or "").strip()
+        if _is_scene_clip(cap):
+            # every output frame, sampled at the frame's own time (like the HyperFrames renderer)
+            start = max(0.0, float(cap.get("timeline_start") or 0))
+            end = max(start + 1 / fps, float(cap.get("timeline_end") or start + 1))
+            seq_dir = job_dir / f"caption_{i:03d}_seq"
+            items.append({"seq_dir": str(seq_dir), "scene": cap["scene"], "clip_id": str(cap.get("id") or i),
+                          "scene_t0": float(cap.get("scene_offset") or 0), "frames": max(1, round((end - start) * fps)),
+                          "fps": fps})
+            specs.append({"kind": "anim", "seq_dir": seq_dir, "fps": fps, "start": start, "end": end, "frame_start": True})
+            continue
         if not text:
             continue
         start = max(0.0, float(cap.get("timeline_start") or 0))
@@ -780,6 +791,11 @@ def _blur_annotations(instruction: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+# clip.blend -> ffmpeg blend mode (same names the preview maps to canvas composite operations)
+_BLEND_MODES = {"screen": "screen", "add": "addition", "lighten": "lighten", "multiply": "multiply",
+                "overlay": "overlay", "softlight": "softlight"}
+
+
 def _is_overlay_clip(clip: dict[str, Any]) -> bool:
     return str(clip.get("composition") or "") in ("pip", "overlay")
 
@@ -797,10 +813,23 @@ def _sequence_z_items(
     every other visual item in draw order as ("overlay" | "fx" | "cap", clip)."""
     if not isinstance(sequence, dict):
         return [], []
-    tracks = [
-        t for t in (sequence.get("tracks") or [])
-        if isinstance(t, dict) and t.get("type") != "audio" and not t.get("hidden")
-    ]
+    visual_all = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict) and t.get("type") != "audio"]
+    tracks = [t for t in visual_all if not t.get("hidden")]
+    # A picture's stacking layer, the same rule the editor preview draws with: its own `layer`
+    # (set when the clip is dragged to another lane), else its lane's place in the stack.
+    lane_index = {id(t): i for i, t in enumerate(visual_all)}
+
+    def _pic_layer(track: dict[str, Any], clip: dict[str, Any]) -> float:
+        own = clip.get("layer")
+        if isinstance(own, (int, float)) and not isinstance(own, bool):
+            return float(own)
+        vi = lane_index.get(id(track), 0)
+        if track.get("type") == "caption":
+            return float(max(2, vi))
+        if track.get("type") == "overlay" or _is_overlay_clip(clip):
+            return 1.0
+        return float(vi)
+
     base_ti: int | None = None
     base_clips: list[dict[str, Any]] = []
     for ti, track in enumerate(tracks):
@@ -813,6 +842,7 @@ def _sequence_z_items(
             base_clips = sorted(spine, key=lambda c: float(c.get("timeline_start") or 0))
             break
     z_items: list[tuple[str, dict[str, Any]]] = []
+    pic_layers: dict[int, float] = {}
     for ti, track in enumerate(tracks):
         for clip in track.get("clips") or []:
             if not isinstance(clip, dict):
@@ -822,12 +852,27 @@ def _sequence_z_items(
                     continue  # part of the base concat
                 if _clip_video_enabled(clip):
                     z_items.append(("overlay", clip))
+                    pic_layers[id(clip)] = _pic_layer(track, clip)
             elif isinstance(clip.get("region"), dict):
                 if clip.get("style") != "note":  # 指示クリップ: 画には出さない
                     z_items.append(("fx", clip))
-            elif str(clip.get("text") or "").strip():
+            elif str(clip.get("text") or "").strip() or _is_scene_clip(clip):
                 z_items.append(("cap", clip))
+    # Pictures stack by layer among themselves (a clip dragged up/down a lane in the editor goes
+    # in front of / behind the others in the export too). Effects and captions keep their places;
+    # with no layer moves the order is exactly the lane order as before.
+    slots = [i for i, (kind, _) in enumerate(z_items) if kind == "overlay"]
+    pics = sorted((z_items[i] for i in slots), key=lambda it: pic_layers.get(id(it[1]), 0.0))
+    for i, it in zip(slots, pics):
+        z_items[i] = it
     return base_clips, z_items
+
+
+def _is_scene_clip(clip: dict[str, Any]) -> bool:
+    """An editable scene (HTML + one GSAP timeline) placed on the timeline. It is drawn by the
+    same sandboxed frame as the editor preview (/caption-frame), as a transparent layer."""
+    scene = clip.get("scene")
+    return isinstance(scene, dict) and isinstance(scene.get("html"), str) and bool(scene["html"].strip())
 
 
 def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1039,16 +1084,26 @@ def _focus_chain(video_in: str, idx: int | str, x: int, y: int, w: int, h: int,
 
 def _kf_expr(keys: list[tuple[float, float]], scale: int, maxv: int, tvar: str = "t") -> str:
     """Piecewise-linear ffmpeg expression over time variable `tvar` (t for overlay/crop,
-    T for geq) from (abs_time, normalized_value) keyframes. Ends clamp to first/last key."""
+    T for geq) from (abs_time, normalized_value) keyframes. Ends clamp to first/last key.
+    Balanced if() tree (see _pl_expr) so many keys stay shallow."""
     def px(v: float) -> int:
         return max(0, min(maxv, round(v * scale)))
     if len(keys) == 1:
         return str(px(keys[0][1]))
-    expr = str(px(keys[-1][1]))
-    for (t0, v0), (t1, v1) in reversed(list(zip(keys, keys[1:]))):
-        seg = f"lerp({px(v0)}\\,{px(v1)}\\,({tvar}-{t0:.3f})/{max(t1 - t0, 1e-6):.3f})"
-        expr = f"if(lt({tvar}\\,{t1:.3f})\\,{seg}\\,{expr})"
-    return f"if(lt({tvar}\\,{keys[0][0]:.3f})\\,{px(keys[0][1])}\\,{expr})"
+
+    def seg(i: int) -> str:
+        (t0, v0), (t1, v1) = keys[i], keys[i + 1]
+        return f"lerp({px(v0)}\\,{px(v1)}\\,({tvar}-{t0:.3f})/{max(t1 - t0, 1e-6):.3f})"
+
+    def tree(i: int, j: int) -> str:
+        if j - i == 1:
+            return seg(i)
+        m = (i + j) // 2
+        return f"if(lt({tvar}\\,{keys[m][0]:.3f})\\,{tree(i, m)}\\,{tree(m, j)})"
+
+    inner = tree(0, len(keys) - 1)
+    return (f"if(lt({tvar}\\,{keys[0][0]:.3f})\\,{px(keys[0][1])}\\,"
+            f"if(lt({tvar}\\,{keys[-1][0]:.3f})\\,{inner}\\,{px(keys[-1][1])}))")
 
 
 def _blur_chain_kf_sized(video_in: str, idx: int, kf: list[tuple[float, float, float, float, float]],
@@ -1688,17 +1743,29 @@ def _keyed_box(box: tuple[float, float, float, float], k: dict[str, float]) -> t
 
 def _pl_expr(points: list[tuple[float, float]], tv: str) -> str:
     """Piecewise-linear float expression of `tv` through (t, v) points, ends held. Commas are
-    escaped for a quoted filter option."""
+    escaped for a quoted filter option. The segments are picked by a balanced tree of if()s,
+    so a smooth (eased) move with hundreds of keys stays a shallow expression (a linear chain
+    of if()s failed to build the filter at ~100+ keys)."""
     def num(v: float) -> str:
         return f"{v:.4f}"
     if len(points) == 1 or all(abs(v - points[0][1]) < 1e-9 for _, v in points):
         return num(points[0][1])
-    expr = num(points[-1][1])
-    for (t0, v0), (t1, v1) in reversed(list(zip(points, points[1:]))):
+
+    def seg(i: int) -> str:
+        (t0, v0), (t1, v1) = points[i], points[i + 1]
         dt = max(t1 - t0, 1e-6)
-        seg = f"{num(v0)}+({num(v1 - v0)})*({tv}-{t0:.4f})/{dt:.4f}"
-        expr = f"if(lt({tv}\\,{t1:.4f})\\,{seg}\\,{expr})"
-    return f"if(lt({tv}\\,{points[0][0]:.4f})\\,{num(points[0][1])}\\,{expr})"
+        return f"{num(v0)}+({num(v1 - v0)})*({tv}-{t0:.4f})/{dt:.4f}"
+
+    def tree(i: int, j: int) -> str:  # segments i..j-1
+        if j - i == 1:
+            return seg(i)
+        m = (i + j) // 2
+        return f"if(lt({tv}\\,{points[m][0]:.4f})\\,{tree(i, m)}\\,{tree(m, j)})"
+
+    n = len(points) - 1
+    inner = tree(0, n)
+    return (f"if(lt({tv}\\,{points[0][0]:.4f})\\,{num(points[0][1])}\\,"
+            f"if(lt({tv}\\,{points[-1][0]:.4f})\\,{inner}\\,{num(points[-1][1])}))")
 
 
 def _moving_video_layer(src: str, idx: int | str, keys: list[dict[str, float]],
@@ -2348,7 +2415,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
     cap_ass_fallback = False
     if cap_clips:
         try:
-            _cap_rendered = _render_caption_overlays(cap_clips, output_width, output_height, job_dir)
+            _cap_rendered = _render_caption_overlays(cap_clips, output_width, output_height, job_dir, timeline_fps)
             cap_overlays = {id(c): ov for c, ov in zip(cap_clips, _cap_rendered)}
         except Exception as exc:  # noqa: BLE001
             logger.warning("designed caption overlay failed, falling back to .ass: %s", exc)
@@ -2623,6 +2690,29 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             f"{_maskcrop}"
             f"[ov{oi}]"
         )
+        _bm = _BLEND_MODES.get(str(clip.get("blend") or ""))
+        if _bm and not shape_filt:
+            # Blend mode (light leaks, film burns, particles on black): the clip becomes a
+            # full-canvas layer (black — or white for multiply — outside its box and before it
+            # starts) and is mixed with what is below in RGB, like the preview's
+            # globalCompositeOperation.
+            _bg = "white" if _bm in ("multiply",) else "black"
+            _pl, _pt = max(0, _mx), max(0, _my)
+            filters.append(
+                f"[ov{oi}]format=gbrp,crop=w='min(iw\\,{output_width}-{_pl})':h='min(ih\\,{output_height}-{_pt})':x=0:y=0,"
+                f"pad={output_width}:{output_height}:{_pl}:{_pt}:color={_bg},setpts=PTS-STARTPTS,"
+                # whole frames of padding up to the clip's first frame, then half a frame early
+                # (the rule every layer here follows: a frame shows the latest picture <= t)
+                f"tpad=start={max(0, math.ceil(ov_offset * timeline_fps - 1e-6))}:start_mode=add:color={_bg},"
+                f"setpts=PTS-{half:.5f}/TB[ovb{oi}]"
+            )
+            filters.append(f"[{video_out}]format=gbrp[ovm{oi}]")
+            filters.append(
+                f"[ovm{oi}][ovb{oi}]blend=all_mode={_bm}:shortest=0:repeatlast=1:"
+                f"enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})',format=yuv420p[vov{oi}]"
+            )
+            video_out = f"vov{oi}"
+            continue
         filters.append(
             f"[{video_out}][ov{oi}]overlay={_mx}:{_my}{_ov_mode}:enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})'{_ov_back}[vov{oi}]"
         )

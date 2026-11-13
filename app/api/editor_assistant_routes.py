@@ -27,7 +27,10 @@ PAGE = Path(__file__).parents[1] / 'static' / 'editor-assistant.html'
 
 @router.get('/native-scene-script')
 def native_scene_script():
-    return Response(PAGE.with_name('editor-scene.js').read_text(encoding='utf-8-sig'),media_type='application/javascript')
+    from app.services.scene_fonts import registry_json
+    script = PAGE.with_name('editor-scene.js').read_text(encoding='utf-8-sig')
+    return Response('window.DAN_SCENE_FONTS=' + registry_json() + ';\n' + script, media_type='application/javascript',
+                    headers={'Cache-Control': 'no-cache'})
 
 
 @router.get('/reference-library/media/{ident}')
@@ -342,6 +345,17 @@ def model_viewer_script():
 @router.get('/vimeo-player.js')
 def vimeo_player_script():
     return Response((PAGE.parent/'vendor/vimeo-player.min.js').read_bytes(),media_type='application/javascript')
+
+
+@router.get('/scene-vendor/fonts/{name}')
+def scene_vendor_font(name: str):
+    # A registered font for the sandboxed scene frames (opaque origin -> needs CORS).
+    from app.services.scene_fonts import font_path
+    path = font_path(name)
+    if not path:
+        raise HTTPException(404)
+    kind = {'.otf': 'font/otf', '.ttf': 'font/ttf', '.woff2': 'font/woff2', '.woff': 'font/woff'}.get(path.suffix.lower(), 'application/octet-stream')
+    return Response(path.read_bytes(), media_type=kind, headers={'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=86400'})
 
 
 @router.get('/scene-vendor/{name}')

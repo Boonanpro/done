@@ -6,6 +6,8 @@ import type { EditSequence, SequenceAsset, SequenceClip } from './video-review-e
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import type { CaptionDesign } from './caption-design';
 import { FrameSourceManager, webCodecsSupported } from './frame-source';
+import { SceneLayer, isSceneClip, type SceneClip } from './scene-layer';
+import { gradeFilter } from './grade-filter';
 import { AudioSourceManager, webAudioSupported } from './audio-source';
 
 // Live timeline compositor. Draws the current edit (base video + overlay/PiP layers +
@@ -222,6 +224,10 @@ function LiveCaptionLayer({ playing, currentTime, clockRef, outW, outH, captions
   return <CaptionLayer outW={outW} outH={outH} captions={captions} time={playing ? liveT : currentTime} />;
 }
 
+const BLEND_OPS: Record<string, GlobalCompositeOperation> = {
+  screen: 'screen', add: 'lighter', lighten: 'lighten', multiply: 'multiply', overlay: 'overlay', softlight: 'soft-light',
+};
+
 // プレビューを描く画素の倍率の上限: 長い辺 1920px まで（書き出しの 1080p と同じ細かさ）
 const MAX_CANVAS_LONG_SIDE = 1920;
 
@@ -323,7 +329,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       // A picture placed on a caption lane (a designed caption plate) draws like an overlay.
       if (track.type === 'caption') {
         for (const clip of track.clips || []) {
-          if (!clip.asset_id) continue;
+          if (!clip.asset_id || isSceneClip(clip)) continue;
           out.push({ clip, kind: 'overlay', layer: clip.layer ?? Math.max(2, visualIndex), position: (clip.position as VisualClip['position']) || null });
         }
         continue;
@@ -332,6 +338,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       for (const clip of track.clips || []) {
         // a caption Dan put on a picture lane is drawn by the caption layer, not as a picture
         if (clip.track === 'caption' && !clip.asset_id) continue;
+        if (isSceneClip(clip)) continue; // drawn by <SceneLayer>, not the canvas
         const overlay = isOverlayClip(clip, track.type);
         // A pop-out clip is drawn by the editor's canvas overlay (matted person breaking out of a
         // rounded card); skip its plain-wipe rendering here so no sharp-cornered rectangle peeks
@@ -370,6 +377,13 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           opacity: c.opacity,
         })),
     [captionClips],
+  );
+
+  // Editable scenes (HTML + one GSAP timeline), drawn over the canvas by the same frame the export uses.
+  const sceneClips = useMemo<SceneClip[]>(
+    () => (sequence?.tracks || []).filter((t) => t.type !== 'audio' && !(t as { hidden?: boolean }).hidden)
+      .flatMap((t) => (t.clips || []).filter(isSceneClip)),
+    [sequence],
   );
 
   const effectClips = useMemo(
@@ -801,6 +815,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       ctx.fillRect(0, 0, w, h);
 
       for (const { vc, got } of layers) {
+        // colour grade: the same matrix the export applies (clip.grade)
+        ctx.filter = gradeFilter((vc.clip as { grade?: unknown }).grade);
+        // blend mode (light leaks etc. on black): the export mixes the same way (clip.blend)
+        ctx.globalCompositeOperation = BLEND_OPS[String((vc.clip as { blend?: string }).blend || '')] || 'source-over';
         const tf = vc.clip.transform;
         const cr = vc.clip.crop;
         let px = vc.position ? vc.position.x * w : 0;
@@ -825,6 +843,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         }
       }
 
+      ctx.filter = 'none';
+      ctx.globalCompositeOperation = 'source-over';
       // 再生中に絵を使わなかった映像の要素（上の映像にふさがれた段など）も、1画素だけ描いて絵を受け取り続ける。
       // ブラウザは誰も絵を受け取らない映像の要素を0.25秒おきにしか進めず、その要素だけ再生が遅れて、
       // ふさいでいた映像が終わって見えた瞬間にずれていた（音を時計にした時に、映像が平均0.1秒以上遅れていた）。
@@ -1348,6 +1368,14 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           <div className="text-xs text-white/80">
             素材を準備中… {loadProgress.ready}/{loadProgress.total}
           </div>
+        </div>
+      ) : null}
+      {contentRect && sceneClips.length ? (
+        <div
+          className="pointer-events-none absolute overflow-hidden"
+          style={{ left: contentRect.left, top: contentRect.top, width: contentRect.width, height: contentRect.height }}
+        >
+          <SceneLayer clips={sceneClips} time={currentTime} playing={playing} clockRef={playClockRef} liveTime={currentTime} />
         </div>
       ) : null}
       {contentRect && renderCaptions.length ? (

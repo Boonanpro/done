@@ -63,6 +63,34 @@ def payload_url(web_base: str, out_w: int, out_h: int, item: dict, time_val: flo
     return f"{web_base.rstrip('/')}/caption-frame?p={raw}"
 
 
+def render_scene(page, web_base: str, out_w: int, out_h: int, item: dict) -> None:
+    """An editable scene clip: the same sandboxed frame the editor preview draws, one transparent
+    PNG per output frame. Frame f is the scene at scene_t0 + f/fps (the frame's own time, the
+    HyperFrames rule), and each screenshot waits until the frame has confirmed that time."""
+    fps = float(item.get("fps") or 30)
+    n = int(item.get("frames") or 1)
+    t0 = float(item.get("scene_t0") or 0)
+    seq = Path(item["seq_dir"])
+    seq.mkdir(parents=True, exist_ok=True)
+    payload = {"outW": out_w, "outH": out_h, "time": t0,
+               "captions": [{"id": str(item.get("clip_id") or "scene"), "text": "", "start": 0.0, "end": 1e9,
+                             "design": {}, "scene": item["scene"]}]}
+    raw = base64.urlsafe_b64encode(json.dumps({**payload, "captions": []}, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    page.goto(f"{web_base.rstrip('/')}/caption-frame?p={raw}", wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_function("() => typeof window.__setCaptionPayload === 'function'", timeout=15000)
+    page.evaluate("(p) => window.__setCaptionPayload(p)", payload)
+    page.wait_for_selector("[data-scene-ready]", state="attached", timeout=30000)
+    if page.get_attribute("[data-scene-ready]", "data-scene-ready") != "true":
+        raise RuntimeError("scene frame failed to draw")
+    for f in range(n):
+        t = t0 + f / fps
+        page.evaluate("(t) => window.__renderCaptionAt(t)", t)
+        page.wait_for_function("(t) => Math.abs((window.__nativeSceneTime ?? -1) - t) < 1e-4", arg=t, timeout=10000)
+        page.screenshot(path=str(seq / f"{f:05d}.png"), omit_background=True,
+                        clip={"x": 0, "y": 0, "width": out_w, "height": out_h})
+    print(f"OK {seq} (scene {n} frames @ {fps}fps)")
+
+
 def main() -> int:
     spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     out_w = int(spec["outW"])
@@ -84,6 +112,9 @@ def main() -> int:
         _dbg("page open; rendering items")
         for item in items:
             try:
+                if item.get("scene"):
+                    render_scene(page, web_base, out_w, out_h, item)
+                    continue
                 if item.get("seq_dir"):
                     start = float(item.get("start") or 0.0)
                     end = max(start + 0.05, float(item.get("end") or start + 1.0))

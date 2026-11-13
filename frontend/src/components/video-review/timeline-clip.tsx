@@ -7,6 +7,8 @@
  */
 import { memo } from 'react';
 
+import { useSceneInfoFor } from './scene-store';
+
 export type ClipBoxFns = {
   startDrag: (event: React.PointerEvent, clipId: string, mode: 'start' | 'end' | 'move') => void;
   openMenu: (event: React.MouseEvent, clipId: string) => void;
@@ -30,6 +32,40 @@ type Props = {
   title: string;
   fns: React.MutableRefObject<ClipBoxFns>;
 };
+
+/** An editable scene's texts as rows inside its clip: where each one is on screen. Pressing a row
+ *  selects the clip (the press goes on to the clip) and tells the side panel which text to open. */
+function SceneRows({ clipId, fns }: { clipId: string; fns: React.MutableRefObject<ClipBoxFns> }) {
+  const info = useSceneInfoFor(clipId);
+  if (!info || !info.items.length || !info.duration) return null;
+  const rows = info.items.slice(0, 6);
+  return (
+    <div className="pointer-events-none absolute inset-x-2 bottom-[1px] top-[12px]">
+      {rows.map((it, i) => (
+        <div
+          key={it.key}
+          data-scene-item={it.key}
+          className="pointer-events-auto absolute truncate rounded-[2px] bg-white/80 px-0.5 text-[8px] leading-[9px] text-violet-950"
+          style={{
+            left: `${Math.max(0, (it.start / info.duration) * 100)}%`,
+            width: `${Math.max(2, ((Math.min(info.duration, it.end) - it.start) / info.duration) * 100)}%`,
+            top: `${(i / rows.length) * 100}%`,
+            height: `${100 / rows.length - 3}%`, minHeight: 6,
+          }}
+          title={`${it.label || it.key}: ${it.text}`}
+          onPointerDown={(event) => {
+            fns.current.startDrag(event, clipId, 'move'); // selects the clip like pressing its body
+            const detail = { clipId, key: it.key };
+            window.setTimeout(() => window.dispatchEvent(new CustomEvent('dan-scene-item', { detail })), 0);
+            (window as unknown as { __danSceneItem?: unknown }).__danSceneItem = detail; // the panel may mount after this press
+          }}
+        >
+          {it.text}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function ClipBoxInner({ clipId, left, width, badge, label, colorClass, thumb, narrow, selected, linkedSelected, touch, appear, vanish, title, fns }: Props) {
   const cls = `absolute flex cursor-grab items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm active:cursor-grabbing ${colorClass} ${
@@ -77,6 +113,7 @@ function ClipBoxInner({ clipId, left, width, badge, label, colorClass, thumb, na
         <span className="shrink-0 rounded bg-black/45 px-1 text-[8px] leading-tight">{badge}</span>
         <span className="truncate">{label}</span>
       </div>
+      {badge === '場面' ? <SceneRows clipId={clipId} fns={fns} /> : null}
       <button
         type="button"
         className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"

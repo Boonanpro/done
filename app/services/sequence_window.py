@@ -60,6 +60,9 @@ def trim_sequence(sequence: dict[str, Any], assets: dict[str, dict[str, Any]],
                     cut["_caption_span"] = [a, b]
                     cut["_caption_sample"] = [a + i0 / grid, min(b, k1 / fps)]
                     cut["_caption_at"] = a + i0 / grid - k0 / fps
+                if na > fa and isinstance(clip.get("scene"), dict):
+                    # an editable scene cut by the window carries on from where it was
+                    cut["scene_offset"] = _f(clip.get("scene_offset")) + rel
                 if na > fa:
                     _shift_source(cut, clip, assets.get(str(clip.get("asset_id") or "")), rel, fps)
                     for field in ("transform_keys", "region_keys"):
