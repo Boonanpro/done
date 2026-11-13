@@ -93,16 +93,34 @@ function SceneRows({ clipId, fns }: { clipId: string; fns: React.MutableRefObjec
   );
 }
 
+// 絵の帯と波形の読み込みは同時に2つまで。ブラウザが1つの住所に張れる接続は6本しかなく、
+// 絵を一度に何十も頼むと、プレビューの映像の読み込みが順番待ちになって再生が始まらなかった（2026-11-13 試し）
+let sideLoads = 0;
+const sideQueue: Array<() => void> = [];
+function sideLoad<T>(run: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const go = () => {
+      sideLoads += 1;
+      void run().then(resolve, () => resolve(undefined as T)).finally(() => {
+        sideLoads -= 1;
+        const next = sideQueue.shift();
+        if (next) next();
+      });
+    };
+    if (sideLoads < 2) go(); else sideQueue.push(go);
+  });
+}
+
 // --- 波形: 素材ごとに1回だけ読む（1秒に100個の山、0〜255） ---------------------------------------
 const PEAKS_PER_SEC = 100;
 const peaksCache = new Map<string, Promise<Uint8Array | null>>();
 function loadPeaks(url: string): Promise<Uint8Array | null> {
   let p = peaksCache.get(url);
   if (!p) {
-    p = fetch(url, { credentials: 'include' })
+    p = sideLoad(() => fetch(url, { credentials: 'include' })
       .then((r) => (r.ok ? r.arrayBuffer() : null))
       .then((b) => (b ? new Uint8Array(b) : null))
-      .catch(() => null);
+      .catch(() => null));
     peaksCache.set(url, p);
     void p.then((v) => { if (!v) window.setTimeout(() => peaksCache.delete(url), 15000); }); // 作れなかった時は少し後にまた頼む
   }
@@ -120,13 +138,13 @@ function useStripAspect(url: string | undefined): number | null {
     let alive = true;
     let p = stripAspect.get(url);
     if (p === undefined) {
-      p = new Promise<number>((resolve) => {
+      p = sideLoad(() => new Promise<number>((resolve) => {
         const img = new Image();
         img.decoding = 'async';
         img.onload = () => { const a = img.naturalWidth / STRIP_FRAMES / Math.max(1, img.naturalHeight); stripAspect.set(url, a); resolve(a); };
-        img.onerror = () => { stripAspect.delete(url); resolve(0); };
+        img.onerror = () => { window.setTimeout(() => stripAspect.delete(url), 15000); resolve(0); };
         img.src = url;
-      });
+      }));
       stripAspect.set(url, p);
     }
     void Promise.resolve(p).then((a) => { if (alive && a) setAspect(a); });

@@ -5869,13 +5869,31 @@ async def _filmstrip(room_id: str, asset: dict[str, Any], minute: int) -> Path |
         tmp = out.with_name(out.stem + ".tmp.jpg")
         n = FILMSTRIP_SEC // FILMSTRIP_EVERY
 
+        meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        dur = float(meta.get("duration") or 0) or float((_probe_video(src) or {}).get("duration") or 0)
+
         def _run() -> bool:
-            # 2秒ごとの位置へそれぞれ飛んで1コマずつ取る（1分を全部解読するより速い）
+            # 2秒ごとの位置へそれぞれ飛んで1コマずつ取る（1分を全部解読するより速い）。
+            # 素材の終わりより後の位置は最後の絵にする（短い素材で終わりの外へ飛ぶと何も取れず失敗していた）
+            want = [minute * FILMSTRIP_SEC + k * FILMSTRIP_EVERY for k in range(n)]
+            if dur > 0:
+                want = [max(0.0, min(w, dur - 0.1)) for w in want]
+            uniq = sorted(set(round(w, 2) for w in want))
             args = [_ffmpeg(), "-y", "-v", "error"]
-            for k in range(n):
-                args += ["-ss", f"{minute * FILMSTRIP_SEC + k * FILMSTRIP_EVERY:.3f}", "-i", str(src)]
-            parts = "".join(f"[{k}:v:0]trim=end_frame=1,scale=-2:{FILMSTRIP_H},setsar=1[v{k}];" for k in range(n))
-            filt = parts + "".join(f"[v{k}]" for k in range(n)) + f"hstack=inputs={n}[out]"
+            for w in uniq:
+                args += ["-ss", f"{w:.3f}", "-i", str(src)]
+            uses = [uniq.index(round(w, 2)) for w in want]
+            parts = ""
+            for i in range(len(uniq)):
+                c = uses.count(i)
+                outs = "".join(f"[u{i}_{j}]" for j in range(c))
+                parts += f"[{i}:v:0]trim=end_frame=1,scale=-2:{FILMSTRIP_H},setsar=1,split={c}{outs};"
+            seen = [0] * len(uniq)
+            order = ""
+            for i in uses:
+                order += f"[u{i}_{seen[i]}]"
+                seen[i] += 1
+            filt = parts + order + f"hstack=inputs={n}[out]"
             args += ["-filter_complex", filt, "-map", "[out]", "-frames:v", "1", "-q:v", "6", str(tmp)]
             r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
