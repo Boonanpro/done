@@ -1300,7 +1300,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
 
       const drawn = drawFrame(t);
       // 映像か音が時計に追いついていない: 0.15秒続いたら、全部止めてそろうまで待つ（時計だけ進めない）
-      const visualOk = drawn && (!gate || visualReadyAt(t, 'run'));
+      const visualOk = drawn && visualReadyAt(t, 'run');
       if (!visualOk) { const st = previewStats(); st.frozenMs = (st.frozenMs || 0) + dtMs; }
       if (gate && (!visualOk || audioGap)) {
         if (!badSince) badSince = nowWall;
