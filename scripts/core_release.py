@@ -39,7 +39,10 @@ def port_free(port):
 
 def link_shared(destination, live):
     """Runtime data/artifacts are shared, tracked Python code is immutable."""
-    for relative in ('.env', '.data', '.tmp', 'uploads', 'frontend/src/app/artifacts', 'frontend/public/artifacts'):
+    # app/static/vendor: third-party scripts (GSAP for the editor's scene clips, model-viewer, the Vimeo player) are
+    # gitignored (`vendor/`), so a release built from the committed tree had none and served them as 500
+    # (2026-11-13: scene clips drew nothing in the editor — "gsap is not defined").
+    for relative in ('.env', '.data', '.tmp', 'uploads', 'frontend/src/app/artifacts', 'frontend/public/artifacts', 'app/static/vendor'):
         target, source = destination / relative, live / relative
         if source.exists() and not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
