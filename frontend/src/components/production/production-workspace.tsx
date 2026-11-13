@@ -96,6 +96,9 @@ function sequenceAssetForEditor(asset: ProductionAsset) {
     thumbnail_url: asset.thumbnail_url || undefined,
     // クリップに載せる絵（&t=秒 でその所の絵）と、音の波形。無ければ最初に頼まれた時にサーバーが作る
     thumb_base: asset.kind === 'video' || asset.kind === 'image' ? assetThumbBase(asset) : undefined,
+    filmstrip_base: asset.kind === 'video'
+      ? `/api/v1/production-assets/filmstrip?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}`
+      : undefined,
     peaks_url: asset.kind === 'video' || asset.kind === 'audio'
       ? `/api/v1/production-assets/peaks?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}`
       : undefined,

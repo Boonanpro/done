@@ -224,6 +224,8 @@ export type SequenceAsset = {
   thumbnail_url?: string | null;
   /** クリップに載せる絵の住所（&t=秒 を足すとその所の絵）。無ければサーバーが作る */
   thumb_base?: string | null;
+  /** 動画の絵の帯（&m=分 を足すと、その1分を2秒ごとに30コマ並べた1枚） */
+  filmstrip_base?: string | null;
   /** 音の波形（1秒に100個の山） */
   peaks_url?: string | null;
   label?: string | null;
@@ -3635,8 +3637,13 @@ export function VideoReviewEditor({
                               // 絵: 動画はクリップが使っている所の絵、画像はその画像（サーバーが小さくして返す）
                               const thumbBase = clipAsset?.thumb_base || null;
                               const thumb = !isVideo || isScene ? undefined
-                                : thumbBase ? (isImage ? thumbBase : `${thumbBase}&t=${Math.floor(srcStart + 0.5)}`)
-                                  : clipAsset?.thumbnail_url || undefined;
+                                : isImage ? thumbBase || clipAsset?.thumbnail_url || undefined
+                                  : clipAsset?.filmstrip_base ? undefined : clipAsset?.thumbnail_url || undefined;
+                              // 動画は、使っている所を含む1分の絵の帯（1分に1回の読み込みを、その1分のクリップ全部で使う）
+                              const stripSec = Math.max(0, srcStart + 0.5);
+                              const strip = isVideo && !isScene && !isImage && clipAsset?.filmstrip_base
+                                ? `${clipAsset.filmstrip_base}&m=${Math.floor(stripSec / 60)}` : undefined;
+                              const stripIndex = Math.floor((stripSec % 60) / 2);
                               const widthPx = trackPx > 0 ? (width / 100) * trackPx : 200;
                               return (
                                 <ClipBox
@@ -3648,6 +3655,8 @@ export function VideoReviewEditor({
                                   kind={kind}
                                   label={labelText}
                                   thumb={thumb}
+                                  strip={strip}
+                                  stripIndex={stripIndex}
                                   peaksUrl={item.itemType === 'audio' ? clipAsset?.peaks_url || undefined : undefined}
                                   sourceStart={srcStart}
                                   sourceEnd={srcEnd}

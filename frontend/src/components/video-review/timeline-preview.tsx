@@ -476,6 +476,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const PRELOAD_AHEAD = 16;
   const WINDOW_STEP = 3;
   const loadBucket = Math.floor((currentTime || 0) / WINDOW_STEP);
+  // 映像の要素は、今と、この先数秒に始まるクリップの分だけ持つ。前は前後22秒ぶん（スヤさん1本目で約8本）を
+  // 全部読み込ませていて、同じ録画を8本が奪い合い、今のクリップの要素が読み込めずに映像が止まっていた
+  // （家の外の回線で、再生を押しても3秒間ずっと絵が止まったまま。2026-11-13）。
+  const VIDEO_BEHIND = 0.5;
+  const VIDEO_AHEAD = 4;
+  const videoBucket = Math.floor((currentTime || 0) / 1);
   useEffect(() => {
     const map = audiosRef.current;
     if (useWebAudio && !webAudioBroken) { for (const [, el] of map) el.remove(); map.clear(); return; }
@@ -520,8 +526,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // playback; while paused the canvas comes from WebCodecs, so this reconcile is never visible.
   useEffect(() => {
     const map = videosRef.current;
-    const lo = (currentTime || 0) - PRELOAD_BEHIND;
-    const hi = (currentTime || 0) + PRELOAD_AHEAD;
+    const lo = (currentTime || 0) - VIDEO_BEHIND;
+    const hi = (currentTime || 0) + VIDEO_AHEAD;
     const wanted = new Map<string, string>();
     for (const vc of visualClips) {
       const aid = String(vc.clip.asset_id || '');
@@ -552,9 +558,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       document.body.appendChild(v);
       map.set(cid, v);
     }
-    for (const list of orphansByAsset.values()) for (const el of list) el.remove();
+    // 使わなくなった要素は読み込みも止める（DOM から外すだけでは読み込みが続いて回線を取る）
+    for (const list of orphansByAsset.values()) for (const el of list) { el.pause(); el.removeAttribute('src'); try { el.load(); } catch { /* noop */ } el.remove(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visualClips, assetById, loadBucket]);
+  }, [visualClips, assetById, videoBucket]);
 
   // full unmount cleanup
   useEffect(() => {

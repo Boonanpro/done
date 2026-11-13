@@ -5842,6 +5842,64 @@ async def _peaks_for(room_id: str, asset: dict[str, Any]) -> Path | None:
         return out if ok else None
 
 
+FILMSTRIP_SEC = 60      # 1枚の帯に入れる長さ
+FILMSTRIP_EVERY = 2     # 何秒ごとの絵か（1枚の帯に30コマ）
+FILMSTRIP_H = 90
+
+
+async def _filmstrip(room_id: str, asset: dict[str, Any], minute: int) -> Path | None:
+    """素材の minute 分目の1分間の絵を、2秒ごとに30コマ横に並べた1枚（クリップに載せる絵）。
+    クリップごとに1枚ずつ頼むと、600個のクリップで数百回の要求になり、ブラウザの同時接続を埋めて
+    プレビューの映像の読み込みを止めていた（2026-11-13 試し）。1分ごとにまとめて1回にする。"""
+    global _THUMB_SEM
+    asset_id = str(asset.get("id") or "")
+    src = _first_file(asset, ("view_path", "proxy_path", "local_path"))
+    if not asset_id or not src or _is_image_asset(asset, src):
+        return None
+    out_dir = _room_dir(room_id) / "thumbs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{asset_id}_strip{minute}.jpg"
+    if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    if _THUMB_SEM is None:
+        _THUMB_SEM = asyncio.Semaphore(3)
+    async with _THUMB_SEM:
+        if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+            return out
+        tmp = out.with_name(out.stem + ".tmp.jpg")
+        n = FILMSTRIP_SEC // FILMSTRIP_EVERY
+
+        def _run() -> bool:
+            # 2秒ごとの位置へそれぞれ飛んで1コマずつ取る（1分を全部解読するより速い）
+            args = [_ffmpeg(), "-y", "-v", "error"]
+            for k in range(n):
+                args += ["-ss", f"{minute * FILMSTRIP_SEC + k * FILMSTRIP_EVERY:.3f}", "-i", str(src)]
+            parts = "".join(f"[{k}:v:0]trim=end_frame=1,scale=-2:{FILMSTRIP_H},setsar=1[v{k}];" for k in range(n))
+            filt = parts + "".join(f"[v{k}]" for k in range(n)) + f"hstack=inputs={n}[out]"
+            args += ["-filter_complex", filt, "-map", "[out]", "-frames:v", "1", "-q:v", "6", str(tmp)]
+            r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0
+
+        ok = await asyncio.to_thread(_run)
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            return None
+        tmp.replace(out)
+        return out
+
+
+@router.get("/filmstrip")
+async def get_asset_filmstrip(room_id: str = Query(...), asset_id: str = Query(...), m: int = Query(0, ge=0)):
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = await _filmstrip(room_id, asset, m)
+    if not path:
+        raise HTTPException(status_code=404, detail="no picture")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
 @router.get("/peaks")
 async def get_asset_peaks(room_id: str = Query(...), asset_id: str = Query(...)):
     asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)

@@ -41,6 +41,9 @@ type Props = {
   kind: ClipKind;
   label: string;
   thumb?: string;
+  /** 動画: 素材の1分ぶんを2秒ごとに30コマ並べた帯と、そのうち何コマ目か（クリップの使っている所の絵） */
+  strip?: string;
+  stripIndex?: number;
   narrow: boolean;  // 画面で数ピクセルしかない時は、端のつまみと文字を描かない（部品を5分の1に）
   selected: boolean;
   linkedSelected: boolean;
@@ -104,6 +107,32 @@ function loadPeaks(url: string): Promise<Uint8Array | null> {
     void p.then((v) => { if (!v) window.setTimeout(() => peaksCache.delete(url), 15000); }); // 作れなかった時は少し後にまた頼む
   }
   return p;
+}
+
+// --- 絵の帯: 帯ごとに1回だけ読み、1コマの縦横比を覚える --------------------------------------------
+const STRIP_FRAMES = 30;
+const stripAspect = new Map<string, number | Promise<number>>();
+function useStripAspect(url: string | undefined): number | null {
+  const known = url ? stripAspect.get(url) : undefined;
+  const [aspect, setAspect] = useState<number | null>(typeof known === 'number' ? known : null);
+  useEffect(() => {
+    if (!url) return;
+    let alive = true;
+    let p = stripAspect.get(url);
+    if (p === undefined) {
+      p = new Promise<number>((resolve) => {
+        const img = new Image();
+        img.decoding = 'async';
+        img.onload = () => { const a = img.naturalWidth / STRIP_FRAMES / Math.max(1, img.naturalHeight); stripAspect.set(url, a); resolve(a); };
+        img.onerror = () => { stripAspect.delete(url); resolve(0); };
+        img.src = url;
+      });
+      stripAspect.set(url, p);
+    }
+    void Promise.resolve(p).then((a) => { if (alive && a) setAspect(a); });
+    return () => { alive = false; };
+  }, [url]);
+  return url ? aspect : null;
 }
 
 // 音量の線の位置: 下端=0%、真ん中=100%、上端=200%
@@ -192,10 +221,11 @@ function VolumeLine({ clipId, volume, fns, onLive }: {
   );
 }
 
-function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, narrow, selected, linkedSelected, touch, appear, vanish, title, peaksUrl, sourceStart = 0, sourceEnd = 0, volume = 1, fns }: Props) {
+function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip, stripIndex = 0, narrow, selected, linkedSelected, touch, appear, vanish, title, peaksUrl, sourceStart = 0, sourceEnd = 0, volume = 1, fns }: Props) {
   const look = CLIP_KIND_STYLE[kind];
   const isAudio = kind === 'voice' || kind === 'bgm' || kind === 'se';
   const [liveVol, setLiveVol] = useState<number | null>(null);
+  const aspect = useStripAspect(!narrow && widthPx >= 40 ? strip : undefined);
   const vol = liveVol ?? volume;
   const cls = `absolute flex cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${look.dark ? '' : 'text-white'} ${look.cls} ${
     touch ? 'dan-touch' : ''} ${appear ? 'dan-appear' : ''} ${vanish ? 'dan-vanish' : ''} ${
@@ -243,7 +273,17 @@ function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, narrow
         onPointerDown={(event) => fns.current.startDrag(event, clipId, 'move')}
         onDoubleClick={(event) => { event.stopPropagation(); fns.current.focusClip(clipId); }}
       >
-        {showThumb ? (
+        {strip && aspect && widthPx >= 40 ? (
+          <div
+            className="pointer-events-none h-full max-w-[60%] shrink-0 bg-no-repeat"
+            style={{
+              aspectRatio: String(aspect),
+              backgroundImage: `url(${strip})`,
+              backgroundSize: `${STRIP_FRAMES * 100}% 100%`,
+              backgroundPosition: `${(Math.max(0, Math.min(STRIP_FRAMES - 1, stripIndex)) / (STRIP_FRAMES - 1)) * 100}% 0`,
+            }}
+          />
+        ) : showThumb ? (
           <img
             src={thumb}
             alt=""
