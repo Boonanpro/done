@@ -32,7 +32,7 @@ INSTRUCTIONS = """あなたはダン。音声通話の判断と実行を受け�
 - 途中の作業開始通知や相談の質問をチャットに書かない。決まったことは通話後にまとめて残る。
 - 本人の保存情報を聞かれたら get_saved_information。無ければ「保存されていません」と言い、教えてくれれば保存できると添える。番号は1桁ずつ読める形（例: ゼロはちゼロなな）で返す。
 - 過去の会話・以前の作業・メールの話は search_records。ウェブの一般情報は web_search。場所を言わない天気は get_location の現在地を使う。近くの店・施設は dan_tool の places（中心を省けば本人の現在地。距離順で一瞬）で候補を出し、営業時間や評判が要る数件だけ web_search で確かめる。
-- 人からの連絡（「〇〇さんから連絡来た？」「メッセージ来てる？」「その中身は？」）は、まず read_chatwork で Chatwork を今読む（数秒。ブラウザで開かない）。名前が言われたら who に入れる。届いた日時・誰から・何の件か・本人が返事済みかを短く答え、中身を聞かれたら要点を話す。Chatwork に無ければそう言い、メールなど他を見るかは本人の頼みに従う。
+- 人からの連絡（「〇〇さんから連絡来た？」「メッセージ来てる？」「その中身は？」）は、read_chatwork・read_mail・read_line を同じ手で並べて今読む（どれも数秒。ブラウザやスマホの画面を開かない）。名前が言われたら3つとも who に入れる。届いた日時・誰から・どこで（Chatwork・どのメール・個人のLINE・どの公式LINE）・何の件か・本人が返事済みかを短く答え、中身を聞かれたら要点を話す。どこにも無ければ「Chatwork・メール・LINE には見当たらない」と言う。読めなかった所があれば、届いていないとは言わず、そこは読めなかったと言う。個人のLINEは Galaxy に届いた通知で読むので、本人が既に読んだ古い分や写真の中身は分からないことがある。もっと前の分や写真を見てと言われた時だけ、LINE を開いて見る（30秒ほどかかると先に言う）。
 - ファイル・画像・動画・資料を「出して」「見せて」「貼って」「送って（この画面に）」と言われたら show_in_chat（1秒で本人のチャット画面に出る。画像・動画はその場に表示、資料は押せば開くリンク）。どのファイルか分からなければ room_files でこの部屋のファイル一覧（新しい順・何の資料か）を見て選ぶ。作業に渡したり、パソコンで開いたりしない。出せたら「出しました」とだけ言う。
 - パソコンでサイトやアプリを開くだけなら open_on_pc（本人が「パソコンで」と言った時だけ。ファイルを見せる用途には使わない）。ほかの操作（ブラウザ・アプリ・ファイル・コマンド・送信案・スキルの手順など）はダンの道具で自分でやってよい。保存済みの記事の表示、表示中の画面操作、過去の会話や作業状況の確認は、その情報を直接読む道具で自分で行う。他の部屋の情報は command_center の search/read/status で読み、確認のために delegate/report で別の会話を起こさない。数十秒で終わる操作は自分でやる。何分もかかる作業だけ start_work で作業担当に渡す（結果は後で別に届く）。道具を使っている間も会話は続く。
 - GoogleドキュメントやLINEなど外の画面は、dan_toolのbrowser/phoneで操作する。同じ操作セッションの実画面は自動で表示される。対応サイト・アプリの個別登録は不要。画面は操作ごとに更新する写真で、本人が直接押せるものではない。
@@ -58,7 +58,7 @@ INSTRUCTIONS = """あなたはダン。音声通話の判断と実行を受け�
 - 時刻・料金・乗り場など正確さが要る事実は、それを直接調べられる所（経路検索サイトなど）で確かめて答える。検索結果の断片から作らない。
 - ダンの仕組み（ブラウザの起動・プロセス・設定・コード）が原因で止まったら、その場で回避のために変えない（プロセスを止める・起動し直す・コードを書き換えるなど）。どこが原因で止まったかを報告し、直すなら直し方を添える。"""
 
-READ_MANY = ('web_search', 'get_calendar', 'get_location', 'room_files', 'job_status', 'search_records', 'read_chatwork')
+READ_MANY = ('web_search', 'get_calendar', 'get_location', 'room_files', 'job_status', 'search_records', 'read_chatwork', 'read_mail', 'read_line')
 
 async def read_many(requests, user_id, room_id, dialogue):
     # Validate the entire batch before any read; mutations and recursive batches are never admitted.
@@ -87,6 +87,10 @@ TOOLS = [
     {'type': 'function', 'name': 'read_chatwork', 'description': '本人の Chatwork に届いたメッセージを API で今読む（読むだけ・数秒）。who に相手か部屋の名前を入れるとその部屋とその人の発言、省くと最近7日に動いた部屋の最新（1対1の部屋を先に）。各部屋に未読数・本人が最後に返信済みか・各発言の日時と送り主（本人は「本人」）が付く。',
      'parameters': {'type': 'object', 'properties': {'who': {'type': 'string', 'description': '相手か部屋の名前（例: 中村）。聞こえた字が違うこともあるので、合わなければ省いて読み直す'},
                                                     'messages': {'type': 'integer', 'minimum': 1, 'maximum': 30, 'description': '1部屋あたりの最新の件数（既定5）'}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'read_mail', 'description': '本人のメールの受信箱3つ（Gmail 2つ・iCloud）を今読む（読むだけ・数秒）。省くと最近7日に人から届いたメール（お知らせ・広告は除く）、who に相手の名前・会社名・アドレスの一部を入れるとその人のメール（120日前まで）。各メールに日時・差出人・件名・本文（引用は除く）・本人が後で返信済みかが付く。',
+     'parameters': {'type': 'object', 'properties': {'who': {'type': 'string', 'description': '相手の名前・会社名・アドレスの一部だけ（例: 中村、DisplayModule。どこに来たかの言葉は入れない）。聞こえた字が違うこともあるので、合わなければ省いて読み直す'}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'read_line', 'description': '本人の LINE に届いたメッセージを今読む（読むだけ・1秒ほど）。個人のLINEは Galaxy に届いた通知（未読と、通知の記録に残っている分。トーク名・送り主・本文・時刻）、公式アカウント（イツキ・VIP・ふくろうP・ポルノアンチ）は届いたメッセージの記録。省くと最近7日の全部、who に相手かトークの名前でその人の分。',
+     'parameters': {'type': 'object', 'properties': {'who': {'type': 'string', 'description': '相手かトーク・グループの名前だけ（例: 上野。どの公式LINEかの言葉は入れない）'}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_location', 'description': '本人のスマホが最後に知らせた現在地（町名まで）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_calendar', 'description': '本人のつながっている全カレンダー（複数アカウント）の予定。既定は今日から。過去や先の日なら from（YYYY-MM-DD）とその日からの日数 days。各予定にどのアカウントか付く。読めなかったアカウントは not_read、全部切れていれば expired。',
      'parameters': {'type': 'object', 'properties': {'days': {'type': 'integer', 'minimum': 1, 'maximum': 60}, 'from': {'type': 'string', 'description': 'YYYY-MM-DD（省略時は今日）'}}, 'additionalProperties': False}},
@@ -421,6 +425,14 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
             return {'error': str(exc), 'note': 'Chatwork を今は読めなかった。届いていないとは言わない。'}
         return {'chatwork': chatwork_read.spoken_digest(found, limit=6000), 'note': found.get('note'),
                 'source': {'what': '本人の Chatwork（API で今読んだ）', 'at': found.get('read_at')}}
+    if name == 'read_mail':
+        from app.services import contact_read
+        found = await contact_read.mail(str(args.get('who') or ''))
+        return {'mail': contact_read.mail_digest(found)[:7000], 'source': {'what': '本人のメールの受信箱（IMAP で今読んだ）', 'at': found.get('read_at')}}
+    if name == 'read_line':
+        from app.services import contact_read
+        found = await contact_read.line(user_id, str(args.get('who') or ''))
+        return {'line': contact_read.line_digest(found)[:6000], 'source': {'what': '個人のLINE（Galaxy の通知）と公式アカウントの受信記録', 'at': found.get('read_at')}}
     if name == 'get_location':
         from app.services.user_location import tool, current
         here = current(user_id)

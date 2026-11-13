@@ -1,0 +1,24 @@
+{
+ "note": "作った例（調整に使った）。メール: 税理士の金さん。最新は 11/5 10:23「10月試算表」。答えの中身は 11/13 時点の本物の受信箱・記録。中身が変わったら answer_all を今の最新に合わせる。",
+ "turns": [
+  {
+   "role": "user",
+   "text": "金さんからメール来てる？"
+  }
+ ],
+ "expect": {
+  "route": "contact",
+  "tools_none": [
+   "start_work",
+   "run_in_background"
+  ],
+  "answer_all": [
+   "試算表"
+  ],
+  "answer_none": [
+   "確認できな",
+   "分からな",
+   "開いて見"
+  ]
+ }
+}

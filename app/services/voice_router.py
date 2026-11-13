@@ -159,6 +159,23 @@ def turns_text(turns, limit=12000):
     return text[-limit:]
 
 
+
+NAMED = re.compile(r'([一-龥ぁ-んァ-ヶーA-Za-z]{1,20}?)(?:さん|様|さま|先生|社長|くん|君|ちゃん|氏)')
+
+NOT_NAMES = {'たく', '客', 'みな', '皆', 'お客', '奥', 'お父', 'お母', 'お兄', 'お姉', 'おじ', 'おば', '誰', '誰か', 'じい', 'ばあ', 'おじい', 'おばあ'}
+
+
+def named_person(words):
+    """The person the owner named in 「中村さんから連絡来てる？」 (「中村」), else ''. Only a name with an honorific counts."""
+    found = NAMED.findall(str(words or '')[-200:])
+    if not found:
+        return ''
+    name = found[-1]
+    name = re.sub(r'の$', '', name)              # 「税理士の先生」 -> 税理士 (also in the office's name of the mails)
+    if re.search(r'[一-龥ァ-ヶA-Za-z]', name):   # 「あの中村さん」「公式LINEに高橋さん」: the words before the name go
+        name = re.split(r'[ぁ-ん]', name)[-1] or name
+    return '' if name in NOT_NAMES else name
+
 class Router:
     """The delegations of one call (voice_sideband creates it when this server owns the call)."""
     def __init__(self, session_id, user_id, room_id, dialogue, send, record, spoke, backend=None, stage=None, end_call=None):
@@ -536,18 +553,19 @@ class Router:
         return await self.luna(delegation_id, created)
 
     async def contact_context(self):
-        """Chatwork as it is now, read before the backend's first round so 「〇〇さんから連絡来た？」 is answered in one round
-        (11/12 22:44: the same question took about 6 minutes, chat Dan opening Chatwork in the browser)."""
-        from app.services import chatwork_read
-        began = time.monotonic()
+        """Chatwork, mail and LINE as they are now, read side by side before the backend's first round, so
+        「〇〇さんから連絡来た？」 is answered in one round wherever the person wrote (11/12 22:44: the same question took
+        about 6 minutes, chat Dan opening Chatwork in the browser; mail and LINE went the same way until 11/13)."""
+        from app.services import contact_read
+        who = named_person(self.last_words or self.request_words())
         try:
-            text = chatwork_read.spoken_digest(await chatwork_read.read(self.user_id), limit=5000)
+            text, ms = await contact_read.everything(self.user_id, who=who)
         except Exception as exc:
             self.record('contact_read_failed', error_type=type(exc).__name__)
             return ''
-        self.record('contact_read', ms=round((time.monotonic() - began) * 1000), chars=len(text))
-        return (chr(10) * 2 + text + chr(10) + '（これは今読んだ Chatwork の最近の部屋。ここに無い人・古い発言は read_chatwork の who で読む。'
-                'メールや LINE はここに含まれない。）')
+        self.record('contact_read', ms=ms, chars=len(text), who=bool(who))
+        return (chr(10) * 2 + text + chr(10) + ('（これは今読んだ Chatwork・メール・LINE。' + (f'「{who}」の名前で絞ってある。' if who else '')
+                + '別の人・もっと前の分は read_chatwork・read_mail・read_line の who で読み直す。）'))
 
     async def luna(self, delegation_id, created, extra=''):
         """The earlier backend for what has no fixed route: gpt-6-luna with the call's tools, the way the Responses

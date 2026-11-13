@@ -1,0 +1,530 @@
+    NotificationRecord(0x03917c44: pkg=jp.naver.line.android user=UserHandle{0} id=16880000 tag=null importance=4 key=0|jp.naver.line.android|16880000|null|10406: Notification(channel=jp.nav... shortcut=c69e451dd08c3229212903bd655575527 contentView=null vibrate=null sound=null tick defaults=0 flags=SHOW_LIGHTS|AUTO_CANCEL|GROUP_SUMMARY color=0xff20c601 category=msg groupKey=NOTIFICATION_GROUP_MESSAGE vis=PRIVATE semFlags=0x0 semPriority=0 semMissedCount=0 semScenarioType=0))
+      uid=10406 userId=0
+      opPkg=jp.naver.line.android
+      icon=Icon(typ=RESOURCE pkg=jp.naver.line.android id=0x7f080cd6)
+      flags=SHOW_LIGHTS|AUTO_CANCEL|GROUP_SUMMARY
+      originalFlags=SHOW_LIGHTS|AUTO_CANCEL|GROUP_SUMMARY
+      pri=1
+      key=0|jp.naver.line.android|16880000|null|10406
+      seen=false
+      groupKey=0|jp.naver.line.android|g:NOTIFICATION_GROUP_MESSAGE
+      notification=
+            fullscreenIntent=null
+            contentIntent=PendingIntent{966d12d: PendingIntentRecord{5c741ad jp.naver.line.android startActivity (allowlist: 1a3dfa5:+30s0ms/0/NOTIFICATION_SERVICE/NotificationManagerService)}}
+            deleteIntent=null
+            number=0
+            groupAlertBehavior=2
+            when=1794528286875/1794528286875
+            tickerText=上野花子 : 記事を書きました。新しい記事...
+            vis=0
+            contentView=null
+            bigContentView=null
+            headsUpContentView=null
+            color=0xff20c601
+            timeout=PT72H
+            parcelDataSize=6120
+            mAllowSystemGeneratedContextualActions=true
+            extras={
+                android.title=String (上野花子)
+                android.reduced.images=Boolean (true)
+                android.subText=String (研究会グループ)
+                line.chat.id=String (c69e451dd08c3229212903bd655575527)
+                android.template=String (android.app.Notification$BigTextStyle)
+                android.showChronometer=Boolean (false)
+                android.text=String (記事を書きました。新しい記事です
+https://example.com/a
+                android.progress=Integer (0)
+                androidx.core.app.extra.COMPAT_TEMPLATE=String (androidx.core.app.NotificationCompat$BigTextStyle)
+                android.progressMax=Integer (0)
+                android.appInfo=ApplicationInfo (ApplicationInfo{a50f662 jp.naver.line.android})
+                android.showWhen=Boolean (true)
+                android.largeIcon=Icon (Icon(typ=BITMAP size=108x108))
+                android.bigText=String (記事を書きました。新しい記事です
+https://example.com/a
+                android.infoText=null
+                android.wearable.EXTENSIONS=Bundle (Bundle[{bridgeTag=MESSAGE_NOTIFICATION}])
+                android.progressIndeterminate=Boolean (false)
+                android.remoteInputHistory=null
+                android.shortCriticalText=null
+                line.message.id=String (640381272212111841)
+                IS_LIMITED_NETWORK_MODE_SUPPORTED=Boolean (true)
+            }
+      publicNotification=
+            None
+      stats=SingleNotificationStats{posttimeElapsedMs=35641030, posttimeToFirstClickMs=-1, posttimeToDismissMs=-1, airtimeCount=0, airtimeMs=0, currentAirtimeStartElapsedMs=-1, airtimeExpandedMs=0, posttimeToFirstVisibleExpansionMs=-1, currentAirtimeExpandedStartElapsedMs=-1, requestedImportance=4, naturalImportance=4, isNoisy=true}
+      mContactAffinity=0.0
+      mPackagePriority=0
+      mPackageVisibility=0
+      mSystemImportance=UNSPECIFIED
+      mAsstImportance=UNSPECIFIED
+      mRuleImportance=UNSPECIFIED
+      mImportance=HIGH
+      mImportanceExplanation=app
+      mProposedImportance=UNSPECIFIED
+      mIsAppImportanceLocked=true
+      mSensitiveContent=false
+      mCanceledAfterLifetimeExtension=false
+      mIntercept=true
+      mHidden==false
+      mGlobalSortKey=crtcl=0x0002:intrsv=2:grnk=0x0004:gsmry=0:nsk:rnk=0x0003
+      mRankingTimeMs=1794528286875(2026-11-13 09:04:46.875+0900)
+      mCreationTimeMs=1794180623089(2026-11-09 08:30:23.089+0900)
+      mVisibleSinceMs=0(1970-01-01 09:00:00.000+0900)
+      mUpdateTimeMs=1794528286911(2026-11-13 09:04:46.911+0900)
+      mInterruptionTimeMs=1794528286911(2026-11-13 09:04:46.911+0900)
+      mSuppressedVisualEffects= 22
+      mSound= android.resource://jp.naver.line.android/raw/push_bell_b
+      mVibration= Composed{segments=[Step{amplitude=0.0, duration=0}, Step{amplitude=-1.0, duration=330}, Step{amplitude=0.0, duration=160}, Step{amplitude=-1.0, duration=100}, Step{amplitude=0.0, duration=80}, Step{amplitude=-1.0, duration=140}, Step{amplitude=0.0, duration=0}], repeat=-1, mMagnitudeType=TYPE_EXTRA}
+      mAttributes= AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null
+      mLight= Light{color=-16711936, onMs=500, offMs=2000}
+      mShowBadge=true
+      mColorized=false
+      mAllowBubble=false
+      isBubble=false
+      mIsInterruptive=false
+      effectiveNotificationChannel=NotificationChannel{mId='jp.nav...', mName=メッセージ通知, mDescription=hasDescription , mImportance=4, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=android.resource://jp.naver.line.android/raw/push_bell_b, mLights=true, mLightColor=-16711936, mVibrationPattern=[0, 330, 160, 100, 80, 140, 0], mVibrationEffect=Composed{segments=[Step{amplitude=0.0, duration=0}, Step{amplitude=-1.0, duration=330}, Step{amplitude=0.0, duration=160}, Step{amplitude=-1.0, duration=100}, Step{amplitude=0.0, duration=80}, Step{amplitude=-1.0, duration=140}, Step{amplitude=0.0, duration=0}], repeat=-1, mMagnitudeType=TYPE_EXTRA}, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=true, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedByOEM=false, mImportanceLockedDefaultApp=false, mOriginalImp=4, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0, isBundle=false, emoji=null, mSoundMissingReason=0}
+      mAdjustments=[]
+      mRuleChannelReason=0
+      mRuleSoundReason=0
+      mRuleLightReason=0
+      shortcut=c69e451dd08c3229212903bd655575527 found valid? false
+      mUserVisOverride=0
+      hasSummarization=false
+      mSummaryStatus=NONE
+      bundleType=0
+      bundleType=0
+      mSuggestionsGeneratedByAssistant=false
+      mNotificationNudgeStatus=2
+      isGrayScaleIcon =false
+      mIsPromotion=false
+    NotificationRecord(0x0156f3f3: pkg=jp.naver.line.android user=UserHandle{0} id=-1596333118 tag=NOTIFICATION_TAG_MESSAGE importance=4 key=0|jp.naver.line.android|-1596333118|NOTIFICATION_TAG_MESSAGE|10406: Notification(channel=jp.nav... shortcut=c69e451dd08c3229212903bd655575527 contentView=null vibrate=null sound=null tick defaults=0 flags=SHOW_LIGHTS|AUTO_CANCEL color=0xff20c601 category=msg groupKey=NOTIFICATION_GROUP_MESSAGE actions=2 vis=PRIVATE semFlags=0x0 semPriority=0 semMissedCount=0 semScenarioType=0))
+      uid=10406 userId=0
+      opPkg=jp.naver.line.android
+      icon=Icon(typ=RESOURCE pkg=jp.naver.line.android id=0x7f080cd6)
+      flags=SHOW_LIGHTS|AUTO_CANCEL
+      originalFlags=SHOW_LIGHTS|AUTO_CANCEL
+      pri=1
+      key=0|jp.naver.line.android|-1596333118|NOTIFICATION_TAG_MESSAGE|10406
+      seen=false
+      groupKey=0|jp.naver.line.android|g:NOTIFICATION_GROUP_MESSAGE
+      notification=
+            fullscreenIntent=null
+            contentIntent=PendingIntent{14c18b0: PendingIntentRecord{36de0d3 jp.naver.line.android startActivity (allowlist: 1a3dfa5:+30s0ms/0/NOTIFICATION_SERVICE/NotificationManagerService)}}
+            deleteIntent=null
+            number=0
+            groupAlertBehavior=2
+            when=1794528286875/1794528286875
+            tickerText=上野花子 : 記事を書きました。新しい記事...
+            vis=0
+            contentView=null
+            bigContentView=null
+            headsUpContentView=null
+            color=0xff20c601
+            timeout=PT72H
+            parcelDataSize=9936
+            mAllowSystemGeneratedContextualActions=true
+            actions={
+                [0] "通知をオフ" -> PendingIntent{50c5329: PendingIntentRecord{b23b09 jp.naver.line.android startService (allowlist: 1a3dfa5:+30s0ms/0/NOTIFICATION_SERVICE/NotificationManagerService)}}
+                [1] "返信" -> PendingIntent{24c16ae: PendingIntentRecord{bd6110e jp.naver.line.android startService (allowlist: 1a3dfa5:+30s0ms/0/NOTIFICATION_SERVICE/NotificationManagerService)}}
+              }
+            extras={
+                android.title=String (研究会グループ: 上野花子)
+                android.reduced.images=Boolean (true)
+                android.conversationTitle=String (研究会グループ)
+                android.subText=String (研究会グループ)
+                line.chat.id=String (c69e451dd08c3229212903bd655575527)
+                android.car.EXTENSIONS=Bundle (Bundle[mParcelledData.dataSize=544])
+                android.template=String (android.app.Notification$MessagingStyle)
+                android.showChronometer=Boolean (false)
+                android.text=String (記事を書きました。新しい記事です
+https://example.com/a
+                android.progress=Integer (0)
+                androidx.core.app.extra.COMPAT_TEMPLATE=String (androidx.core.app.NotificationCompat$MessagingStyle)
+                android.progressMax=Integer (0)
+                android.selfDisplayName=String (みき)
+                android.conversationUnreadMessageCount=Integer (0)
+                android.appInfo=ApplicationInfo (ApplicationInfo{1e2dc4f jp.naver.line.android})
+                android.messages=Bundle[] (1)
+                  [0] Bundle[{extras=Bundle[{MESSAGE_ID=640381272212111841}], sender_person=android.app.Person@860742f5, sender=上野花子, text=記事を書きました。新しい記事です
+https://example.com/a time=1794528286890}]
+                android.showWhen=Boolean (true)
+                android.largeIcon=Icon (Icon(typ=BITMAP size=108x108))
+                android.messagingUser=Person (android.app.Person@2d8d755e)
+                android.infoText=null
+                android.wearable.EXTENSIONS=Bundle (Bundle[{actions=[android.app.Notification$Action@8c6efba, android.app.Notification$Action@d9aee6b, android.app.Notification$Action@15e4dc8], bridgeTag=MESSAGE_NOTIFICATION}])
+                android.progressIndeterminate=Boolean (false)
+                android.remoteInputHistory=null
+                android.shortCriticalText=null
+                line.message.id=String (640381272212111841)
+                android.isGroupConversation=Boolean (false)
+                IS_LIMITED_NETWORK_MODE_SUPPORTED=Boolean (true)
+            }
+      publicNotification=
+            None
+      stats=SingleNotificationStats{posttimeElapsedMs=382321604, posttimeToFirstClickMs=-1, posttimeToDismissMs=-1, airtimeCount=0, airtimeMs=0, currentAirtimeStartElapsedMs=-1, airtimeExpandedMs=0, posttimeToFirstVisibleExpansionMs=-1, currentAirtimeExpandedStartElapsedMs=-1, requestedImportance=4, naturalImportance=4, isNoisy=true}
+      mContactAffinity=0.0
+      mPackagePriority=0
+      mPackageVisibility=0
+      mSystemImportance=UNSPECIFIED
+      mAsstImportance=UNSPECIFIED
+      mRuleImportance=UNSPECIFIED
+      mImportance=HIGH
+      mImportanceExplanation=app
+      mProposedImportance=UNSPECIFIED
+      mIsAppImportanceLocked=true
+      mSensitiveContent=false
+      mCanceledAfterLifetimeExtension=false
+      mIntercept=true
+      mHidden==false
+      mGlobalSortKey=crtcl=0x0002:intrsv=2:grnk=0x0004:gsmry=1:nsk:rnk=0x0004
+      mRankingTimeMs=1794528286875(2026-11-13 09:04:46.875+0900)
+      mCreationTimeMs=1794527303675(2026-11-13 08:48:23.675+0900)
+      mVisibleSinceMs=0(1970-01-01 09:00:00.000+0900)
+      mUpdateTimeMs=1794528286900(2026-11-13 09:04:46.900+0900)
+      mInterruptionTimeMs=1794528286900(2026-11-13 09:04:46.900+0900)
+      mSuppressedVisualEffects= 22
+      mSound= android.resource://jp.naver.line.android/raw/push_bell_b
+      mVibration= Composed{segments=[Step{amplitude=0.0, duration=0}, Step{amplitude=-1.0, duration=330}, Step{amplitude=0.0, duration=160}, Step{amplitude=-1.0, duration=100}, Step{amplitude=0.0, duration=80}, Step{amplitude=-1.0, duration=140}, Step{amplitude=0.0, duration=0}], repeat=-1, mMagnitudeType=TYPE_EXTRA}
+      mAttributes= AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null
+      mLight= Light{color=-16711936, onMs=500, offMs=2000}
+      mShowBadge=true
+      mColorized=false
+      mAllowBubble=false
+      isBubble=false
+      mIsInterruptive=false
+      effectiveNotificationChannel=NotificationChannel{mId='jp.nav...', mName=メッセージ通知, mDescription=hasDescription , mImportance=4, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=android.resource://jp.naver.line.android/raw/push_bell_b, mLights=true, mLightColor=-16711936, mVibrationPattern=[0, 330, 160, 100, 80, 140, 0], mVibrationEffect=Composed{segments=[Step{amplitude=0.0, duration=0}, Step{amplitude=-1.0, duration=330}, Step{amplitude=0.0, duration=160}, Step{amplitude=-1.0, duration=100}, Step{amplitude=0.0, duration=80}, Step{amplitude=-1.0, duration=140}, Step{amplitude=0.0, duration=0}], repeat=-1, mMagnitudeType=TYPE_EXTRA}, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=true, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedByOEM=false, mImportanceLockedDefaultApp=false, mOriginalImp=4, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0, isBundle=false, emoji=null, mSoundMissingReason=0}
+      mAdjustments=[]
+      mRuleChannelReason=0
+      mRuleSoundReason=0
+      mRuleLightReason=0
+      shortcut=c69e451dd08c3229212903bd655575527 found valid? false
+      mUserVisOverride=0
+      hasSummarization=false
+      mSummaryStatus=NONE
+      bundleType=0
+      bundleType=0
+      mSuggestionsGeneratedByAssistant=true
+      mSystemGeneratedSmartActions=
+          [0] "リンクを開く" "Icon(typ=RESOURCE pkg=dev.dan.safeguard id=0x7f0d0002)"-> PendingIntent{18a3e61: PendingIntentRecord{6e44d86 com.google.android.ext.services startActivity}}
+      mSmartReplies=
+            [0] ありがとうございます
+      mNotificationNudgeStatus=2
+      isGrayScaleIcon =false
+      mIsPromotion=false
+    NotificationRecord(0x0b693809: pkg=jp.naver.line.android user=UserHandle{0} id=-1897029526 tag=NOTIFICATION_TAG_MESSAGE importance=4 key=0|jp.naver.line.android|-1897029526|NOTIFICATION_TAG_MESSAGE|10406: Notification(channel=jp.nav... shortcut=ue282117463811ee54ed784102229a2dd contentView=null vibrate=null sound=null tick defaults=0 flags=SHOW_LIGHTS|AUTO_CANCEL color=0xff20c601 category=msg groupKey=NOTIFICATION_GROUP_MESSAGE actions=2 vis=PRIVATE semFlags=0x0 semPriority=0 semMissedCount=0 semScenarioType=0))
+      uid=10406 userId=0
+      opPkg=jp.naver.line.android
+      icon=Icon(typ=RESOURCE pkg=jp.naver.line.android id=0x7f080cd6)
+      flags=SHOW_LIGHTS|AUTO_CANCEL
+      originalFlags=SHOW_LIGHTS|AUTO_CANCEL
+      pri=1
+      key=0|jp.naver.line.android|-1897029526|NOTIFICATION_TAG_MESSAGE|10406
+      seen=false
+      groupKey=0|jp.naver.line.android|g:NOTIFICATION_GROUP_MESSAGE
+      notification=
+            fullscreenIntent=null
+            contentIntent=PendingIntent{ad5ca0e: PendingIntentRecord{d6ecca2 jp.naver.line.android startActivity (allowlist: 1a3dfa5:+30s0ms/0/NOTIFICATION_SERVICE/NotificationManagerService)}}
+            deleteIntent=null
+            number=0
+            groupAlertBehavior=2
+            when=1794378763802/1794378763802
+            tickerText=グルメ公式 : ／
+「焼き鳥 百名店 2026」発表🏆️
+＼
+
+焼...
+            vis=0
+            contentView=null
+            bigContentView=null
+            headsUpContentView=null
+            color=0xff20c601
+            timeout=PT72H
+            parcelDataSize=10272
+            mAllowSystemGeneratedContextualActions=true
+            actions={
+                [0] "通知をオフ" -> PendingIntent{56b7c2f: PendingIntentRecord{feb78f0 jp.naver.line.android startService (allowlist: 1a3dfa5:+30s0ms/0/NOTIFICATION_SERVICE/NotificationManagerService)}}
+                [1] "返信" -> PendingIntent{9f4623c: PendingIntentRecord{1d2ad33 jp.naver.line.android startService (allowlist: 1a3dfa5:+30s0ms/0/NOTIFICATION_SERVICE/NotificationManagerService)}}
+              }
+            extras={
+                android.title=String (グルメ公式)
+                android.reduced.images=Boolean (true)
+                android.subText=null
+                line.chat.id=String (ue282117463811ee54ed784102229a2dd)
+                android.car.EXTENSIONS=Bundle (Bundle[mParcelledData.dataSize=544])
+                pde_first_shown_time_ms=Long (0)
+                android.template=String (android.app.Notification$MessagingStyle)
+                android.showChronometer=Boolean (false)
+                android.text=String (／
+「焼き鳥 百名店 2026」発表🏆️
+＼
+
+焼きたてを気軽に楽しめ、老若男女に愛される焼き鳥)
+                android.progress=Integer (0)
+                androidx.core.app.extra.COMPAT_TEMPLATE=String (androidx.core.app.NotificationCompat$MessagingStyle)
+                android.progressMax=Integer (0)
+                android.selfDisplayName=String (みき)
+                android.conversationUnreadMessageCount=Integer (0)
+                android.appInfo=ApplicationInfo (ApplicationInfo{9644bc5 jp.naver.line.android})
+                android.messages=Bundle[] (1)
+                  [0] Bundle[{extras=Bundle[{MESSAGE_ID=640130145055145989}], sender_person=android.app.Person@ee2a49be, sender=グルメ公式, text=／
+「焼き鳥 百名店 2026」発表🏆️
+＼
+
+焼きたてを気軽に楽しめ、老若男女に愛される焼き鳥, time=1794378763809}]
+                android.showWhen=Boolean (true)
+                pde_noti_action_clicked_count=Integer (0)
+                android.largeIcon=Icon (Icon(typ=BITMAP size=108x108))
+                android.messagingUser=Person (android.app.Person@83e905c4)
+                pde_first_expanded_time_ms=Long (0)
+                android.infoText=null
+                android.wearable.EXTENSIONS=Bundle (Bundle[{actions=[android.app.Notification$Action@1c36628, android.app.Notification$Action@442df41, android.app.Notification$Action@dc50ce6], bridgeTag=MESSAGE_NOTIFICATION}])
+                pde_enqueued_time_ms=Long (1794378764046)
+                pde_noti_clicked_count=Integer (0)
+                pde_noti_id=Integer (-1897029526)
+                android.progressIndeterminate=Boolean (false)
+                android.remoteInputHistory=null
+                pde_noti_pkg=String (jp.naver.line.android)
+                pde_noti_tag=String (NOTIFICATION_TAG_MESSAGE)
+                android.shortCriticalText=null
+                line.message.id=String (640130145055145989)
+                android.isGroupConversation=Boolean (false)
+                IS_LIMITED_NETWORK_MODE_SUPPORTED=Boolean (true)
+            }
+      publicNotification=
+            None
+      stats=SingleNotificationStats{posttimeElapsedMs=233781767, posttimeToFirstClickMs=-1, posttimeToDismissMs=-1, airtimeCount=0, airtimeMs=0, currentAirtimeStartElapsedMs=-1, airtimeExpandedMs=0, posttimeToFirstVisibleExpansionMs=-1, currentAirtimeExpandedStartElapsedMs=-1, requestedImportance=4, naturalImportance=4, isNoisy=true}
+      mContactAffinity=0.0
+      mPackagePriority=0
+      mPackageVisibility=0
+      mSystemImportance=UNSPECIFIED
+      mAsstImportance=UNSPECIFIED
+      mRuleImportance=UNSPECIFIED
+      mImportance=HIGH
+      mImportanceExplanation=app
+      mProposedImportance=UNSPECIFIED
+      mIsAppImportanceLocked=true
+      mSensitiveContent=false
+      mCanceledAfterLifetimeExtension=false
+      mIntercept=true
+      mHidden==false
+      mGlobalSortKey=crtcl=0x0002:intrsv=2:grnk=0x0004:gsmry=1:nsk:rnk=0x0013
+      mRankingTimeMs=1794378763802(2026-11-11 15:32:43.802+0900)
+      mCreationTimeMs=1794378763839(2026-11-11 15:32:43.839+0900)
+      mVisibleSinceMs=0(1970-01-01 09:00:00.000+0900)
+      mUpdateTimeMs=1794378763839(2026-11-11 15:32:43.839+0900)
+      mInterruptionTimeMs=1794378764046(2026-11-11 15:32:44.046+0900)
+      mSuppressedVisualEffects= 22
+      mSound= android.resource://jp.naver.line.android/raw/push_bell_b
+      mVibration= Composed{segments=[Step{amplitude=0.0, duration=0}, Step{amplitude=-1.0, duration=330}, Step{amplitude=0.0, duration=160}, Step{amplitude=-1.0, duration=100}, Step{amplitude=0.0, duration=80}, Step{amplitude=-1.0, duration=140}, Step{amplitude=0.0, duration=0}], repeat=-1, mMagnitudeType=TYPE_EXTRA}
+      mAttributes= AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null
+      mLight= Light{color=-16711936, onMs=500, offMs=2000}
+      mShowBadge=true
+      mColorized=false
+      mAllowBubble=false
+      isBubble=false
+      mIsInterruptive=true
+      effectiveNotificationChannel=NotificationChannel{mId='jp.nav...', mName=メッセージ通知, mDescription=hasDescription , mImportance=4, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=android.resource://jp.naver.line.android/raw/push_bell_b, mLights=true, mLightColor=-16711936, mVibrationPattern=[0, 330, 160, 100, 80, 140, 0], mVibrationEffect=Composed{segments=[Step{amplitude=0.0, duration=0}, Step{amplitude=-1.0, duration=330}, Step{amplitude=0.0, duration=160}, Step{amplitude=-1.0, duration=100}, Step{amplitude=0.0, duration=80}, Step{amplitude=-1.0, duration=140}, Step{amplitude=0.0, duration=0}], repeat=-1, mMagnitudeType=TYPE_EXTRA}, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=true, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedByOEM=false, mImportanceLockedDefaultApp=false, mOriginalImp=4, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0, isBundle=false, emoji=null, mSoundMissingReason=0}
+      mAdjustments=[]
+      mRuleChannelReason=0
+      mRuleSoundReason=0
+      mRuleLightReason=0
+      shortcut=ue282117463811ee54ed784102229a2dd found valid? false
+      mUserVisOverride=0
+      hasSummarization=false
+      mSummaryStatus=NONE
+      bundleType=0
+      bundleType=0
+      mSuggestionsGeneratedByAssistant=false
+      mNotificationNudgeStatus=2
+      isGrayScaleIcon =false
+      mIsPromotion=false
+    NotificationRecord(0x00f87846: pkg=jp.naver.line.android user=UserHandle{0} id=15880001 tag=null importance=3 key=0|jp.naver.line.android|15880001|null|10406: Notification(channel=jp.nav... shortcut=null contentView=null vibrate=null sound=null tick defaults=0 flags=SHOW_LIGHTS|AUTO_CANCEL color=0xff20c601 category=msg vis=PRIVATE semFlags=0x0 semPriority=0 semMissedCount=0 semScenarioType=0))
+      uid=10406 userId=0
+      opPkg=jp.naver.line.android
+      icon=Icon(typ=RESOURCE pkg=jp.naver.line.android id=0x7f080cd6)
+      flags=SHOW_LIGHTS|AUTO_CANCEL
+      originalFlags=SHOW_LIGHTS|AUTO_CANCEL
+      pri=0
+      key=0|jp.naver.line.android|15880001|null|10406
+      seen=false
+      groupKey=0|jp.naver.line.android|15880001|null|10406
+      notification=
+            fullscreenIntent=null
+            contentIntent=PendingIntent{a94ba07: PendingIntentRecord{56e9324 jp.naver.line.android startActivity (allowlist: 1a3dfa5:+30s0ms/0/NOTIFICATION_SERVICE/NotificationManagerService)}}
+            deleteIntent=null
+            number=0
+            groupAlertBehavior=0
+            when=1794387584543/1794387584543
+            tickerText=たろうが友だちになりました。
+            vis=0
+            contentView=null
+            bigContentView=null
+            headsUpContentView=null
+            color=0xff20c601
+            timeout=PT72H
+            parcelDataSize=6132
+            mAllowSystemGeneratedContextualActions=true
+            extras={
+                android.title=String (LINE)
+                android.reduced.images=Boolean (true)
+                android.subText=null
+                pde_first_shown_time_ms=Long (0)
+                android.template=String (android.app.Notification$BigTextStyle)
+                android.showChronometer=Boolean (false)
+                android.text=String (たろうが友だちになりました。)
+                android.progress=Integer (0)
+                androidx.core.app.extra.COMPAT_TEMPLATE=String (androidx.core.app.NotificationCompat$BigTextStyle)
+                android.progressMax=Integer (0)
+                android.appInfo=ApplicationInfo (ApplicationInfo{a6b8734 jp.naver.line.android})
+                android.showWhen=Boolean (true)
+                pde_noti_action_clicked_count=Integer (0)
+                android.largeIcon=Icon (Icon(typ=BITMAP size=108x108))
+                android.bigText=String (たろうが友だちになりました。)
+                pde_first_expanded_time_ms=Long (0)
+                android.infoText=null
+                android.wearable.EXTENSIONS=Bundle (Bundle[{bridgeTag=EXCLUDED_NOTIFICATION}])
+                pde_enqueued_time_ms=Long (1794387585016)
+                pde_noti_clicked_count=Integer (0)
+                pde_noti_id=Integer (15880001)
+                android.progressIndeterminate=Boolean (false)
+                android.remoteInputHistory=null
+                pde_noti_pkg=String (jp.naver.line.android)
+                pde_noti_tag=null
+                android.shortCriticalText=null
+                IS_LIMITED_NETWORK_MODE_SUPPORTED=Boolean (true)
+            }
+      publicNotification=
+            None
+      stats=SingleNotificationStats{posttimeElapsedMs=242602737, posttimeToFirstClickMs=-1, posttimeToDismissMs=-1, airtimeCount=0, airtimeMs=0, currentAirtimeStartElapsedMs=-1, airtimeExpandedMs=0, posttimeToFirstVisibleExpansionMs=-1, currentAirtimeExpandedStartElapsedMs=-1, requestedImportance=3, naturalImportance=3, isNoisy=true}
+      mContactAffinity=0.0
+      mPackagePriority=0
+      mPackageVisibility=0
+      mSystemImportance=UNSPECIFIED
+      mAsstImportance=UNSPECIFIED
+      mRuleImportance=UNSPECIFIED
+      mImportance=DEFAULT
+      mImportanceExplanation=app
+      mProposedImportance=UNSPECIFIED
+      mIsAppImportanceLocked=true
+      mSensitiveContent=false
+      mCanceledAfterLifetimeExtension=false
+      mIntercept=true
+      mHidden==false
+      mGlobalSortKey=crtcl=0x0002:intrsv=2:grnk=0x0012:gsmry=1:nsk:rnk=0x0012
+      mRankingTimeMs=1794387584543(2026-11-11 17:59:44.543+0900)
+      mCreationTimeMs=1794387584808(2026-11-11 17:59:44.808+0900)
+      mVisibleSinceMs=0(1970-01-01 09:00:00.000+0900)
+      mUpdateTimeMs=1794387584808(2026-11-11 17:59:44.808+0900)
+      mInterruptionTimeMs=1794387585016(2026-11-11 17:59:45.016+0900)
+      mSuppressedVisualEffects= 22
+      mSound= android.resource://jp.naver.line.android/raw/push_bell_b
+      mVibration= Composed{segments=[Step{amplitude=0.0, duration=0}, Step{amplitude=-1.0, duration=330}, Step{amplitude=0.0, duration=160}, Step{amplitude=-1.0, duration=100}, Step{amplitude=0.0, duration=80}, Step{amplitude=-1.0, duration=140}, Step{amplitude=0.0, duration=0}], repeat=-1, mMagnitudeType=TYPE_EXTRA}
+      mAttributes= AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null
+      mLight= Light{color=-16711936, onMs=500, offMs=2000}
+      mShowBadge=true
+      mColorized=false
+      mAllowBubble=false
+      isBubble=false
+      mIsInterruptive=true
+      effectiveNotificationChannel=NotificationChannel{mId='jp.nav...', mName=友だちリクエスト, mDescription=hasDescription , mImportance=3, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=android.resource://jp.naver.line.android/raw/push_bell_b, mLights=true, mLightColor=-16711936, mVibrationPattern=[0, 330, 160, 100, 80, 140, 0], mVibrationEffect=Composed{segments=[Step{amplitude=0.0, duration=0}, Step{amplitude=-1.0, duration=330}, Step{amplitude=0.0, duration=160}, Step{amplitude=-1.0, duration=100}, Step{amplitude=0.0, duration=80}, Step{amplitude=-1.0, duration=140}, Step{amplitude=0.0, duration=0}], repeat=-1, mMagnitudeType=TYPE_EXTRA}, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=true, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedByOEM=false, mImportanceLockedDefaultApp=false, mOriginalImp=3, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0, isBundle=false, emoji=null, mSoundMissingReason=0}
+      mAdjustments=[]
+      mRuleChannelReason=0
+      mRuleSoundReason=0
+      mRuleLightReason=0
+      shortcut=null found valid? false
+      mUserVisOverride=0
+      hasSummarization=false
+      mSummaryStatus=NONE
+      bundleType=0
+      bundleType=0
+      mSuggestionsGeneratedByAssistant=false
+      mNotificationNudgeStatus=2
+      isGrayScaleIcon =false
+      mIsPromotion=false
+    NotificationRecord(0x0c6fed23: pkg=com.android.vending user=UserHandle{0} id=0 tag=0|com.android.vending|g:Aggregate_NormalNotificationSection importance=2 key=0|com.android.vending|0|0|com.android.vending|g:Aggregate_NormalNotificationSection|10285|0|com.android.vending|g:Aggregate_NormalNotificationSection: Notification(channel=payments-deals-and-recommendations shortcut=null contentView=null vibrate=null sound=null defaults=0 flags=AUTO_CANCEL|LOCAL_ONLY|GROUP_SUMMARY|AUTOGROUP_SUMMARY color=0xff455a64 groupKey=0|com.android.vending|g:Aggregate_NormalNotificationSection vis=PRIVATE semFlags=0x0 semPriority=0 semMissedCount=0 semScenarioType=0))
+      uid=10285 userId=0
+      opPkg=com.android.vending
+      icon=Icon(typ=RESOURCE pkg=com.android.vending id=0x7f080530)
+      flags=AUTO_CANCEL|LOCAL_ONLY|GROUP_SUMMARY|AUTOGROUP_SUMMARY
+      originalFlags=AUTO_CANCEL|LOCAL_ONLY|GROUP_SUMMARY|AUTOGROUP_SUMMARY
+      pri=0
+      key=0|com.android.vending|0|0|com.android.vending|g:Aggregate_NormalNotificationSection|10285|0|com.android.vending|g:Aggregate_NormalNotificationSection
+      seen=false
+      groupKey=0|com.android.vending|g:Aggregate_NormalNotificationSection
+      notification=
+            fullscreenIntent=null
+            contentIntent=PendingIntent{1fad220: PendingIntentRecord{bfd467b com.android.vending startActivity}}
+            deleteIntent=null
+            number=0
+            groupAlertBehavior=2
+            when=1794356025552/1794356025552
+            tickerText=null
+            vis=0
+            contentView=null
+            bigContentView=null
+            headsUpContentView=null
+            color=0xff455a64
+            timeout=PT0S
+            parcelDataSize=5460
+            mAllowSystemGeneratedContextualActions=true
+            extras={
+                android.reduced.images=Boolean (true)
+                pde_first_shown_time_ms=Long (0)
+                android.appInfo=ApplicationInfo (ApplicationInfo{89167d9 com.android.vending})
+                android.showWhen=Boolean (true)
+                pde_noti_action_clicked_count=Integer (0)
+                pde_first_expanded_time_ms=Long (0)
+                pde_enqueued_time_ms=Long (1794356025820)
+                pde_noti_clicked_count=Integer (0)
+                pde_noti_id=Integer (0)
+                pde_noti_pkg=String (com.android.vending)
+                pde_noti_tag=String (0|com.android.vending|g:Aggregate_NormalNotificationSection)
+            }
+      publicNotification=
+            None
+      stats=SingleNotificationStats{posttimeElapsedMs=211043541, posttimeToFirstClickMs=-1, posttimeToDismissMs=-1, airtimeCount=0, airtimeMs=0, currentAirtimeStartElapsedMs=-1, airtimeExpandedMs=0, posttimeToFirstVisibleExpansionMs=-1, currentAirtimeExpandedStartElapsedMs=-1, requestedImportance=3, naturalImportance=2, isNoisy=true}
+      mContactAffinity=0.0
+      mPackagePriority=0
+      mPackageVisibility=-1000
+      mSystemImportance=UNSPECIFIED
+      mAsstImportance=UNSPECIFIED
+      mRuleImportance=UNSPECIFIED
+      mImportance=LOW
+      mImportanceExplanation=app
+      mProposedImportance=UNSPECIFIED
+      mIsAppImportanceLocked=false
+      mSensitiveContent=false
+      mCanceledAfterLifetimeExtension=false
+      mIntercept=true
+      mHidden==false
+      mGlobalSortKey=crtcl=0x0002:intrsv=2:grnk=0x0002:gsmry=0:nsk:rnk=0x0014
+      mRankingTimeMs=1794356025554(2026-11-11 09:13:45.554+0900)
+      mCreationTimeMs=1794356025554(2026-11-11 09:13:45.554+0900)
+      mVisibleSinceMs=0(1970-01-01 09:00:00.000+0900)
+      mUpdateTimeMs=1794356025554(2026-11-11 09:13:45.554+0900)
+      mInterruptionTimeMs=1794356025554(2026-11-11 09:13:45.554+0900)
+      mSuppressedVisualEffects= 22
+      mSound= content://settings/system/notification_sound
+      mVibration= null
+      mAttributes= AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null
+      mLight= null
+      mShowBadge=true
+      mColorized=false
+      mAllowBubble=false
+      isBubble=false
+      mIsInterruptive=false
+      effectiveNotificationChannel=NotificationChannel{mId='payments-deals-and-recommendations', mName=お支払い、特価、おすすめ, mDescription=, mImportance=2, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=content://settings/system/notification_sound, mLights=false, mLightColor=0, mVibrationPattern=null, mVibrationEffect=null, mUserLockedFields=0, mUserVisibleTaskShown=false, mVibrationEnabled=false, mShowBadge=true, mDeleted=false, mDeletedTimeMs=-1, mGroup='alerts', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedByOEM=false, mImportanceLockedDefaultApp=false, mOriginalImp=2, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mLastNotificationUpdateTimeMs=0, isBundle=false, emoji=null, mSoundMissingReason=0}
+      mAdjustments=[]
+      mRuleChannelReason=0
+      mRuleSoundReason=0
+      mRuleLightReason=0
+      shortcut=null found valid? false
+      mUserVisOverride=-1000
+      hasSummarization=false
+      mSummaryStatus=NONE
+      bundleType=0
+      bundleType=0
+      mSuggestionsGeneratedByAssistant=false
+      mNotificationNudgeStatus=2
+      isGrayScaleIcon =false
+      mIsPromotion=false
