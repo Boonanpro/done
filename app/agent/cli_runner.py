@@ -2144,6 +2144,8 @@ _ALLOWED_CLI_MODELS = _model_catalog.AllowedModels()
 CLI_MODEL_OPTIONS = _model_catalog.LiveOptions()
 # room_id → 保存済みの選択。モデル変更APIで必ず無効化する。
 _room_model_cache: Dict[str, str] = {}
+# room_id → 保存済みの相談先（projects.metadata.advisor）。モデルと同じ問い合わせで一緒に読む。
+_room_advisor_cache: Dict[str, str] = {}
 
 
 def invalidate_room_model_cache(room_id: Optional[str] = None) -> None:
@@ -2151,8 +2153,10 @@ def invalidate_room_model_cache(room_id: Optional[str] = None) -> None:
     NEXT turn picks up the new backend without a core restart)."""
     if room_id is None:
         _room_model_cache.clear()
+        _room_advisor_cache.clear()
     else:
         _room_model_cache.pop(room_id, None)
+        _room_advisor_cache.pop(room_id, None)
 
 
 def resolve_room_backend(room_id: Optional[str] = None) -> tuple[str, str]:
@@ -2390,6 +2394,31 @@ def _resolve_cli_model(room_id: Optional[str] = None) -> str:
     return _apply_fable_quota_guard(model)
 
 
+def _resolve_cli_advisor(room_id: Optional[str], model: str) -> Optional[str]:
+    """この部屋の Claude Code に付ける相談先（--advisor）。無ければ None。
+
+    projects.metadata.advisor（例 "fable"）を _resolve_cli_model と同じ問い合わせで読んだ控えから引く。
+    普段は model（例 opus）で動き、難しい判断の所だけ Claude Code 自身が相談先のモデルに相談する
+    （Claude Code の server-side advisor tool。相談先は本体以上の強さのモデルでないと使われない）。
+    Codex の部屋・本体と同じモデル・Fable の週の枠が閾値を超えた時は付けない。
+    """
+    if not room_id:
+        return None
+    adv = _model_catalog.current(_room_advisor_cache.get(room_id) or "")
+    if not adv or adv not in _ALLOWED_CLI_MODELS or _codex.is_codex_model(adv):
+        return None
+    if _codex.is_codex_model(model) or adv == model:
+        return None
+    if adv == "fable" and _apply_fable_quota_guard("fable") != "fable":
+        return None
+    return adv
+
+
+def _session_model_key(model: str, advisor: Optional[str]) -> str:
+    """常駐の会話の作り直しを決める鍵。相談先が変わった時も新しいプロセスで起こし直す。"""
+    return f"{model}+advisor={advisor}" if advisor else model
+
+
 def _resolve_cli_model_raw(room_id: Optional[str] = None) -> str:
     # 1. ルーム単位の選択（新チャット作成時に保存された値）
     if room_id:
@@ -2403,6 +2432,8 @@ def _resolve_cli_model_raw(room_id: Optional[str] = None) -> str:
             if res.data:
                 meta = res.data[0].get("metadata") or {}
                 if isinstance(meta, dict):
+                    adv = meta.get("advisor")
+                    _room_advisor_cache[room_id] = adv.strip().lower() if isinstance(adv, str) else ""
                     m = (meta.get("model") or "").strip().lower()
                     if m:
                         # A saved GPT choice must never turn into Claude just because
@@ -2441,6 +2472,7 @@ def _build_cli_cmd(
     model: str = "opus",
     extra_args: Optional[list[str]] = None,
     debug_file: Optional[str] = None,
+    advisor: Optional[str] = None,
 ) -> list[str]:
     """CLIコマンドライン引数を組み立てる（extra_args は末尾に足すだけ。例: --plugin-dir）。
     debug_file は担当自身の詳しい記録（通信のやり直し・見切り・誤り）の置き場所（cli_record）。"""
@@ -2472,6 +2504,9 @@ def _build_cli_cmd(
 
     if extra_args:
         cmd.extend(extra_args)
+
+    if advisor:
+        cmd.extend(["--advisor", advisor])
 
     if debug_file:
         cmd.extend(["--debug-file", debug_file])
@@ -3053,12 +3088,13 @@ def _run_cli_in_thread(
         if need_fork:
             _interrupted_rooms.discard(room_id)
         cli_model = model or _resolve_cli_model(room_id)
+        cli_advisor = _resolve_cli_advisor(room_id, cli_model)
         launch_system_prompt, launch_content = _prepare_cli_launch_payload(system_prompt, content)
         # 長い会話を要約せずに短くする Jev プラグイン（鍵が取れた時だけ付く。他の引数・env は不変）
         compact_args, compact_env = _dan_compact_launch(user_id)
         env.update(compact_env)
         _cli_record.prune()
-        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id, fork_session=need_fork, model=cli_model, extra_args=compact_args,
+        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id, fork_session=need_fork, model=cli_model, extra_args=compact_args, advisor=cli_advisor,
                              debug_file=_cli_record.debug_file_path(room_id))
         _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, fork={need_fork}, prompt len={len(content)})")
 
@@ -3098,7 +3134,7 @@ def _run_cli_in_thread(
                 if reseed:
                     retry_content = _wrap_latest_user_message(reseed, content)
             retry_system_prompt, retry_launch_content = _prepare_cli_launch_payload(system_prompt, retry_content)
-            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, retry_system_prompt, resume_session_id=None, model=cli_model, extra_args=compact_args,
+            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, retry_system_prompt, resume_session_id=None, model=cli_model, extra_args=compact_args, advisor=cli_advisor,
                                  debug_file=_cli_record.debug_file_path(room_id))
             _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(retry_content)})")
 
@@ -3427,6 +3463,8 @@ async def _process_via_streaming_session(
         return
 
     cli_model = model or _resolve_cli_model(room_id)
+    cli_advisor = _resolve_cli_advisor(room_id, cli_model)
+    session_key = _session_model_key(cli_model, cli_advisor)
 
     # Windows CreateProcess の約32,000文字制限対策（one-shot 経路の
     # _prepare_cli_launch_payload と同じ）。文脈が肥大した部屋では
@@ -3464,6 +3502,8 @@ async def _process_via_streaming_session(
         if resume_session_id:
             c += ["--resume", resume_session_id]
         c += compact_args
+        if cli_advisor:
+            c += ["--advisor", cli_advisor]
         # 担当自身の詳しい記録（通信のやり直し・見切り・誤り）。起こすたびに 1 本、部屋ごとの場所へ。
         _cli_record.prune()
         c += ["--debug-file", _cli_record.debug_file_path(room_id)]
@@ -3481,7 +3521,7 @@ async def _process_via_streaming_session(
 
     from app.agent.streaming_session import get_session
     existing = get_session(room_id)
-    if existing is not None and existing.is_alive() and existing.model != cli_model:
+    if existing is not None and existing.is_alive() and existing.model != session_key:
         if existing.is_turn_active():
             yield {"type": "error", "message": "モデル切り替え前の作業が実行中です。完了後に再送してください"}
             return
@@ -3528,7 +3568,7 @@ async def _process_via_streaming_session(
             _clear_cli_session(room_id)
             resume_session_id = None
     # 無い／死んでいる／モデルが違う（上で stop 済み）→ 新しいプロセスを起こす。
-    session_is_fresh = _streaming_session_is_fresh(existing, cli_model)
+    session_is_fresh = _streaming_session_is_fresh(existing, session_key)
     # 起動時だけ決まる引数（dan-compact の --plugin-dir と env）は、この呼び出しの build_cmd /
     # env から新しいプロセスが起きうる時に必ず付いているようにする。新規・死活・モデル切替
     # （session_is_fresh）だけでなく、ターン後の予熱ローテーション（_schedule_prewarm_rotation）
@@ -3538,7 +3578,7 @@ async def _process_via_streaming_session(
     _compact_args, _compact_env = await asyncio.to_thread(_dan_compact_launch, user_id, log=session_is_fresh)
     compact_args[:] = _compact_args
     env.update(_compact_env)
-    session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
+    session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=session_key)
     # (Re)install the autonomous-turn receiver with this call's freshest
     # project/user context. Cheap to refresh on every turn.
     session.background_sink = _make_autonomous_sink(room_id, user_id, project_id, session, parent_run_id=run_id)
@@ -3962,7 +4002,7 @@ async def _process_via_streaming_session(
                             retry_content = _wrap_latest_user_message(reseed, leftover)
                     _cli_debug(f"[STREAMING] idle hang: re-running {len(leftover)} chars of queued follow-up on a fresh session (room {room_id[:8]})")
                     try:
-                        session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
+                        session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=session_key)
                         session.run_turn(retry_content, sink, timeout=_STREAMING_IDLE_TIMEOUT, run_id=run_id)
                     except Exception as retry_error:  # noqa: BLE001
                         _emit({"type": "error", "message": str(retry_error)})
@@ -4055,7 +4095,7 @@ async def _process_via_streaming_session(
                     if reseed:
                         send_content = _wrap_latest_user_message(reseed, content)
                 try:
-                    session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
+                    session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=session_key)
                     session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT, run_id=run_id)
                 except Exception as retry_error:  # noqa: BLE001
                     _emit({"type": "error", "message": str(retry_error)})
@@ -4095,7 +4135,7 @@ async def _process_via_streaming_session(
                 sid = state.get("session_id")
                 if clean and _transcript_soft_exceeded(sid):
                     _schedule_prewarm_rotation(
-                        room_id, project_id, session, build_cmd, env, run_cwd, cli_model,
+                        room_id, project_id, session, build_cmd, env, run_cwd, session_key,
                     )
             except Exception as _rot_e:  # noqa: BLE001
                 _cli_debug(f"[STREAMING] rotation schedule skipped: {_rot_e}")
