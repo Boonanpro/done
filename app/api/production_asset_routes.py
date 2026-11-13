@@ -5609,16 +5609,61 @@ async def delete_asset(
     return {"ok": True, "removed_from_contents": using}
 
 
+_AUDIO_COPY_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+async def _audio_only_copy(room_id: str, asset: dict[str, Any]) -> Path | None:
+    """プレビューで音を鳴らすための、音だけの写し {asset_id}_audio.m4a（映像の写しから音を -c copy で抜く。wav などは AAC に）。
+
+    2026-11-13: プレビューは音を前もって解読して鳴らす（timeline-preview / audio-source.ts）。映像入りの写しから
+    音の部分だけを読むと、映像の間に細かく挟まった音を拾うために映像も一緒に読むことになり、家の外の回線では
+    音の読み込みが再生に追いつかなかった。83分の録画で約60MB・作るのに約2秒。最初に頼まれた時に作る。"""
+    asset_id = str(asset.get("id") or "")
+    src_value = next((asset.get(k) for k in ("view_path", "proxy_path", "local_path") if asset.get(k) and Path(str(asset.get(k))).is_file()), None)
+    if not asset_id or not src_value:
+        return None
+    src = Path(str(src_value))
+    out = _room_dir(room_id) / f"{asset_id}_audio.m4a"
+    if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    lock = _AUDIO_COPY_LOCKS.setdefault(str(out), asyncio.Lock())
+    async with lock:
+        if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+            return out
+        tmp = out.with_name(f"{asset_id}_audio.tmp.m4a")
+
+        # mp4 系はそのまま抜く。wav などは AAC にする（30MB の BGM が 1〜2MB になり、開いた時の読み込みを奪わない）
+        codec = ["-c:a", "copy"] if src.suffix.lower() in {".mp4", ".m4a", ".mov", ".m4v"} else ["-c:a", "aac", "-b:a", "160k"]
+
+        def _run() -> bool:
+            r = subprocess.run([_ffmpeg(), "-y", "-v", "error", "-i", str(src), "-vn", *codec, "-movflags", "+faststart", str(tmp)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0
+
+        ok = await asyncio.to_thread(_run)
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            return None
+        tmp.replace(out)
+        return out
+
+
 @router.get("/media")
 async def get_asset_media(
     request: Request,
     room_id: str = Query(...),
     asset_id: str = Query(...),
-    variant: Literal["original", "proxy", "view", "thumbnail"] = Query("proxy"),
+    variant: Literal["original", "proxy", "view", "thumbnail", "audio"] = Query("proxy"),
 ):
     asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
+    if variant == "audio":
+        audio = await _audio_only_copy(room_id, asset)
+        if not audio:
+            raise HTTPException(status_code=404, detail="audio is not available")
+        return _range_file_response(audio, request)
     key = {
         "original": "local_path",
         "proxy": "proxy_path",
