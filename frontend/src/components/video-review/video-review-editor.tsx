@@ -1124,7 +1124,7 @@ export function VideoReviewEditor({
   const [danCursor, setDanCursor] = useState<{ x: number; y: number; edge: 'left' | 'right' | 'top' | 'bottom' | null } | null>(null);
   const danTargetRef = useRef<string[]>([]);
   const feedAfterRef = useRef(-1);
-  const feedQueueRef = useRef<Array<{ entries: DanFeedEntry[]; sequence: EditSequence | null }>>([]);
+  const feedQueueRef = useRef<Array<{ entries: DanFeedEntry[]; sequence: EditSequence | null; stale?: boolean }>>([]);
   const feedRunningRef = useRef(false);
 
   const adoptShown = useCallback((seq: EditSequence | null) => {
@@ -1182,10 +1182,12 @@ export function VideoReviewEditor({
   const pointDanAt = useCallback((ids: string[]) => new Promise<void>((done) => {
     danTargetRef.current = ids;
     // Two frames: React commits the step, then the bar has its new box.
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-      placeDanHand();
-      done();
-    }));
+    // 隠れたタブでは requestAnimationFrame が止まり、ここで待ち続けた手の再生が、タブを開いた時に
+    // まとめて流れていた（2026-11-14 本人「1時間後に開くとダンの手が動き出す」）。止まらないよう時間でも抜ける。
+    let finished = false;
+    const finish = () => { if (finished) return; finished = true; placeDanHand(); done(); };
+    window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+    window.setTimeout(finish, 120);
   }), [placeDanHand]);
 
   // While Dan works, follow the owner's own scrolling/zooming and the bars' slide animation: the
@@ -1207,6 +1209,16 @@ export function VideoReviewEditor({
     const wait = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
     try {
       while (feedQueueRef.current.length) {
+        // 手の動きは、ダンが今している直しだけを見せる。見ていない間（タブが隠れている）に届いた直しや、
+        // 届いてから時間がたった直しは、動きで再生せずに今の形へすぐ合わせる（後から再生しない）。
+        const pending = feedQueueRef.current;
+        if (document.hidden || pending.some((b) => b.stale)) {
+          const last = pending[pending.length - 1];
+          feedQueueRef.current = [];
+          const start = editSequenceRef.current;
+          if (last?.sequence && start && seqSig(start) === lastSyncedSig.current) adoptShown(last.sequence);
+          continue;
+        }
         const batch = feedQueueRef.current.shift()!;
         const finalSeq = batch.sequence;
         const start = editSequenceRef.current;
@@ -1218,6 +1230,8 @@ export function VideoReviewEditor({
         const stepMs = steps.length > 14 ? Math.max(260, Math.round(9000 / steps.length)) : 700;
         const shown = clipStateMap(start);
         for (const step of steps) {
+          // 途中でタブが隠れたら、残りは動かさずに最後の形へ
+          if (document.hidden) break;
           const vanish = step.filter((c) => c.removed).map((c) => String(c.clip_id));
           const ids = step.map((c) => String(c.clip_id));
           if (vanish.length) {
@@ -1285,11 +1299,14 @@ export function VideoReviewEditor({
           { credentials: 'include' },
         );
         if (res.ok) {
-          const data = (await res.json()) as { last?: number; entries?: DanFeedEntry[]; sequence?: EditSequence | null };
+          const data = (await res.json()) as { last?: number; entries?: DanFeedEntry[]; sequence?: EditSequence | null; now?: number };
           const opened = feedAfterRef.current < 0;
           feedAfterRef.current = Math.max(feedAfterRef.current, Number(data.last || 0));
           if (!opened && data.entries?.length) {
-            feedQueueRef.current.push({ entries: data.entries, sequence: data.sequence || null });
+            // 一番新しい1手がサーバーの時計で8秒より前なら、今の直しではない（隠れていた・つながりが切れていた）
+            const newest = Math.max(...data.entries.map((e) => Number(e.t || 0)));
+            const stale = document.hidden || (Number(data.now || 0) > 0 && newest > 0 && Number(data.now) - newest > 8);
+            feedQueueRef.current.push({ entries: data.entries, sequence: data.sequence || null, stale });
             onExternalEditRef.current?.();
             void runDanFeed();
           }

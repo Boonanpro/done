@@ -6504,8 +6504,11 @@ async def content_edit_feed(
         return {"last": last, "entries": []}
     content = next((c for c in _read_contents(room_id) if str(c.get("id")) == str(content_id)), None)
     sequence = ((content or {}).get("timeline") or {}).get("sequence")
+    import time as _time
+    # now: the server clock, so the editor can tell how old a step is without trusting its own
+    # clock (Windows vs the Mac). Old steps are applied at once, not replayed as motion.
     return {"last": last, "entries": rows[-40:], "sequence": sequence,
-            "updated_at": (content or {}).get("updated_at")}
+            "updated_at": (content or {}).get("updated_at"), "now": _time.time()}
 
 
 @router.post("/contents", response_model=ProductionContent)
