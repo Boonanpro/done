@@ -604,6 +604,15 @@ function parseRichContent(content: string): ParsedMediaContent {
   const outside = (whole: string, label: string, url: string) => (/^https:\/\//i.test(url) && !url.startsWith(`${API_BASE_URL}/`) ? link(label, url) : whole);
 
   const read = (s: string) => s
+    // 絵をリンクで包んだ物（ダンが貼る作品のタイムラインのサムネ [![題](絵)](/production-workspace?…)）は、
+    // 絵を出したうえで、押せば開くリンクを残す（包みを外さないと中の絵だけが抜けて、リンクが消えていた）。
+    .replace(/\[!\[([^\]]*)\]\(([^)]+)\)\]\(([^)]+)\)/g, (_, alt: string, img: string, href: string) => {
+      const target = normalizeUrl(href);
+      const pic = normalizeUrl(img);
+      if (isDanFile(pic)) images.push(pic);
+      const label = isEditorUrl(target) ? `🎬 ${alt || ui('Timeline', 'タイムライン')}${ui(' (open timeline)', '（タイムラインを開く）')}` : (alt || target);
+      return link(label, target);
+    })
     .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, name: string, url: string) => {
       const normalized = normalizeUrl(url);
       if (isDanFile(normalized)) { images.push(normalized); return ''; }
@@ -670,6 +679,21 @@ function needsDanSignIn(url: string) {
     if (u.origin === new URL(API_BASE_URL).origin) return !isDanFile(url);
     return u.protocol === 'https:' && /^dan-site-[\w-]+\.vercel\.app$/.test(u.hostname);
   } catch { return false; }
+}
+
+// 制作エディター（/production-workspace?room_id=…）の住所か。PC では別窓で開く物で、アプリでは中の画面で開く。
+function isEditorUrl(url: string) {
+  try {
+    const u = new URL(url);
+    return u.origin === new URL(API_BASE_URL).origin && /^\/production-workspace\/?$/.test(u.pathname) && !!u.searchParams.get('room_id');
+  } catch { return false; }
+}
+
+// スマホの形で開く印（phone=1）を付けた、入口の中の道（/production-workspace?…）。
+function editorPath(url: string) {
+  const u = new URL(url);
+  u.searchParams.set('phone', '1');
+  return `${u.pathname}${u.search}`;
 }
 
 function isArtifactUrl(url: string) {
@@ -1597,7 +1621,7 @@ function AppMain() {
   const [collabRoom, setCollabRoom] = useState<{ id: string; title?: string } | null>(null);
   const [artifacts, setArtifacts] = useState<ChatArtifactResponse[]>([]);
   const [loadingArtifacts, setLoadingArtifacts] = useState(false);
-  const [artifactView, setArtifactView] = useState<{ title: string; url: string } | null>(null);
+  const [artifactView, setArtifactView] = useState<{ title: string; url: string; shown?: string; editor?: boolean } | null>(null);
   const [notificationStatus, setNotificationStatus] = useState('Off');
   const [smsForwardingStatus, setSmsForwardingStatus] = useState('Off');
   // SMS も全部ダンに読ませるか（本人が選ぶ。オフが既定）
@@ -3888,6 +3912,27 @@ function AppMain() {
     catch (error) { Alert.alert('運用室を開けませんでした', (error as Error).message); }
   }
 
+  // 制作エディターをアプリの中の画面で開く。中の画面はアプリのログインを持たないので、入館証の入口（/enter）を通して
+  // その画面にもログインを入れる（エディターは localStorage の done-token とクッキーを使う）。
+  async function openEditor(url: string) {
+    const path = editorPath(url);
+    const shown = `${API_BASE_URL}${path}`;
+    let target = shown;
+    if (token) {
+      const fresh = await ensureFreshAccessToken(token).catch(() => token);
+      const refresh = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY).catch(() => null);
+      target = (await signedInBrowserUrl(API_BASE_URL, fresh, refresh, path)) || shown;
+    }
+    setArtifactView({ title: ui('Studio', '制作'), url: target, shown, editor: true });
+    setScreen('artifact');
+  }
+
+  function handleOpenEditor() {
+    const roomId = currentProject?.room_id;
+    if (!roomId) return;
+    void openEditor(`${API_BASE_URL}/production-workspace?room_id=${encodeURIComponent(roomId)}`);
+  }
+
   function handleOpenArtifact(artifact: ChatArtifactResponse) {
     const url = artifactUrl(artifact);
     if (!url) {
@@ -3917,6 +3962,7 @@ function AppMain() {
     if (isXOperation(normalized)) { void openPrivateArtifact(); return; }
     // アプリの中で開く（画像・動画を読む）のはダンのファイルだけ。外の画像・動画はブラウザで開く（isDanFile の説明）
     if(isDanFile(normalized)&&(mediaKind(normalized)||chatMedia.some(x=>x.url===normalized))){openChatMedia(normalized,mediaKind(normalized)||chatMedia.find(x=>x.url===normalized)?.kind||'image');return;}
+    if (isEditorUrl(normalized)) { void openEditor(normalized); return; }
     if (isArtifactUrl(normalized)) {
       setArtifactView({
         title: artifactTitleFromUrl(normalized),
@@ -4195,11 +4241,11 @@ function AppMain() {
               {artifactView.title}
             </Text>
             <Text style={styles.appBarSubtitle} numberOfLines={1}>
-              {artifactView.url}
+              {artifactView.shown || artifactView.url}
             </Text>
           </View>
           <Pressable
-            onPress={() => void openSignedIn(artifactView.url)}
+            onPress={() => void openSignedIn(artifactView.shown || artifactView.url)}
             hitSlop={10}
             style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
           >
@@ -4209,6 +4255,15 @@ function AppMain() {
         <WebView
           source={{ uri: artifactView.url }}
           startInLoadingState
+          // 制作の画面では、写真・動画の添付（ファイル選択とカメラ）と「音声」のマイクを使う。
+          // ファイル選択は react-native-webview が Android の選択画面を開く。マイクはアプリの許可がある時だけ渡す。
+          allowFileAccess={!!artifactView.editor}
+          mediaCapturePermissionGrantType={artifactView.editor ? 'grant' : 'prompt'}
+          mediaPlaybackRequiresUserAction={false}
+          allowsInlineMediaPlayback
+          domStorageEnabled
+          javaScriptEnabled
+          setSupportMultipleWindows={false}
           style={styles.webView}
           renderLoading={() => (
             <View style={styles.webViewLoading}>
@@ -4259,6 +4314,17 @@ function AppMain() {
               >
                 <Ionicons name="arrow-up-circle" size={24} color="#1d6b57" />
                 <View style={styles.chatBarDot} />
+              </Pressable>
+            ) : null}
+            {currentProject?.room_id ? (
+              <Pressable
+                onPress={handleOpenEditor}
+                accessibilityRole="button"
+                accessibilityLabel={ui('Open the studio editor', '制作（動画のエディター）を開く')}
+                hitSlop={6}
+                style={({ pressed }) => [styles.appBarIconButton, styles.chatAppBarIcon, pressed && styles.buttonPressed]}
+              >
+                <Ionicons name="film-outline" size={22} color="#162e27" />
               </Pressable>
             ) : null}
             {artifacts.length > 0 ? (
