@@ -1004,6 +1004,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           const st = previewStats();
           st.avN = (st.avN || 0) + 1; st.avSum = (st.avSum || 0) + drift; st.avMax = Math.max(st.avMax || 0, drift);
           if (drift > 0.045) st.avOver = (st.avOver || 0) + 1; // 1コマ半より大きいずれ
+          if (showDiag) { const tr = ((st as unknown as { avTrace?: number[][] }).avTrace ||= []); tr.push([Number(t.toFixed(3)), Number(signed.toFixed(3)), v.playbackRate, Number(vc.clip.timeline_start.toFixed(2))]); if (tr.length > 3000) tr.splice(0, 1000); }
         }
         if (heard != null) {
           // 音の時計に映像を合わせる: 大きくずれた時だけ頭出し、小さいずれは再生の速さを少し変えて詰める
