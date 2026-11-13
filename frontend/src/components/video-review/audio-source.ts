@@ -22,10 +22,10 @@ type ASample = { pt: number; dur: number; offset: number; size: number };
 
 export type AudioSegment = { buffer: AudioBuffer; bufOffset: number; srcStart: number; srcEnd: number };
 
-/** 制作の素材の写し（variant=view / proxy）なら、音だけの写しの住所。それ以外は null */
+/** 制作の素材（variant=view / proxy / original）なら、音だけの写し（短い AAC の m4a）の住所。それ以外は null */
 function audioOnlyUrl(url: string): string | null {
-  if (!url.includes('/production-assets/media?') || !/[?&]variant=(view|proxy)(&|$)/.test(url)) return null;
-  return url.replace(/([?&]variant=)(view|proxy)/, '$1audio');
+  if (!url.includes('/production-assets/media?') || !/[?&]variant=(view|proxy|original)(&|$)/.test(url)) return null;
+  return url.replace(/([?&]variant=)(view|proxy|original)/, '$1audio');
 }
 
 export function webAudioSupported(): boolean {

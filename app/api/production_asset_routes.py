@@ -5613,7 +5613,7 @@ _AUDIO_COPY_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 async def _audio_only_copy(room_id: str, asset: dict[str, Any]) -> Path | None:
-    """プレビューで音を鳴らすための、音だけの写し {asset_id}_audio.m4a（映像の写しから音を -c copy で抜く）。
+    """プレビューで音を鳴らすための、音だけの写し {asset_id}_audio.m4a（映像の写しから音を -c copy で抜く。wav などは AAC に）。
 
     2026-11-13: プレビューは音を前もって解読して鳴らす（timeline-preview / audio-source.ts）。映像入りの写しから
     音の部分だけを読むと、映像の間に細かく挟まった音を拾うために映像も一緒に読むことになり、家の外の回線では
@@ -5632,8 +5632,11 @@ async def _audio_only_copy(room_id: str, asset: dict[str, Any]) -> Path | None:
             return out
         tmp = out.with_name(f"{asset_id}_audio.tmp.m4a")
 
+        # mp4 系はそのまま抜く。wav などは AAC にする（30MB の BGM が 1〜2MB になり、開いた時の読み込みを奪わない）
+        codec = ["-c:a", "copy"] if src.suffix.lower() in {".mp4", ".m4a", ".mov", ".m4v"} else ["-c:a", "aac", "-b:a", "160k"]
+
         def _run() -> bool:
-            r = subprocess.run([_ffmpeg(), "-y", "-v", "error", "-i", str(src), "-vn", "-c:a", "copy", "-movflags", "+faststart", str(tmp)],
+            r = subprocess.run([_ffmpeg(), "-y", "-v", "error", "-i", str(src), "-vn", *codec, "-movflags", "+faststart", str(tmp)],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             return r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0
