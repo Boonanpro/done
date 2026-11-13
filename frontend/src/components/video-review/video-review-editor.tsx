@@ -2370,6 +2370,17 @@ export function VideoReviewEditor({
       }
     : null;
 
+  const laneLabelColRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const sc = timelineScrollRef.current;
+    const col = laneLabelColRef.current;
+    if (!sc || !col) return;
+    const place = () => { col.style.transform = sc.scrollLeft ? `translateX(${sc.scrollLeft}px)` : ''; };
+    place();
+    sc.addEventListener('scroll', place, { passive: true });
+    return () => sc.removeEventListener('scroll', place);
+  });
+
   const timelineTrackStyle = useMemo(
     () => ({
       width: `${timelineZoom * 100}%`,
@@ -3629,7 +3640,7 @@ export function VideoReviewEditor({
                               const kind: ClipKind = isScene ? 'scene'
                                 : item.itemType === 'caption' ? 'caption'
                                   : item.itemType === 'effect' ? 'effect'
-                                    : item.itemType === 'audio' ? (clip.role === 'music' ? 'bgm' : clip.role === 'sfx' ? 'se' : 'voice')
+                                    : item.itemType === 'audio' ? (clip.role === 'music' || clip.role === 'bgm' ? 'bgm' : clip.role === 'sfx' || clip.role === 'se' ? 'se' : 'voice')
                                       : isImage ? 'image' : 'video';
                               const badge = CLIP_KIND_STYLE[kind].name;
                               const srcStart = Number(clip.source_start || 0);
@@ -4977,8 +4988,9 @@ export function VideoReviewEditor({
               ) : null}
               <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2 ${danReplay ? 'dan-replay' : ''}`} onWheel={handleTimelineWheel}>
                 <div className="flex gap-x-2 text-[11px]">
-                  <div className="flex w-[82px] shrink-0 flex-col">
-                    <div className="sticky top-0 z-20 mb-1 h-5 shrink-0 bg-muted/40" />
+                  {/* 段の名前は横に動かしても左に残す（2026-11-13 拡大して右へ動かすと「映像3」などが消えていた） */}
+                  <div ref={laneLabelColRef} className="relative z-30 flex w-[82px] shrink-0 flex-col bg-background will-change-transform">
+                    <div className="sticky top-0 z-20 mb-1 h-5 shrink-0 bg-background" />
                     {timelineLanes.map((lane, i) => (
                       <div
                         key={lane.key}
