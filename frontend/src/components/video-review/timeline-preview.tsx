@@ -176,7 +176,7 @@ function coversFrame(vc: VisualClip, imageAssets: Map<string, string>): boolean 
 }
 
 // 確かめ用の数（?previewdiag=1 の試しの道具が読む）
-type PreviewStats = { draws: number; holds: number; wrongDraws: number; lastWrong: number; audioGapMs: number; audioLateStarts: number; audioScheduled: number; audioMode: string };
+type PreviewStats = { avN?: number; avSum?: number; avMax?: number; avOver?: number; draws: number; holds: number; wrongDraws: number; lastWrong: number; audioGapMs: number; audioLateStarts: number; audioScheduled: number; audioMode: string };
 function previewStats(): PreviewStats {
   const w = window as unknown as { __previewStats?: PreviewStats };
   if (!w.__previewStats) w.__previewStats = { draws: 0, holds: 0, wrongDraws: 0, lastWrong: -1, audioGapMs: 0, audioLateStarts: 0, audioScheduled: 0, audioMode: '' };
@@ -1000,6 +1000,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         // An element already parked on this spot (scrub PARK / pre-roll) is not re-seeked.
         const signed = v.currentTime - expected;
         const drift = Math.abs(signed);
+        if (prevActiveVideoRef.current.has(id) && !v.seeking && vc.kind === 'base') {
+          const st = previewStats();
+          st.avN = (st.avN || 0) + 1; st.avSum = (st.avSum || 0) + drift; st.avMax = Math.max(st.avMax || 0, drift);
+          if (drift > 0.045) st.avOver = (st.avOver || 0) + 1; // 1コマ半より大きいずれ
+        }
         if (heard != null) {
           // 音の時計に映像を合わせる: 大きくずれた時だけ頭出し、小さいずれは再生の速さを少し変えて詰める
           if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.25) {
