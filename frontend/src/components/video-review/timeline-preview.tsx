@@ -183,6 +183,16 @@ function previewStats(): PreviewStats {
   return w.__previewStats;
 }
 
+let pumpCanvas: CanvasRenderingContext2D | null = null;
+function pumpCtx(): CanvasRenderingContext2D | null {
+  if (!pumpCanvas && typeof document !== 'undefined') {
+    const c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    pumpCanvas = c.getContext('2d');
+  }
+  return pumpCanvas;
+}
+
 function urlFlag(name: string): string | null {
   if (typeof window === 'undefined') return null;
   return new URLSearchParams(window.location.search).get(name);
@@ -813,6 +823,19 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         }
       }
 
+      // 再生中に絵を使わなかった映像の要素（上の映像にふさがれた段など）も、1画素だけ描いて絵を受け取り続ける。
+      // ブラウザは誰も絵を受け取らない映像の要素を0.25秒おきにしか進めず、その要素だけ再生が遅れて、
+      // ふさいでいた映像が終わって見えた瞬間にずれていた（音を時計にした時に、映像が平均0.1秒以上遅れていた）。
+      if (playingRef.current) {
+        const drawnSrc = new Set(layers.map((l) => l.got.src));
+        for (const vc of active) {
+          const vel = videosRef.current.get(String(vc.clip.id));
+          if (!vel || vel.paused || vel.readyState < 2 || drawnSrc.has(vel)) continue;
+          const pump = pumpCtx();
+          if (pump) { try { pump.drawImage(vel, 0, 0, 1, 1); } catch { /* not ready */ } }
+        }
+      }
+
       // blur / mosaic regions (effect clips active now)
       const baseGot = (layers.find((l) => l.vc.kind === 'base') || layers[0])?.got || null;
       for (const e of effectClips) {
@@ -959,6 +982,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     let lastWall = performance.now();
     let lastAheadWall = 0;
     const PREROLL = 1.5; // pre-seek a clip about to start so its first frame is ready at the cut
+    const LEAD = 0.4;    // 映像の要素を境目より前から走らせておく長さ
     const step = () => {
       const clock = playClockRef.current;
       if (!clock) return;
@@ -1004,27 +1028,32 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           const st = previewStats();
           st.avN = (st.avN || 0) + 1; st.avSum = (st.avSum || 0) + drift; st.avMax = Math.max(st.avMax || 0, drift);
           if (drift > 0.045) st.avOver = (st.avOver || 0) + 1; // 1コマ半より大きいずれ
-          if (showDiag) { const tr = ((st as unknown as { avTrace?: number[][] }).avTrace ||= []); tr.push([Number(t.toFixed(3)), Number(signed.toFixed(3)), v.playbackRate, Number(vc.clip.timeline_start.toFixed(2))]); if (tr.length > 3000) tr.splice(0, 1000); }
+          if (showDiag) { const tr = ((st as unknown as { avTrace?: number[][] }).avTrace ||= []); tr.push([Number(t.toFixed(3)), Number(signed.toFixed(3)), v.playbackRate, Number(vc.clip.timeline_start.toFixed(2)), String(vc.clip.asset_id || '').slice(0, 8), Number(v.currentTime.toFixed(3)), Number(expected.toFixed(3)), v.readyState, v.paused ? 1 : 0] as unknown as number[]); if (tr.length > 3000) tr.splice(0, 1000); }
         }
         if (heard != null) {
           // 音の時計に映像を合わせる: 大きくずれた時だけ頭出し、小さいずれは再生の速さを少し変えて詰める
-          // 速さは3段だけで切り替える（毎コマ細かく変えると、ブラウザが再生を引っかけて余計にずれた）
-          if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.2) {
-            try { v.currentTime = expected + (v.paused ? 0 : 0.03); } catch { /* not ready */ }
+          // 再生中の要素を頭出しすると、その間（0.2〜0.3秒）止まって、かえってずれが広がる（頭出し→止まる→
+          // また頭出し、を繰り返していた）。大きく外れた時だけ頭出しし、ふだんは速さを段で変えて追いつかせる。
+          // 毎コマ細かく速さを変えると、ブラウザが再生を引っかける。
+          const want = signed < -0.06 ? 1.25 : signed < -0.02 ? 1.06 : signed > 0.06 ? 0.8 : signed > 0.02 ? 0.94 : drift < 0.008 ? 1 : v.playbackRate;
+          if ((!prevActiveVideoRef.current.has(id) && (v.paused ? drift > 0.04 : drift > 0.25)) || drift > 0.7) {
+            try { v.currentTime = expected; } catch { /* not ready */ }
             if (v.playbackRate !== 1) v.playbackRate = 1;
-          } else if (signed < -0.025) {
-            if (v.playbackRate !== 1.06) v.playbackRate = 1.06;
-          } else if (signed > 0.025) {
-            if (v.playbackRate !== 0.94) v.playbackRate = 0.94;
-          } else if (drift < 0.008 && v.playbackRate !== 1) {
-            v.playbackRate = 1;
+          } else if (v.playbackRate !== want) {
+            v.playbackRate = want;
           }
         } else if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.15) {
           try { v.currentTime = expected; } catch { /* not ready */ }
         }
         if (v.paused) void v.play().catch(() => {});
       }
-      for (const [id, v] of videosRef.current) if (!activeVids.has(id) && !v.paused) v.pause();
+      for (const [id, v] of videosRef.current) {
+        if (activeVids.has(id) || v.paused) continue;
+        // 境目の前から走らせている要素は止めない
+        const vc = visualClips.find((x) => String(x.clip.id) === id);
+        if (vc && vc.clip.timeline_start > t && vc.clip.timeline_start - t <= LEAD + 0.1) continue;
+        v.pause();
+      }
 
       // MASTER CLOCK: drive the timeline time from the actual position of the displayed base
       // <video> element. The playhead and the on-screen frame are then the SAME number, so they
@@ -1053,7 +1082,20 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (!(vc.clip.timeline_start > t && vc.clip.timeline_start <= t + PREROLL)) continue;
         const startSrc = Number(vc.clip.source_start || 0);
         const v = videosRef.current.get(id);
-        if (v && Math.abs(v.currentTime - startSrc) > 0.1) { try { v.currentTime = startSrc; } catch { /* not ready */ } }
+        // 走り出し: 要素は再生を押してから実際に進み出すまで0.2〜0.3秒かかる。境目の LEAD 秒前に、
+        // 境目より LEAD 秒手前から走らせておき、境目では元から同じ所を進んでいるようにする。
+        const until = vc.clip.timeline_start - t;
+        const lead = Math.min(LEAD, startSrc);
+        if (v && v.paused) {
+          const parkAt = startSrc - lead;
+          if (until <= lead && lead > 0.05) {
+            try { v.currentTime = startSrc - until; } catch { /* not ready */ }
+            if (v.playbackRate !== 1) v.playbackRate = 1;
+            void v.play().catch(() => {});
+          } else if (Math.abs(v.currentTime - parkAt) > 0.1) {
+            try { v.currentTime = parkAt; } catch { /* not ready */ }
+          }
+        }
         const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
         const fs = url ? framesRef.current.get(url) : null;
         if (fs) void fs.ready.then(() => fs.seekTo(startSrc));
