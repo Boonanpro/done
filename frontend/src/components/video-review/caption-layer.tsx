@@ -213,7 +213,7 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
   return (
     <div style={{position:'absolute',inset:0,transformOrigin:'0 0',transform:`translate(${motion.x*outW}px,${motion.y*outH}px) scale(${motion.w},${motion.h})`,opacity:cap.opacity??1}}>
       <div style={captionAnchorStyle(design, outH)}>
-        <div style={boxStyle}>{content}</div>
+        <div data-caption-id={cap.id || undefined} style={boxStyle}>{content}</div>
       </div>
     </div>
   );

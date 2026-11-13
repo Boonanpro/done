@@ -107,8 +107,11 @@ function sequencePictureAssets(content: ProductionContent, assets: ProductionAss
 export function ProductionWorkspace({
   roomId,
   onContentChange,
+  compact = false,
 }: {
   roomId: string;
+  /** スマホの幅: ライブラリは作品の一覧だけを1列で、エディターは畳んだ形で出す */
+  compact?: boolean;
   /** ライブラリの真ん中に大きく置く「ダンと制作」の会話（制作の窓だけが渡す） */
   /** 開いている作品が替わった（null = ライブラリ）。エディターの窓の「ダンと制作」が部屋を替える */
   onContentChange?: (contentId: string | null) => void;
@@ -653,6 +656,7 @@ export function ProductionWorkspace({
       <VideoReviewEditor
         key={primaryVideo ? primaryVideo.id : `content-${selectedContent.id}`}
         embedded
+        compact={compact}
         roomId={roomId}
         contentId={selectedContent.id}
         title={selectedContent.title}
@@ -850,7 +854,7 @@ export function ProductionWorkspace({
   // プロジェクト一覧と素材フォルダ、真ん中にチャットをどでかく、それだけでいい」）。素材を足すのも作品を作るのも会話で頼む。
   return (
     <div className="flex h-full min-h-0 bg-background">
-      <aside className="flex w-[280px] shrink-0 flex-col border-r border-border bg-muted/20" aria-label="作品と素材">
+      <aside className={`${compact ? 'hidden' : 'flex'} w-[280px] shrink-0 flex-col border-r border-border bg-muted/20`} aria-label="作品と素材">
         <div className="flex shrink-0 items-center gap-2 px-4 py-3">
           <Clapperboard className="h-4 w-4 text-primary" />
           <span className="flex-1 text-sm font-semibold">ダン 制作</span>
@@ -959,8 +963,8 @@ export function ProductionWorkspace({
         </div>
       </aside>
 
-      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="作品の一覧">
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
+      <main className={`min-h-0 min-w-0 flex-1 overflow-y-auto ${compact ? 'p-3' : 'p-6'}`} aria-label="作品の一覧">
+        <div className={`grid gap-4 ${compact ? 'grid-cols-2' : 'grid-cols-[repeat(auto-fill,minmax(220px,1fr))]'}`}>
           <button
             type="button"
             onClick={() => void createContent()}

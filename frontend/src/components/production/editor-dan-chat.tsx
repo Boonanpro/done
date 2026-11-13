@@ -164,6 +164,31 @@ export function ProductionStudio({ roomId }: { roomId: string }) {
     try { localStorage.setItem(OPEN_KEY, v ? '1' : '0'); } catch {}
   };
 
+  // スマホ（アプリの中の画面は ?phone=1、ブラウザは幅で）: 上にプレビューと小さいタイムライン、下に「ダンと制作」
+  // （2026-11-13 本人「スマホのアプリからタイムラインを開いてチャットしたい。画像を渡したり文字を打ったり」）。
+  const [phone, setPhone] = useState(false);
+  useEffect(() => {
+    const forced = new URLSearchParams(window.location.search).get('phone') === '1';
+    const check = () => setPhone(forced || window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+  if (phone) {
+    return (
+      <div className="flex h-[100dvh] min-h-0 w-full flex-col overflow-hidden bg-background">
+        <div className={`min-h-0 w-full ${contentId ? 'shrink-0' : 'flex-1'}`} style={contentId ? { height: 'min(58dvh, 480px)' } : undefined}>
+          <ProductionWorkspace roomId={roomId} onContentChange={setContentId} compact />
+        </div>
+        {contentId ? (
+          <section className="min-h-0 flex-1 border-t border-border" aria-label="ダンと制作">
+            <EditorDanChat roomId={roomId} contentId={contentId} />
+          </section>
+        ) : null}
+      </div>
+    );
+  }
+
   // 作品を開いても閉じても ProductionWorkspace は同じ場所に置いたまま（読み直さない）。
   return (
     <div className="flex h-screen min-h-0 w-full overflow-hidden bg-background">
