@@ -260,6 +260,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const gateRef = useRef(urlFlag('syncstart') !== '0');
   // 再生中に位置を動かした時、再生の輪に「その位置でそろえ直して」と伝える
   const prepRequestRef = useRef(false);
+  // 再生が流れている最中か（準備中ではない）。段の中身が変わって再生の輪を作り直した時に、止めずに続けるため
+  const runningRef = useRef(false);
   const useWebAudio = useMemo(() => urlFlag('webaudio') !== '0' && webAudioSupported() && supported, [supported]);
   // Web Audio が作れなかった時だけ、前の <video> で音を鳴らす
   const [webAudioBroken, setWebAudioBroken] = useState(false);
@@ -1040,6 +1042,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // the proven native-NLE playback path. drawFrame() composites the video elements onto the canvas.
   useEffect(() => {
     if (!playing) {
+      runningRef.current = false;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       playClockRef.current = null;
@@ -1085,10 +1088,14 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     // 「再生ヘッドと音声だけ走って映像が止まっているより、揃って一斉に流れ出すことが大事」）。
     // prep = 止めて準備中、run = 流れている。流れている途中で映像か音が0.15秒追いつかなければ prep に戻る。
     const gate = gateRef.current;
-    let phase: 'prep' | 'run' = gate ? 'prep' : 'run';
+    // 再生中に段の中身が変わってここへ来た時（流れている最中）は、止めずにそのまま続ける
+    const resumeRunning = runningRef.current;
+    let phase: 'prep' | 'run' = gate && !resumeRunning ? 'prep' : 'run';
+    let visOkAt = 0;
+    let audOkAt = 0;
     let prepSince = performance.now();
     let badSince = 0;
-    if (gate) {
+    if (phase === 'prep') {
       stopAudioNodes();
       audioAnchorRef.current = null;
       for (const [, v] of videosRef.current) if (!v.paused) v.pause();
@@ -1096,6 +1103,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     prepRequestRef.current = false;
     const enterPrep = (t: number, stall: boolean) => {
       phase = 'prep';
+      runningRef.current = false;
+      visOkAt = 0;
+      audOkAt = 0;
       prepSince = performance.now();
       badSince = 0;
       stopAudioNodes();
@@ -1126,8 +1136,15 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       drawFrame(t);
       const audioOk = !webAudio || audioReadyAt(t);
       const ctxOk = !webAudio || !mgr || mgr.ctx.state === 'running' || nowWall - prepSince > 400;
-      const ready = (visualReadyAt(t, 'start', nowWall - prepSince > 300) && audioOk && ctxOk) || nowWall - prepSince > 6000;
+      const visOk = visualReadyAt(t, 'start', nowWall - prepSince > 300);
+      if (visOk && !visOkAt) visOkAt = nowWall;
+      if (audioOk && !audOkAt) audOkAt = nowWall;
+      const ready = (visOk && audioOk && ctxOk) || nowWall - prepSince > 6000;
       if (!ready) return;
+      if (showDiag) {
+        const st0 = previewStats() as unknown as { startDetail?: number[][] };
+        (st0.startDetail ||= []).push([Math.round((visOkAt || nowWall) - prepSince), Math.round((audOkAt || nowWall) - prepSince)]);
+      }
       // そろった: 映像の要素・音・時計を同じ瞬間に流し始める
       const st = previewStats();
       (st.startWaits ||= []).push(Math.round(nowWall - prepSince));
@@ -1141,6 +1158,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       clock.t = t;
       clock.wall = performance.now() + 50; // 音の時計が無い時も、音と同じく0.05秒後から進める
       phase = 'run';
+      runningRef.current = true;
       badSince = 0;
     };
     const step = () => {
