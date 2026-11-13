@@ -11,6 +11,7 @@
 // mp4 以外（wav・mp3 など短い音の素材）は丸ごと読んで decodeAudioData する。
 
 import { createFile, type MP4File, type MP4ArrayBuffer } from 'mp4box';
+import { readLocalRange } from './local-media';
 
 const BLOCK_SEC = 4;                  // 1 回に解読する長さ
 const MAX_BLOCKS = 40;                // 素材ごとに持つ数（約160秒・ステレオ48kHzで約60MB）
@@ -23,7 +24,7 @@ type ASample = { pt: number; dur: number; offset: number; size: number };
 export type AudioSegment = { buffer: AudioBuffer; bufOffset: number; srcStart: number; srcEnd: number };
 
 /** 制作の素材（variant=view / proxy / original）なら、音だけの写し（短い AAC の m4a）の住所。それ以外は null */
-function audioOnlyUrl(url: string): string | null {
+export function audioOnlyUrl(url: string): string | null {
   if (!url.includes('/production-assets/media?') || !/[?&]variant=(view|proxy|original)(&|$)/.test(url)) return null;
   return url.replace(/([?&]variant=)(view|proxy|original)/, '$1audio');
 }
@@ -72,6 +73,8 @@ export class AssetAudioSource {
   private fetchUrl: string;
 
   private async fetchRange(lo: number, hi: number): Promise<{ buf: ArrayBuffer; total: number; partial: boolean }> {
+    const local = await readLocalRange(this.fetchUrl, lo, hi);
+    if (local) return local;
     const res = await fetch(this.fetchUrl, { headers: { Range: `bytes=${lo}-${hi}` } });
     if (!res.ok) throw new Error(`fetch ${res.status}`);
     if (res.status === 206) {

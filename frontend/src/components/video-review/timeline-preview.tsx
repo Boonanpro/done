@@ -8,7 +8,8 @@ import type { CaptionDesign } from './caption-design';
 import { FrameSourceManager, webCodecsSupported } from './frame-source';
 import { SceneLayer, isSceneClip, type SceneClip } from './scene-layer';
 import { gradeFilter } from './grade-filter';
-import { AudioSourceManager, webAudioSupported } from './audio-source';
+import { AudioSourceManager, audioOnlyUrl, webAudioSupported } from './audio-source';
+import { localMedia, localMediaEnabled, localPlaySrc, type LocalMediaProgress } from './local-media';
 
 // Live timeline compositor. Draws the current edit (base video + overlay/PiP layers +
 // captions + blur) onto a <canvas> for the playhead time, so manual edits reflect
@@ -510,7 +511,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const a = assetById.get(aid);
       if (!a) continue;
       const v = document.createElement('video');
-      v.src = assetSrc(a);
+      v.src = localPlaySrc(assetSrc(a));
       v.dataset.assetId = aid;
       v.muted = true;
       v.playsInline = true;
@@ -551,7 +552,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const a = assetById.get(aid);
       if (!a) continue;
       const v = document.createElement('video');
-      v.src = assetSrc(a);
+      v.src = localPlaySrc(assetSrc(a));
       v.dataset.assetId = aid;
       v.muted = true; // audio comes from the dedicated audio elements
       v.playsInline = true;
@@ -621,6 +622,31 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     // 開いた時に全部の音の素材の目次（短い音は中身ごと）を読み始める: 再生がそこへ来てから読むと間に合わない
     for (const u of urls) mgr.get(u);
   }, [audibleAudio, srcByAssetId, useWebAudio]);
+
+  // --- 素材をこのパソコンの保存場所へ取り込む（家の外から開いた時の、切れ目ごとの取りに行く待ちを無くす） ---
+  // 先に要る順: 音だけの写し（小さい）→ 映像の写し。どちらも作品の頭から使われる順。
+  const [localProg, setLocalProg] = useState<LocalMediaProgress | null>(null);
+  const localUrlsKey = useMemo(() => {
+    const first = new Map<string, number>();
+    const note = (u: string | undefined, t: number) => { if (u && !(first.get(u)! <= t)) first.set(u, t); };
+    for (const { clip } of audibleAudio) {
+      const u = srcByAssetId.get(String(clip.asset_id || ''));
+      if (u) note(useWebAudio ? (audioOnlyUrl(u) || u) : u, clip.timeline_start || 0);
+    }
+    const audio = [...first.entries()].sort((a, b) => a[1] - b[1]).map(([u]) => u);
+    first.clear();
+    for (const vc of visualClips) note(srcByAssetId.get(String(vc.clip.asset_id || '')), vc.clip.timeline_start || 0);
+    const video = [...first.entries()].sort((a, b) => a[1] - b[1]).map(([u]) => u);
+    return JSON.stringify([...audio, ...video]);
+  }, [audibleAudio, visualClips, srcByAssetId, useWebAudio]);
+  useEffect(() => {
+    if (!localMediaEnabled()) return;
+    const store = localMedia();
+    const off = store.subscribe(setLocalProg);
+    const t = window.setTimeout(() => { void store.ensure(JSON.parse(localUrlsKey) as string[]); }, 1500);
+    return () => { window.clearTimeout(t); off(); };
+  }, [localUrlsKey]);
+  useEffect(() => () => { if (localMediaEnabled()) localMedia().stop(); }, []);
 
   // 止まっている間も、再生位置の先の音を解読しておく（再生を押した瞬間から鳴る）
   const ensureAudioAhead = useCallback((t: number, ahead: number) => {
@@ -1552,6 +1578,15 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           <div className="text-xs text-white/80">
             素材を準備中… {loadProgress.ready}/{loadProgress.total}
           </div>
+        </div>
+      ) : null}
+      {localProg && localProg.active && localProg.bytesTotal > 0 ? (
+        <div
+          data-local-media
+          title="このパソコンに素材の写しを取り込んでいます。終わると再生が速くなります。取り込み中も編集・再生はできます。"
+          className="pointer-events-none absolute bottom-1 left-1 rounded bg-black/60 px-2 py-0.5 text-[11px] text-white/80"
+        >
+          素材を取り込み中 {Math.min(99, Math.floor((localProg.bytesDone / localProg.bytesTotal) * 100))}%
         </div>
       ) : null}
       {contentRect && sceneClips.length ? (

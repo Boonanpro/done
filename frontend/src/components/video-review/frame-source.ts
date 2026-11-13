@@ -14,6 +14,7 @@
 // scrubbing is frame-accurate.
 
 import { createFile, DataStream, type MP4File, type MP4ArrayBuffer } from 'mp4box';
+import { readLocalRange } from './local-media';
 
 export function webCodecsSupported(): boolean {
   return typeof window !== 'undefined' && typeof window.VideoDecoder !== 'undefined';
@@ -99,6 +100,9 @@ export class AssetFrameSource {
   }
 
   private async fetchRange(lo: number, hi: number): Promise<{ buf: ArrayBuffer; total: number; partial: boolean }> {
+    // このパソコンに取り込み済みなら、Mac mini まで取りに行かずにそこから読む
+    const local = await readLocalRange(this.url, lo, hi);
+    if (local) return local;
     const ctl = new AbortController();
     const res = await fetch(this.url, { headers: { Range: `bytes=${lo}-${hi}` }, signal: ctl.signal });
     if (!res.ok) throw new Error(`fetch ${res.status}`);
