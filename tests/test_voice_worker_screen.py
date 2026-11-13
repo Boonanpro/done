@@ -71,3 +71,46 @@ def test_initial_caption_does_not_block_first_worker_screen():
     stage.version+=1
     f.update([job()])
     assert stage.image.endswith('actual.png')
+
+@pytest.mark.asyncio
+async def test_compose_delivers_touchable_saved_draft_and_keeps_it_while_worker_browses(monkeypatch, tmp_path):
+    from app.services import voice_stage as V
+    from app.services.outbound_message_service import OutboundMessageService
+    monkeypatch.setattr(V, 'ROOT', tmp_path)
+    row = dict(id='p', user_id='u', source_room_id='r', status='pending', content='投稿する前に直す本文',
+               action_data=dict(channel='x_post', to='example', attachments=[dict(url='/api/v1/files/demo.mp4', type='video/mp4')]))
+    j = job()
+    monkeypatch.setattr(command_job_state, 'read', lambda _: j)
+    monkeypatch.setattr(command_job_state, 'change', lambda _, fn: fn(j))
+    monkeypatch.setattr(OutboundMessageService, '__init__', lambda self: None)
+    monkeypatch.setattr(OutboundMessageService, 'get', lambda self, pid, uid: row if (pid, uid) == ('p', 'u') else None)
+    await observe('j', 'compose_message', {'action':'propose'}, {'success':True, 'proposal_id':'p'})
+    stage = V.Stage('r', 'no-call', None, lambda *a, **kw: None, user_id='u')
+    f = Follower(stage, 'u', 'r', '2026-10-31T07:00:00')
+    f.update([j])
+    assert stage.card['proposal_id'] == 'p' and stage.card['attachments'][0]['url'].endswith('demo.mp4')
+    assert stage.image == ''
+    j['screen']['at'] = '2099-01-01T00:00:00'
+    f.update([j])
+    assert stage.card['body'] == row['content'] and stage.image == ''
+    # Another owner, room, cancelled job, or previous call cannot show its card.
+    for patch in ({'user_id':'other'}, {'origin_room_id':'other'}, {'state':'cancelled'}):
+        rejected = {**j, **patch}
+        fresh = V.Stage('r', 'no-call', None, lambda *a, **kw: None, user_id='u')
+        Follower(fresh, 'u', 'r', '2026-10-31T07:00:00').update([rejected])
+        assert not fresh.card
+    fresh = V.Stage('r', 'no-call', None, lambda *a, **kw: None, user_id='u')
+    Follower(fresh, 'u', 'r', '2099-01-02T00:00:00').update([j])
+    assert not fresh.card
+
+@pytest.mark.asyncio
+async def test_failed_compose_or_other_rooms_draft_never_becomes_a_preview(monkeypatch):
+    from app.services.outbound_message_service import OutboundMessageService
+    j = job()
+    monkeypatch.setattr(command_job_state, 'read', lambda _: j)
+    monkeypatch.setattr(command_job_state, 'change', lambda _, fn: fn(j))
+    monkeypatch.setattr(OutboundMessageService, '__init__', lambda self: None)
+    monkeypatch.setattr(OutboundMessageService, 'get', lambda *a: dict(source_room_id='other'))
+    for result in ({'success':False}, {'success':True, 'proposal_id':'p'}):
+        await observe('j', 'compose_message', {'action':'propose'}, result)
+        assert 'proposal_preview' not in j

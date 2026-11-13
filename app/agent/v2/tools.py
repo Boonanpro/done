@@ -713,7 +713,7 @@ COMPOSE_MESSAGE_TOOL = {
             "reply_to_post_url": {"type": "string", "description": "コメント返信用: 投稿URL"},
             "reply_to_comment_id": {"type": "string", "description": "コメント返信用: 返信先コメントのID"},
             "collab_room_id": {"type": "string", "description": "channel=\"collab\" 用: 送信先コラボルームのID（collab_thread の結果や受信通知にある）"},
-            "attachments": {"type": "array", "items": {"type": "string"}, "description": "collab用: 相手に一緒に届ける画像・動画・ファイル。ローカルの絶対パス（例: D:/done/uploads/xxx.mp4）、本体チャットの /api/v1/files/… URL、窓口の /api/v1/collab/files/… URL のいずれか"},
+            "attachments": {"type": "array", "items": {"type": "string"}, "description": "collab: 相手に届ける画像・動画・ファイルのローカルパスまたは配信URL。x_post: 投稿に添付する画像・動画の /api/v1/files/<名前> URL。動画をtarget_noteに書くだけでは添付されない。確認画面と送信時に同じ添付を使う。"},
             "sender": {"type": "string", "enum": ["dan", "owner"], "description": "collab用: 名義。dan=ダンとして届く（既定）/ owner=ユーザー本人として届く"},
             "body": {"type": "string", "description": "propose時必須。送る本文そのもの（挨拶〜署名まで完成形）"},
             "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
@@ -4890,6 +4890,8 @@ async def _execute_compose_message(
             "subject": ad.get("subject"), "reply_to": ad.get("reply_to"), "target": ad.get("target"),
             "user_edited": bool(ad.get("user_edited")),
             "sent_by": ad.get("sent_by"), "body": row.get("content"),
+            "attachments": ad.get("attachments") or [],
+            "preview_path": "/message-preview?proposal=" + str(row.get("id") or ""),
         }
 
     try:
@@ -4972,6 +4974,7 @@ async def _execute_compose_message(
             )
             return {
                 "success": True, "proposal_id": row["id"],
+                "preview_path": "/message-preview?proposal=" + row["id"],
                 "message": gate_note + (
                     "送信案カードをこの部屋に出しました。本文はチャットに繰り返さないこと。"
                     "ユーザーはカード上で本文を直して送信ボタンを押せます（あなたを起こさずに送られます）。"
@@ -4997,7 +5000,7 @@ async def _execute_compose_message(
                     "success": True, "locked": True, "draft": _brief(row),
                     "message": (
                         "このチャネルはサーバーから送れないため、カードを「送信中」にロックしました"
-                        "（ユーザーはもう押せません）。上の draft の本文を一字も変えずに browser で送り、"
+                        "（ユーザーはもう押せません）。上の draft の本文と attachments の添付を合わせて browser で送り、"
                         '送れたら compose_message(action="mark_sent", proposal_id) で確定、'
                         '送れなかったら action="release" で下書きに戻すこと。'
                     ),

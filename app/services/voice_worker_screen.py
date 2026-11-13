@@ -6,9 +6,27 @@ import time
 HOLD_S = 12.0   # a page put on the screen (show_page) stays at least this long before the work's browser comes back
 
 
-async def observe(job_id, tool, arguments):
+async def observe(job_id, tool, arguments, result=None):
     from app.services import command_job_state as state
     from app.services.voice_external_screen import NO_SCREEN
+    if tool == 'compose_message' and arguments.get('action') == 'propose':
+        # A screenshot of an editor cannot be tapped. Deliver the real saved card.
+        pid = (result or {}).get('proposal_id')
+        if not (result or {}).get('success') or not pid:
+            return
+        try:
+            from app.services.outbound_message_service import OutboundMessageService
+            job = state.read(job_id)
+            row = await asyncio.to_thread(OutboundMessageService().get, pid, job['user_id'])
+            if not row or row.get('source_room_id') != job['origin_room_id']:
+                return
+            def draft(s):
+                if s['state'] not in state.TERMINAL:
+                    s['proposal_preview'] = {'row': row, 'at': state.now()}
+            state.change(job_id, draft)
+        except Exception:
+            pass  # A display problem must not retry or duplicate a draft.
+        return
     if tool not in {'browser', 'browser_plan', 'browser_flow'} or arguments.get('action') in NO_SCREEN:
         return
     # Ask the executor used by this very operation, never a second browser.
@@ -33,6 +51,7 @@ class Follower:
         self.user_id, self.room_id, self.connected_at = user_id, room_id, connected_at
         self.version = stage.version
         self.seen = None
+        self.seen_proposal = None
 
     def update(self, jobs):
         from app.services.voice_stage import safe_image
@@ -40,6 +59,21 @@ class Follower:
         if stage.user_id != self.user_id:
             return
         routed = not getattr(stage, 'listening', True)
+        previews = [j for j in jobs if j.get('user_id') == self.user_id
+                    and j.get('origin_room_id') == self.room_id
+                    and j.get('state') in {'running', 'awaiting_confirmation', 'completed'}
+                    and (j.get('proposal_preview') or {}).get('at', '') >= self.connected_at]
+        if previews:
+            preview = max(previews, key=lambda j: j['proposal_preview']['at'])['proposal_preview']
+            row = preview.get('row') or {}
+            key = (row.get('id'), preview['at'])
+            if row.get('user_id') == self.user_id and row.get('source_room_id') == self.room_id and key != self.seen_proposal:
+                self.seen_proposal = key
+                stage._put_card(row)
+                self.version = stage.version
+                return
+        if self.seen_proposal and (getattr(stage, 'card', None) or {}).get('proposal_id') == self.seen_proposal[0]:
+            return  # Browsing to inspect the draft must not replace its touchable card with a picture.
         if stage.version != self.version and not routed:
             if self.seen or any(getattr(stage, field, None) for field in ('image','frame','program','html','card','doc','media','cue')):
                 return  # A newer visible scene wins; an initial caption is not a scene.

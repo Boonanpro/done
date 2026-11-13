@@ -22,6 +22,8 @@ export function useStageDraft(card: StageCard) {
     const ad = row.action_data || {};
     setCurrent(previous => ({ ...previous, body: row.content, status: row.status,
       to: String(ad.to ?? previous.to), to_name: String(ad.to_name ?? previous.to_name ?? ''),
+      channel: String(ad.channel || previous.channel),
+      attachments: Array.isArray(ad.attachments) ? ad.attachments as StageCard['attachments'] : [],
       subject: String(ad.subject ?? ''), revision: Number(ad.revision || 1) }));
     setBody(row.content);
     setLoaded(true);

@@ -482,6 +482,14 @@ export class AssetFrameSource {
   }
 
   /** Lightweight status for the on-screen diagnostic (why a frame might not be showing). */
+  /** この素材がこの時刻の絵を出せるはずか。false = 出せない（壊れた・範囲の外）ので、待たずに飛ばしてよい。
+   *  読み込み中は true（もうすぐ出せる＝待つべき）。 */
+  canProvide(timeSec: number): boolean {
+    if (this.failed) return false;
+    if (!this.samples.length) return true;
+    return this.presPosAtTime(timeSec) >= 0;
+  }
+
   status(): string {
     if (this.failed) return 'FAILED';
     if (!this.samples.length) return 'loading';

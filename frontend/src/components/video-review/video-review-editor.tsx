@@ -31,6 +31,7 @@ import { toast } from 'sonner';
 import { ClipBox, type ClipBoxFns } from './timeline-clip';
 import { perfLog } from '@/lib/perf-log';
 import { TimelineRuler } from './timeline-ruler';
+import { FullscreenBar } from './fullscreen-bar';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -2200,6 +2201,29 @@ export function VideoReviewEditor({
     clearSelection();
   }, [annotations, editSequence, flushHistory, clearSelection]);
 
+  // キーボードは最後に押した所に効かせる（2026-11-13 本人）: チャットの入力欄に文字を打った後に
+  // タイムラインやプレビューを押したら、入力欄から外してエディターで受ける。タイムラインの部品は
+  // 押した時に既定の動きを止めている（引きずりのため）ので、ブラウザが自分では入力欄から外さなかった。
+  // 逆に入力欄を押せば入力欄に移るのはブラウザのまま。
+  const editorRootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('keyfix') === '0') return; // 比べる時だけ前の作り
+    const TEXT = 'input, textarea, select, [contenteditable="true"], [contenteditable=""]';
+    const onDown = (event: PointerEvent) => {
+      const root = editorRootRef.current;
+      const target = event.target as HTMLElement | null;
+      if (!root || !target || !root.contains(target)) return;
+      if (target.closest(TEXT)) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== root && active.closest?.(TEXT)) active.blur();
+      if (!target.closest('button, a[href], [tabindex]:not([tabindex="-1"])') && document.activeElement !== root) {
+        root.focus({ preventScroll: true });
+      }
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    return () => window.removeEventListener('pointerdown', onDown, true);
+  }, []);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -3656,7 +3680,11 @@ export function VideoReviewEditor({
   ), [timelineLanes, pendingAnnotation, isTimelineScrubbing, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch, viewWin, trackPx]);
 
   return (
-    <div className={`flex h-full text-foreground ${nativeShell ? '' : 'bg-background'} ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
+    <div
+      ref={editorRootRef}
+      tabIndex={-1}
+      className={`flex h-full text-foreground outline-none ${nativeShell ? '' : 'bg-background'} ${embedded ? 'min-h-0' : 'min-h-screen'}`}
+    >
       <style>{DAN_HANDS_CSS}</style>
       {danCursor?.edge ? (
         <div
@@ -3750,6 +3778,17 @@ export function VideoReviewEditor({
               className={`relative flex min-h-0 min-w-0 flex-1 items-center justify-center ${previewFullscreen ? 'bg-black p-0' : 'p-4'}`}
               onDoubleClick={(event) => { if (event.target === event.currentTarget) togglePreviewFullscreen(); }}
             >
+              {previewFullscreen ? (
+                <FullscreenBar
+                  hostRef={previewAreaRef}
+                  playing={playing}
+                  duration={contentDuration || 0}
+                  liveTimeRef={liveTimeRef}
+                  onTogglePlay={() => setPlaying((p) => !p)}
+                  onSeek={(t) => seekTimeline(t)}
+                  onSetPlaying={(p) => setPlaying(p)}
+                />
+              ) : null}
               {previewTopLeft && !previewFullscreen ? (
                 <div className="absolute left-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto">
                   {previewTopLeft}

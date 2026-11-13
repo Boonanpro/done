@@ -287,7 +287,8 @@ def card_of(row):
     return {'proposal_id': str(row.get('id') or ''), 'status': str(row.get('status') or 'pending'), 'channel': str(ad.get('channel') or 'other'),
             'to': str(ad.get('to') or ''), 'to_name': str(ad.get('to_name') or ''), 'subject': str(ad.get('subject') or ''),
             'body': str(row.get('content') or ''), 'intent': str(ad.get('intent') or ''), 'revision': int(ad.get('revision') or 1),
-            'sent_at': str(ad.get('sent_at') or ''), 'sendable': str(ad.get('channel') or '') in SENDABLE}
+            'sent_at': str(ad.get('sent_at') or ''), 'sendable': str(ad.get('channel') or '') in SENDABLE,
+            'attachments': ad.get('attachments') or []}
 
 
 SENDABLE = {'email', 'instagram_dm', 'instagram_comment', 'collab'}   # app.services.outbound_message_service.SERVER_SENDABLE
