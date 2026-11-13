@@ -5310,12 +5310,16 @@ def _resolve_local_uri(uri: str) -> Path:
 
 
 def _range_file_response(path: Path, request: Request):
-    file_size = path.stat().st_size
+    st = path.stat()
+    file_size = st.st_size
     content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
     range_header = request.headers.get("range")
+    # 画面がこのファイルを手元に写した物と同じ中身か確かめる印（作り直すと変わる）。
+    # Cloudflare が ETag を書き換えることがあるので、自前の見出しでも渡す。
+    version = f"{file_size:x}-{st.st_mtime_ns:x}"
 
     if not range_header:
-        return FileResponse(path, media_type=content_type, headers={"Accept-Ranges": "bytes"})
+        return FileResponse(path, media_type=content_type, headers={"Accept-Ranges": "bytes", "X-Content-Version": version})
 
     try:
         units, value = range_header.split("=", 1)
@@ -5350,6 +5354,8 @@ def _range_file_response(path: Path, request: Request):
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {start}-{end}/{file_size}",
             "Content-Length": str(chunk_size),
+            "X-Content-Version": version,
+            "Access-Control-Expose-Headers": "X-Content-Version, Content-Range",
         },
     )
 
