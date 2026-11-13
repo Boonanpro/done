@@ -22,6 +22,12 @@ type ASample = { pt: number; dur: number; offset: number; size: number };
 
 export type AudioSegment = { buffer: AudioBuffer; bufOffset: number; srcStart: number; srcEnd: number };
 
+/** 制作の素材の写し（variant=view / proxy）なら、音だけの写しの住所。それ以外は null */
+function audioOnlyUrl(url: string): string | null {
+  if (!url.includes('/production-assets/media?') || !/[?&]variant=(view|proxy)(&|$)/.test(url)) return null;
+  return url.replace(/([?&]variant=)(view|proxy)/, '$1audio');
+}
+
 export function webAudioSupported(): boolean {
   return typeof window !== 'undefined' && typeof window.AudioContext !== 'undefined' && typeof window.AudioDecoder !== 'undefined';
 }
@@ -48,14 +54,25 @@ export class AssetAudioSource {
   constructor(url: string, ctx: BaseAudioContext) {
     this.url = url;
     this.ctx = ctx;
-    this.ready = this.init().catch((e) => {
+    this.fetchUrl = audioOnlyUrl(url) || url;
+    this.ready = this.init().catch(async (e) => {
+      if (this.fetchUrl === this.url) throw e;
+      // 音だけの写しが作れなかった（古い配り口など）: 映像入りの写しから読む
+      this.fetchUrl = this.url;
+      this.samples = [];
+      this.silent = false;
+      await this.init();
+    }).catch((e) => {
       this.failed = true;
       console.warn('[audio-source] init failed', url, e);
     });
   }
 
+  // 読む先: 制作の素材なら、まず音だけの写し（variant=audio）。無ければ渡された写しそのもの
+  private fetchUrl: string;
+
   private async fetchRange(lo: number, hi: number): Promise<{ buf: ArrayBuffer; total: number; partial: boolean }> {
-    const res = await fetch(this.url, { headers: { Range: `bytes=${lo}-${hi}` } });
+    const res = await fetch(this.fetchUrl, { headers: { Range: `bytes=${lo}-${hi}` } });
     if (!res.ok) throw new Error(`fetch ${res.status}`);
     if (res.status === 206) {
       const m = /\/(\d+)\s*$/.exec(res.headers.get('Content-Range') || '');
