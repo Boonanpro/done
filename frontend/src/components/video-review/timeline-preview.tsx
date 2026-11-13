@@ -1061,7 +1061,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         a.muted = false;
         a.volume = c.volume == null ? 1 : Math.max(0, Math.min(1, Number(c.volume) || 0));
         if (a.paused) void a.play().catch(() => {});
-        if (a.paused || a.seeking || a.readyState < 3) elementGap = true;
+        if (a.paused || a.seeking || a.readyState < 3 || Math.abs(a.currentTime - expected) > 0.25) elementGap = true;
       }
       if (elementGap) previewStats().audioGapMs += dtMs;
       // 前の作り: これから始まる音のクリップも前もって頭出ししておく（切れ目で読み込みを待たない）
