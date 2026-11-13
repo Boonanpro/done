@@ -656,7 +656,8 @@ _CAPTION_ANIM_FPS = float(os.environ.get("DAN_CAPTION_ANIM_FPS", "20"))
 
 
 def _render_caption_overlays(
-    captions: list[dict[str, Any]], output_width: int, output_height: int, job_dir: Path
+    captions: list[dict[str, Any]], output_width: int, output_height: int, job_dir: Path,
+    fps: float = 30.0,
 ) -> list[dict[str, Any]]:
     """Render designed captions by screenshotting the Next.js /caption-frame route (same
     <CaptionLayer> as the live preview => pixel parity). A STATIC caption -> one transparent PNG;
@@ -667,6 +668,16 @@ def _render_caption_overlays(
     specs: list[dict[str, Any]] = []
     for i, cap in enumerate(captions):
         text = str(cap.get("text") or "").strip()
+        if _is_scene_clip(cap):
+            # every output frame, sampled at the frame's own time (like the HyperFrames renderer)
+            start = max(0.0, float(cap.get("timeline_start") or 0))
+            end = max(start + 1 / fps, float(cap.get("timeline_end") or start + 1))
+            seq_dir = job_dir / f"caption_{i:03d}_seq"
+            items.append({"seq_dir": str(seq_dir), "scene": cap["scene"], "clip_id": str(cap.get("id") or i),
+                          "scene_t0": float(cap.get("scene_offset") or 0), "frames": max(1, round((end - start) * fps)),
+                          "fps": fps})
+            specs.append({"kind": "anim", "seq_dir": seq_dir, "fps": fps, "start": start, "end": end, "frame_start": True})
+            continue
         if not text:
             continue
         start = max(0.0, float(cap.get("timeline_start") or 0))
@@ -825,9 +836,16 @@ def _sequence_z_items(
             elif isinstance(clip.get("region"), dict):
                 if clip.get("style") != "note":  # 指示クリップ: 画には出さない
                     z_items.append(("fx", clip))
-            elif str(clip.get("text") or "").strip():
+            elif str(clip.get("text") or "").strip() or _is_scene_clip(clip):
                 z_items.append(("cap", clip))
     return base_clips, z_items
+
+
+def _is_scene_clip(clip: dict[str, Any]) -> bool:
+    """An editable scene (HTML + one GSAP timeline) placed on the timeline. It is drawn by the
+    same sandboxed frame as the editor preview (/caption-frame), as a transparent layer."""
+    scene = clip.get("scene")
+    return isinstance(scene, dict) and isinstance(scene.get("html"), str) and bool(scene["html"].strip())
 
 
 def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -2348,7 +2366,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
     cap_ass_fallback = False
     if cap_clips:
         try:
-            _cap_rendered = _render_caption_overlays(cap_clips, output_width, output_height, job_dir)
+            _cap_rendered = _render_caption_overlays(cap_clips, output_width, output_height, job_dir, timeline_fps)
             cap_overlays = {id(c): ov for c, ov in zip(cap_clips, _cap_rendered)}
         except Exception as exc:  # noqa: BLE001
             logger.warning("designed caption overlay failed, falling back to .ass: %s", exc)

@@ -22,7 +22,7 @@ type Payload = {
   captions: (RenderCaption & {scene?: Record<string, unknown>})[];
 };
 
-type SceneHost = HTMLDivElement & {ready?: Promise<{ok:boolean}>;seek?: (t:number)=>void;dispose?:()=>void};
+type SceneHost = HTMLDivElement & {ready?: Promise<{ok:boolean}>;seek?: (t:number)=>void;dispose?:()=>void;onseeked?:(t:number)=>void};
 let sceneScript: Promise<void> | undefined;
 function loadSceneScript(){
   return sceneScript ||= new Promise<void>((resolve,reject)=>{
@@ -40,17 +40,17 @@ function EditableScene({clip,time}:{clip:RenderCaption & {scene?:Record<string,u
       if(canceled||!target)return;
       const h=document.createElement('div') as SceneHost;h.style.cssText='position:absolute;inset:0';target.append(h);host.current=h;
       window.createScenePreview?.({id:clip.id,title:'動画コンテ',scene:clip.scene},h);
-      const frame=h.querySelector('iframe');if(frame)frame.style.cssText='width:100%;height:100%;border:0;display:block';
+      const frame=h.querySelector('iframe');if(frame)frame.style.cssText='width:100%;height:100%;border:0;display:block;background:transparent;color-scheme:light';
       const controls=h.querySelector<HTMLElement>('.proposal-controls');if(controls)controls.style.display='none';
+      // the frame answers each seek after it has drawn it; only then is that time on screen
+      h.onseeked=(local)=>{window.__nativeSceneTime=local+clip.start;};
       h.seek?.(latest.current-clip.start);
-      h.ready?.then(result=>{if(!canceled){target.dataset.sceneReady=String(result.ok);h.seek?.(latest.current-clip.start);window.__nativeSceneTime=latest.current;}});
+      h.ready?.then(result=>{if(!canceled){target.dataset.sceneReady=String(result.ok);h.seek?.(latest.current-clip.start);}});
     }).catch(()=>{if(target)target.dataset.sceneReady='false';});
     return ()=>{canceled=true;host.current?.dispose?.();host.current=null;target?.replaceChildren();};
   },[clip.id,clip.scene,clip.start]);
   useEffect(()=>{
     host.current?.seek?.(time-clip.start);
-    const handle=requestAnimationFrame(()=>requestAnimationFrame(()=>{window.__nativeSceneTime=time;}));
-    return ()=>cancelAnimationFrame(handle);
   },[time,clip.start]);
   return <div ref={ref} style={{position:'absolute',inset:0,zIndex:-1}}/>;
 }

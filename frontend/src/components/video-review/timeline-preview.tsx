@@ -6,6 +6,8 @@ import type { EditSequence, SequenceAsset, SequenceClip } from './video-review-e
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import type { CaptionDesign } from './caption-design';
 import { FrameSourceManager, webCodecsSupported } from './frame-source';
+import { SceneLayer, isSceneClip, type SceneClip } from './scene-layer';
+import { gradeFilter } from './grade-filter';
 
 // Live timeline compositor. Draws the current edit (base video + overlay/PiP layers +
 // captions + blur) onto a <canvas> for the playhead time, so manual edits reflect
@@ -275,7 +277,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       // A picture placed on a caption lane (a designed caption plate) draws like an overlay.
       if (track.type === 'caption') {
         for (const clip of track.clips || []) {
-          if (!clip.asset_id) continue;
+          if (!clip.asset_id || isSceneClip(clip)) continue;
           out.push({ clip, kind: 'overlay', layer: clip.layer ?? Math.max(2, visualIndex), position: (clip.position as VisualClip['position']) || null });
         }
         continue;
@@ -284,6 +286,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       for (const clip of track.clips || []) {
         // a caption Dan put on a picture lane is drawn by the caption layer, not as a picture
         if (clip.track === 'caption' && !clip.asset_id) continue;
+        if (isSceneClip(clip)) continue; // drawn by <SceneLayer>, not the canvas
         const overlay = isOverlayClip(clip, track.type);
         // A pop-out clip is drawn by the editor's canvas overlay (matted person breaking out of a
         // rounded card); skip its plain-wipe rendering here so no sharp-cornered rectangle peeks
@@ -322,6 +325,13 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           opacity: c.opacity,
         })),
     [captionClips],
+  );
+
+  // Editable scenes (HTML + one GSAP timeline), drawn over the canvas by the same frame the export uses.
+  const sceneClips = useMemo<SceneClip[]>(
+    () => (sequence?.tracks || []).filter((t) => t.type !== 'audio' && !(t as { hidden?: boolean }).hidden)
+      .flatMap((t) => (t.clips || []).filter(isSceneClip)),
+    [sequence],
   );
 
   const effectClips = useMemo(
@@ -565,6 +575,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       ctx.fillRect(0, 0, w, h);
 
       for (const { vc, got } of layers) {
+        // colour grade: the same matrix the export applies (clip.grade)
+        ctx.filter = gradeFilter((vc.clip as { grade?: unknown }).grade);
         const tf = vc.clip.transform;
         const cr = vc.clip.crop;
         let px = vc.position ? vc.position.x * w : 0;
@@ -589,6 +601,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         }
       }
 
+      ctx.filter = 'none';
       // blur / mosaic regions (effect clips active now)
       const baseGot = (layers.find((l) => l.vc.kind === 'base') || layers[0])?.got || null;
       for (const e of effectClips) {
@@ -1004,6 +1017,14 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           <div className="text-xs text-white/80">
             素材を準備中… {loadProgress.ready}/{loadProgress.total}
           </div>
+        </div>
+      ) : null}
+      {contentRect && sceneClips.length ? (
+        <div
+          className="pointer-events-none absolute overflow-hidden"
+          style={{ left: contentRect.left, top: contentRect.top, width: contentRect.width, height: contentRect.height }}
+        >
+          <SceneLayer clips={sceneClips} time={currentTime} playing={playing} clockRef={playClockRef} liveTime={currentTime} />
         </div>
       ) : null}
       {contentRect && renderCaptions.length ? (
