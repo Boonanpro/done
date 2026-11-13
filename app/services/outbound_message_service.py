@@ -37,6 +37,7 @@ CHANNELS = {
     "web_form": "Webフォーム",
     "collab": "コラボチャット",
     "other": "その他",
+    "x_post": "X 投稿",
 }
 
 # 表記揺れの正規化
@@ -134,7 +135,7 @@ class OutboundMessageService:
         sender: Optional[str] = None,
     ) -> dict:
         """reply_to: 既存スレッドへの返信なら {message_id, references, subject, detected_message_id}。
-        attachments: 相手へ一緒に届ける画像・動画・ファイル（ローカルパス or URL）。collab のみ。
+        attachments: collab はローカルパス or URL、x_post はアップロード済みの画像・動画URL。
         sender: "dan"（既定）| "owner" — どちらの名義で相手に届くか。collab のみ。
         指定時は件名不要（Re: を自動付与し、email は In-Reply-To/References でスレッドに繋ぐ）。
         target: フォーム等の送信先 {url, note}。文面カードはそのまま、送信はダンが browser で行う。"""
@@ -152,7 +153,7 @@ class OutboundMessageService:
             raise ValueError("email の新規送信には subject が必要です")
 
         collab_room_id = (reply_to or {}).get("collab_room_id") or (target or {}).get("collab_room_id")
-        staged_files = self._stage_collab_attachments(collab_room_id, attachments) if (channel == "collab" and attachments) else []
+        staged_files = self._stage_attachments(channel, collab_room_id, attachments or [])
         sender = (sender or "").strip().lower() or "dan"
         if sender not in ("dan", "owner"):
             sender = "dan"
@@ -262,7 +263,7 @@ class OutboundMessageService:
 
     def revise_draft(self, proposal_id: str, user_id: str, *, body: Optional[str] = None,
                      subject: Optional[str] = None, to: Optional[str] = None, to_name: Optional[str] = None,
-                     intent: Optional[str] = None) -> dict:
+                     intent: Optional[str] = None, attachments: Optional[list] = None) -> dict:
         """ダン自身の直し（通話で「もっと短く」と言われて書き直した版など）。本文を新しい版に置き換え、
         revision を進める。ユーザーの手編集の印（user_edited）は、本人の声の頼みで直した結果なので外す。
         update_draft（カードのオートセーブ＝ユーザーの編集）とは別の入口（2026-10-27 通話の画面から）。"""
@@ -276,6 +277,9 @@ class OutboundMessageService:
         ad = dict(row.get("action_data") or {})
         now = _now()
         upd: dict[str, Any] = {"updated_at": now}
+        if attachments is not None:
+            collab_id = (ad.get('reply_to') or {}).get('collab_room_id') or (ad.get('target') or {}).get('collab_room_id')
+            ad['attachments'] = self._stage_attachments(ad.get('channel'), collab_id, attachments)
         if body is not None and body.strip():
             upd["content"] = body
             ad["original_body"] = body
@@ -357,6 +361,34 @@ class OutboundMessageService:
         out = dict(r.data[0])
         out["_revised"] = revised_kind
         return out
+
+    def _stage_attachments(self, channel, collab_room_id, attachments):
+        if not attachments:
+            return []
+        if channel == 'collab':
+            return self._stage_collab_attachments(collab_room_id, attachments)
+        # X is uploaded manually after approval. Keep the exact locally uploaded files
+        # in the proposal, so its preview and the later sending instruction agree.
+        if channel != 'x_post':
+            raise ValueError('この手段では添付を扱えません。添付を省いた下書きは作成しません。')
+        import mimetypes
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[2] / 'uploads'
+        files = []
+        for src in attachments:
+            if not isinstance(src, str) or not src.startswith('/api/v1/files/'):
+                raise ValueError('Xの添付は /api/v1/files/ のアップロードURLで指定してください')
+            name = src.removeprefix('/api/v1/files/')
+            if not name or name != Path(name).name or '%' in name or '?' in name or '#' in name:
+                raise ValueError('添付URLの形式が正しくありません')
+            file = root / name
+            if not file.is_file() or not file.resolve().is_relative_to(root.resolve()):
+                raise ValueError('添付ファイルが見つかりません')
+            mime = mimetypes.guess_type(name)[0] or ''
+            if not mime.startswith(('image/', 'video/')):
+                raise ValueError('Xには画像または動画を添付してください')
+            files.append({'name': name, 'url': src, 'type': mime, 'size': file.stat().st_size})
+        return files
 
     def _stage_collab_attachments(self, collab_room_id: Optional[str], attachments: list) -> list:
         """propose 時点で添付を窓口の保存先（uploads/collab/<room>/）へ写し、配信URLにする。
