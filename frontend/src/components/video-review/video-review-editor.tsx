@@ -28,7 +28,7 @@ import {
   Undo2,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { ClipBox, type ClipBoxFns } from './timeline-clip';
+import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipKind } from './timeline-clip';
 import { perfLog } from '@/lib/perf-log';
 import { TimelineRuler } from './timeline-ruler';
 import { FullscreenBar } from './fullscreen-bar';
@@ -222,6 +222,12 @@ export type SequenceAsset = {
   url?: string | null;
   path?: string | null;
   thumbnail_url?: string | null;
+  /** クリップに載せる絵の住所（&t=秒 を足すとその所の絵）。無ければサーバーが作る */
+  thumb_base?: string | null;
+  /** 動画の絵の帯（&m=分 を足すと、その1分を2秒ごとに30コマ並べた1枚） */
+  filmstrip_base?: string | null;
+  /** 音の波形（1秒に100個の山） */
+  peaks_url?: string | null;
   label?: string | null;
   fps?: number | string | null;
   kind?: string | null;
@@ -455,19 +461,6 @@ function itemTypeBadge(itemType: string): string {
       return '音声';
     default:
       return INTENTS.find((it) => it.value === itemType)?.label || itemType;
-  }
-}
-
-function clipItemColor(itemType: string): string {
-  switch (itemType) {
-    case 'caption':
-      return 'bg-violet-500/60';
-    case 'effect':
-      return 'bg-amber-600/70';
-    case 'audio':
-      return 'bg-lime-600/60';
-    default:
-      return 'bg-neutral-700/80';
   }
 }
 
@@ -1003,7 +996,8 @@ export function VideoReviewEditor({
           label: `${zone === 'visual' ? '映像' : '音声'}${i + 1}`,
           zone,
           layer,
-          height: zone === 'audio' ? 24 : hasVideo ? 42 : 28,
+          // 音は波形が見える高さに、映像は絵が見える高さに（2026-11-13 本人「波形を出すなら縦幅を大きく」）
+          height: zone === 'audio' ? 44 : hasVideo ? 44 : 28,
           items,
         };
       });
@@ -2376,6 +2370,17 @@ export function VideoReviewEditor({
       }
     : null;
 
+  const laneLabelColRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const sc = timelineScrollRef.current;
+    const col = laneLabelColRef.current;
+    if (!sc || !col) return;
+    const place = () => { col.style.transform = sc.scrollLeft ? `translateX(${sc.scrollLeft}px)` : ''; };
+    place();
+    sc.addEventListener('scroll', place, { passive: true });
+    return () => sc.removeEventListener('scroll', place);
+  });
+
   const timelineTrackStyle = useMemo(
     () => ({
       width: `${timelineZoom * 100}%`,
@@ -3474,7 +3479,7 @@ export function VideoReviewEditor({
     for (const lane of timelineLanes) for (const it of lane.items) if (it.clip) m.set(it.clip.id, { clip: it.clip, itemType: it.itemType });
     return m;
   }, [timelineLanes]);
-  const clipFns = useRef<ClipBoxFns>({ startDrag: () => {}, openMenu: () => {}, focusClip: () => {} });
+  const clipFns = useRef<ClipBoxFns>({ startDrag: () => {}, openMenu: () => {}, focusClip: () => {}, setVolume: () => {} });
   clipFns.current = {
     startDrag: (event, id, mode) => {
       const hit = laneClipLookup.get(id);
@@ -3491,6 +3496,9 @@ export function VideoReviewEditor({
       const hit = laneClipLookup.get(id);
       selectSequenceClip(id);
       if (hit) seekTimeline(hit.clip.timeline_start);
+    },
+    setVolume: (id, volume) => {
+      updateSequenceClip(id, { volume: Math.round(Math.max(0, Math.min(2, volume)) * 100) / 100 });
     },
   };
   // 見えている範囲（と左右に1画面ずつ）のクリップだけ描く。半画面ぶん動くまで描き直さない。
@@ -3626,20 +3634,45 @@ export function VideoReviewEditor({
                                 item.itemType === 'caption'
                                   ? clip.text || 'テロップ'
                                   : item.itemType === 'audio'
-                                    ? [audioRoleLabel(clip.role), clipAsset?.label || clip.label].filter(Boolean).join('・')
+                                    ? (assetName || clip.label || audioRoleLabel(clip.role))
                                     : clip.label || assetName || '素材';
-                              const badge = isScene ? '場面' : isVideo && ((clip as { kind?: string }).kind === 'image' || clipAsset?.kind === 'image') ? '画像' : itemTypeBadge(item.itemType);
+                              const isImage = isVideo && ((clip as { kind?: string }).kind === 'image' || clipAsset?.kind === 'image');
+                              const kind: ClipKind = isScene ? 'scene'
+                                : item.itemType === 'caption' ? 'caption'
+                                  : item.itemType === 'effect' ? 'effect'
+                                    : item.itemType === 'audio' ? (clip.role === 'music' || clip.role === 'bgm' ? 'bgm' : clip.role === 'sfx' || clip.role === 'se' ? 'se' : 'voice')
+                                      : isImage ? 'image' : 'video';
+                              const badge = CLIP_KIND_STYLE[kind].name;
+                              const srcStart = Number(clip.source_start || 0);
+                              const srcEnd = clip.source_end != null ? Number(clip.source_end) : srcStart + (clip.timeline_end - clip.timeline_start);
+                              // 絵: 動画はクリップが使っている所の絵、画像はその画像（サーバーが小さくして返す）
+                              const thumbBase = clipAsset?.thumb_base || null;
+                              const thumb = !isVideo || isScene ? undefined
+                                : isImage ? thumbBase || clipAsset?.thumbnail_url || undefined
+                                  : clipAsset?.filmstrip_base ? undefined : clipAsset?.thumbnail_url || undefined;
+                              // 動画は、使っている所を含む1分の絵の帯（1分に1回の読み込みを、その1分のクリップ全部で使う）
+                              const stripSec = Math.max(0, srcStart + 0.5);
+                              const strip = isVideo && !isScene && !isImage && clipAsset?.filmstrip_base
+                                ? `${clipAsset.filmstrip_base}&m=${Math.floor(stripSec / 60)}` : undefined;
+                              const stripIndex = Math.floor((stripSec % 60) / 2);
+                              const widthPx = trackPx > 0 ? (width / 100) * trackPx : 200;
                               return (
                                 <ClipBox
                                   key={item.key}
                                   clipId={clip.id}
                                   left={left}
                                   width={width}
-                                  badge={badge}
+                                  widthPx={Math.round(widthPx)}
+                                  kind={kind}
                                   label={labelText}
-                                  colorClass={clipItemColor(item.itemType)}
-                                  thumb={isVideo ? clipAsset?.thumbnail_url || undefined : undefined}
-                                  narrow={!selected && trackPx > 0 && (width / 100) * trackPx < 28}
+                                  thumb={thumb}
+                                  strip={strip}
+                                  stripIndex={stripIndex}
+                                  peaksUrl={item.itemType === 'audio' ? clipAsset?.peaks_url || undefined : undefined}
+                                  sourceStart={srcStart}
+                                  sourceEnd={srcEnd}
+                                  volume={clip.volume ?? 1}
+                                  narrow={!selected && trackPx > 0 && widthPx < 28}
                                   selected={selected}
                                   linkedSelected={linkedSelected}
                                   touch={danTouch.ids.includes(clip.id)}
@@ -4955,8 +4988,9 @@ export function VideoReviewEditor({
               ) : null}
               <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2 ${danReplay ? 'dan-replay' : ''}`} onWheel={handleTimelineWheel}>
                 <div className="flex gap-x-2 text-[11px]">
-                  <div className="flex w-[82px] shrink-0 flex-col">
-                    <div className="sticky top-0 z-20 mb-1 h-5 shrink-0 bg-muted/40" />
+                  {/* 段の名前は横に動かしても左に残す（2026-11-13 拡大して右へ動かすと「映像3」などが消えていた） */}
+                  <div ref={laneLabelColRef} className="relative z-30 flex w-[82px] shrink-0 flex-col bg-background will-change-transform">
+                    <div className="sticky top-0 z-20 mb-1 h-5 shrink-0 bg-background" />
                     {timelineLanes.map((lane, i) => (
                       <div
                         key={lane.key}

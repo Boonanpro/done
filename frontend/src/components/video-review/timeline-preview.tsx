@@ -178,7 +178,7 @@ function coversFrame(vc: VisualClip, imageAssets: Map<string, string>): boolean 
 }
 
 // 確かめ用の数（?previewdiag=1 の試しの道具が読む）
-type PreviewStats = { avN?: number; avSum?: number; avMax?: number; avOver?: number; draws: number; holds: number; wrongDraws: number; lastWrong: number; audioGapMs: number; audioLateStarts: number; audioScheduled: number; audioMode: string };
+type PreviewStats = { stalls?: number; startWaits?: number[]; frozenMs?: number; avN?: number; avSum?: number; avMax?: number; avOver?: number; draws: number; holds: number; wrongDraws: number; lastWrong: number; audioGapMs: number; audioLateStarts: number; audioScheduled: number; audioMode: string };
 function previewStats(): PreviewStats {
   const w = window as unknown as { __previewStats?: PreviewStats };
   if (!w.__previewStats) w.__previewStats = { draws: 0, holds: 0, wrongDraws: 0, lastWrong: -1, audioGapMs: 0, audioLateStarts: 0, audioScheduled: 0, audioMode: '' };
@@ -256,6 +256,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const supported = useMemo(() => webCodecsSupported(), []);
   // 比べる時だけ前の作りに戻せる: ?previewfix=0（段のそろえ）・?webaudio=0（音を前の <video> で鳴らす）
   const fixLayers = useMemo(() => urlFlag('previewfix') !== '0', []);
+  // ?syncstart=0 で前の作り: 映像の準備を待たずに時計と音を走らせていた
+  const gateRef = useRef(urlFlag('syncstart') !== '0');
+  // 再生中に位置を動かした時、再生の輪に「その位置でそろえ直して」と伝える
+  const prepRequestRef = useRef(false);
+  // 再生が流れている最中か（準備中ではない）。段の中身が変わって再生の輪を作り直した時に、止めずに続けるため
+  const runningRef = useRef(false);
   const useWebAudio = useMemo(() => urlFlag('webaudio') !== '0' && webAudioSupported() && supported, [supported]);
   // Web Audio が作れなかった時だけ、前の <video> で音を鳴らす
   const [webAudioBroken, setWebAudioBroken] = useState(false);
@@ -472,6 +478,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const PRELOAD_AHEAD = 16;
   const WINDOW_STEP = 3;
   const loadBucket = Math.floor((currentTime || 0) / WINDOW_STEP);
+  // 映像の要素は、今と、この先数秒に始まるクリップの分だけ持つ。前は前後22秒ぶん（スヤさん1本目で約8本）を
+  // 全部読み込ませていて、同じ録画を8本が奪い合い、今のクリップの要素が読み込めずに映像が止まっていた
+  // （家の外の回線で、再生を押しても3秒間ずっと絵が止まったまま。2026-11-13）。
+  const VIDEO_BEHIND = 0.5;
+  const VIDEO_AHEAD = 4;
+  const videoBucket = Math.floor((currentTime || 0) / 1);
   useEffect(() => {
     const map = audiosRef.current;
     if (useWebAudio && !webAudioBroken) { for (const [, el] of map) el.remove(); map.clear(); return; }
@@ -516,8 +528,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // playback; while paused the canvas comes from WebCodecs, so this reconcile is never visible.
   useEffect(() => {
     const map = videosRef.current;
-    const lo = (currentTime || 0) - PRELOAD_BEHIND;
-    const hi = (currentTime || 0) + PRELOAD_AHEAD;
+    const lo = (currentTime || 0) - VIDEO_BEHIND;
+    const hi = (currentTime || 0) + VIDEO_AHEAD;
     const wanted = new Map<string, string>();
     for (const vc of visualClips) {
       const aid = String(vc.clip.asset_id || '');
@@ -548,9 +560,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       document.body.appendChild(v);
       map.set(cid, v);
     }
-    for (const list of orphansByAsset.values()) for (const el of list) el.remove();
+    // 使わなくなった要素は読み込みも止める（DOM から外すだけでは読み込みが続いて回線を取る）
+    for (const list of orphansByAsset.values()) for (const el of list) { el.pause(); el.removeAttribute('src'); try { el.load(); } catch { /* noop */ } el.remove(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visualClips, assetById, loadBucket]);
+  }, [visualClips, assetById, videoBucket]);
 
   // full unmount cleanup
   useEffect(() => {
@@ -634,7 +647,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const scheduleAudio = useCallback((t: number, dtMs: number) => {
     const mgr = audioMgrRef.current;
     const anchor = audioAnchorRef.current;
-    if (!mgr || !anchor) return;
+    if (!mgr || !anchor) return false;
     const ctx = mgr.ctx;
     const LOOK = 0.5;
     const stats = previewStats();
@@ -687,6 +700,25 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     if (gap) stats.audioGapMs += dtMs;
     // 終わった物は片付ける（同じクリップを2回鳴らさないための印は、再生を止めるまで残す）
     for (const [k, v] of nodes) if (v && v.t1 < t - 1) { v.gain.disconnect(); nodes.set(k, null); }
+    return gap;
+  }, [audibleAudio, srcByAssetId]);
+
+  // この時刻から鳴らす音が、もう解読してあるか（鳴らす物が無い・壊れた素材は待たない）
+  const audioReadyAt = useCallback((t: number): boolean => {
+    const mgr = audioMgrRef.current;
+    if (!mgr) return true;
+    for (const { clip: c, gain } of audibleAudio) {
+      if (c.timeline_end <= t) continue;
+      if (c.timeline_start > t + 0.3) break;
+      if (gain <= 0) continue;
+      const src = mgr.get(srcByAssetId.get(String(c.asset_id || '')) || '');
+      if (!src) continue;
+      const ss = Number(c.source_start || 0);
+      const from = ss + Math.max(0, t - c.timeline_start);
+      const to = Math.min(ss + (c.timeline_end - c.timeline_start) - 0.01, from + 0.6);
+      if (!src.hasAt(from) || !src.hasAt(Math.max(from, to))) return false;
+    }
+    return true;
   }, [audibleAudio, srcByAssetId]);
 
   // Resolve a clip's frame at time t. During playback we draw the hardware <video> element
@@ -712,7 +744,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const vel = videosRef.current.get(String(clip.id));
         if (vel && vel.readyState >= 2 && vel.videoWidth) {
           const expected = clipSourceTime(clip, t);
-          if (playingRef.current || !supported || Math.abs(vel.currentTime - expected) < 0.12) {
+          // 再生中でも、頭出し中や時刻が離れた要素の絵は使わない（古い絵のまま時計だけ進むのを防ぐ）
+          const near = Math.abs(vel.currentTime - expected) < (playingRef.current ? 0.15 : 0.12);
+          if (!supported || (near && !(playingRef.current && vel.seeking && gateRef.current))) {
             return { src: vel, vw: vel.videoWidth, vh: vel.videoHeight };
           }
         }
@@ -751,12 +785,55 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     [srcByAssetId, imageSrcByAssetId, supported],
   );
 
+  // 今の時刻の映像が、本当にその時刻の絵で出せるか。
+  // start: 再生を始める前。映像の要素がその位置で止まって、先の絵まで読み込めている（押せばすぐ流れる）。
+  // run: 再生中。映っている絵が時計と0.15秒以内（要素）か、ほぼその時刻の解読済みの絵。
+  const visualReadyAt = useCallback(
+    (t: number, mode: 'start' | 'run', patient = false): boolean => {
+      const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
+      let from = 0;
+      for (let i = active.length - 1; i >= 0; i -= 1) if (coversFrame(active[i], imageSrcByAssetId)) { from = i; break; }
+      for (const vc of active.slice(from)) {
+        const clip = vc.clip;
+        const imageUrl = imageSrcByAssetId.get(String(clip.asset_id || ''));
+        if (imageUrl) {
+          const img = imagesRef.current.get(imageUrl);
+          if (img && img.complete) continue;   // 出ている（壊れた絵は待たない）
+          return false;
+        }
+        const url = srcByAssetId.get(String(clip.asset_id || ''));
+        if (!url) continue;
+        const fs = framesRef.current.get(url);
+        const expected = clipSourceTime(clip, t);
+        if (!isFrozen(clip)) {
+          const v = videosRef.current.get(String(clip.id));
+          if (v && v.error) continue;          // 壊れた素材は待たない
+          if (v && v.readyState >= 2 && v.videoWidth && !v.seeking) {
+            const d = Math.abs(v.currentTime - expected);
+            // 止まった要素は先の絵を読まないことがある（readyState 2 のまま）。少し待っても3にならなければ始める
+            if (mode === 'start' ? d < 0.05 && (v.readyState >= 3 || patient) : d < 0.15) continue;
+          }
+          if (mode === 'start' && v && supported) return false; // 要素がその位置で流れ出せるまで待つ
+        }
+        if (!fs || !supported) { if (!supported) return false; continue; }
+        if (!fs.canProvide(expected)) continue;  // 素材の外・壊れた素材
+        const ss = Number(clip.source_start || 0);
+        const frozen = isFrozen(clip);
+        const got = fs.peek(expected, ss, frozen ? ss : Number(clip.source_end ?? ss));
+        if (got && Math.abs(fs.lastShownTime - expected) < 0.07) continue;
+        return false;
+      }
+      return true;
+    },
+    [visualClips, imageSrcByAssetId, srcByAssetId, supported],
+  );
+
   const drawFrame = useCallback(
-    (t: number) => {
+    (t: number): boolean => {
       const canvas = canvasRef.current;
-      if (!canvas) return;
+      if (!canvas) return false;
       const ctx = canvas.getContext('2d');
-      if (!ctx) return;
+      if (!ctx) return false;
       const { w, h } = dims;
       const ps = pxScaleRef.current;
 
@@ -796,7 +873,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           const fs = url ? framesRef.current.get(url) : null;
           diagRef.current.textContent = `t=${t.toFixed(2)}  HOLD  want-src=${baseClip ? clipSourceTime(baseClip.clip, t).toFixed(2) : '-'}  wc[${fs ? fs.status() : 'none'}]`;
         }
-        return; // keep the last good frame on screen
+        return false; // keep the last good frame on screen
       }
       stats.draws += 1;
       // 確かめ用: 画面をふさぐ一番上の映像より上に、描けなかった段があったか（あれば下が透けて見えた）
@@ -904,6 +981,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const fs = !usingVideoEl && url ? framesRef.current.get(url) : null;
         diagRef.current.textContent = `t=${t.toFixed(2)}  LIVE  want=${wantSrc}  via=${usingVideoEl ? 'video' : 'webcodecs'}${fs ? ` [${fs.status()}]` : ''}  ${playingRef.current ? 'PLAY' : 'PAUSE'}`;
       }
+      return true;
     },
     [dims, visualClips, effectClips, blurRegionsAt, frameFor, willProvide, fixLayers, imageSrcByAssetId, showDiag],
   );
@@ -964,6 +1042,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // the proven native-NLE playback path. drawFrame() composites the video elements onto the canvas.
   useEffect(() => {
     if (!playing) {
+      runningRef.current = false;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       playClockRef.current = null;
@@ -1005,6 +1084,83 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     let lastAheadWall = 0;
     const PREROLL = 1.5; // pre-seek a clip about to start so its first frame is ready at the cut
     const LEAD = 0.4;    // 映像の要素を境目より前から走らせておく長さ
+    // 映像と音がそろって流れ出せるまで、再生ヘッド・音・映像を全部止めて待つ（2026-11-13 本人
+    // 「再生ヘッドと音声だけ走って映像が止まっているより、揃って一斉に流れ出すことが大事」）。
+    // prep = 止めて準備中、run = 流れている。流れている途中で映像か音が0.15秒追いつかなければ prep に戻る。
+    const gate = gateRef.current;
+    // 再生中に段の中身が変わってここへ来た時（流れている最中）は、止めずにそのまま続ける
+    const resumeRunning = runningRef.current;
+    let phase: 'prep' | 'run' = gate && !resumeRunning ? 'prep' : 'run';
+    let visOkAt = 0;
+    let audOkAt = 0;
+    let prepSince = performance.now();
+    let badSince = 0;
+    if (phase === 'prep') {
+      stopAudioNodes();
+      audioAnchorRef.current = null;
+      for (const [, v] of videosRef.current) if (!v.paused) v.pause();
+    }
+    prepRequestRef.current = false;
+    const enterPrep = (t: number, stall: boolean) => {
+      phase = 'prep';
+      runningRef.current = false;
+      visOkAt = 0;
+      audOkAt = 0;
+      prepSince = performance.now();
+      badSince = 0;
+      stopAudioNodes();
+      audioAnchorRef.current = null;
+      for (const [, v] of videosRef.current) { if (!v.paused) v.pause(); if (v.playbackRate !== 1) v.playbackRate = 1; }
+      prevActiveVideoRef.current = new Set();
+      prevActiveAudioRef.current = new Set();
+      const c = playClockRef.current;
+      if (c) { c.t = t; c.wall = performance.now(); }
+      if (stall) { const st = previewStats(); st.stalls = (st.stalls || 0) + 1; }
+    };
+    const prepStep = (clock: { wall: number; t: number }, nowWall: number) => {
+      const t = clock.t;
+      clock.wall = nowWall; // 準備中は時計を進めない（字幕・場面の層も止まったまま）
+      const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
+      for (const vc of active) {
+        const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
+        const fs = url ? framesRef.current.get(url) : null;
+        const expected = clipSourceTime(vc.clip, t);
+        if (fs) void fs.ready.then(() => fs.seekTo(expected));
+        if (isFrozen(vc.clip)) continue;
+        const v = videosRef.current.get(String(vc.clip.id));
+        if (!v) continue;
+        if (!v.paused) v.pause();
+        if (!v.seeking && Math.abs(v.currentTime - expected) > 0.04) { try { v.currentTime = expected; } catch { /* not ready */ } }
+      }
+      if (webAudio && nowWall - lastAheadWall > 250) { lastAheadWall = nowWall; ensureAudioAhead(t, 6); }
+      drawFrame(t);
+      const audioOk = !webAudio || audioReadyAt(t);
+      const ctxOk = !webAudio || !mgr || mgr.ctx.state === 'running' || nowWall - prepSince > 400;
+      const visOk = visualReadyAt(t, 'start', nowWall - prepSince > 300);
+      if (visOk && !visOkAt) visOkAt = nowWall;
+      if (audioOk && !audOkAt) audOkAt = nowWall;
+      const ready = (visOk && audioOk && ctxOk) || nowWall - prepSince > 6000;
+      if (!ready) return;
+      if (showDiag) {
+        const st0 = previewStats() as unknown as { startDetail?: number[][] };
+        (st0.startDetail ||= []).push([Math.round((visOkAt || nowWall) - prepSince), Math.round((audOkAt || nowWall) - prepSince)]);
+      }
+      // そろった: 映像の要素・音・時計を同じ瞬間に流し始める
+      const st = previewStats();
+      (st.startWaits ||= []).push(Math.round(nowWall - prepSince));
+      if (st.startWaits.length > 50) st.startWaits.splice(0, 10);
+      for (const vc of active) {
+        if (isFrozen(vc.clip)) continue;
+        const v = videosRef.current.get(String(vc.clip.id));
+        if (v) { if (v.playbackRate !== 1) v.playbackRate = 1; void v.play().catch(() => {}); }
+      }
+      if (mgr && mgr.ctx.state === 'running') audioAnchorRef.current = { ctxT0: mgr.ctx.currentTime + 0.05, t0: t };
+      clock.t = t;
+      clock.wall = performance.now() + 50; // 音の時計が無い時も、音と同じく0.05秒後から進める
+      phase = 'run';
+      runningRef.current = true;
+      badSince = 0;
+    };
     const step = () => {
       const clock = playClockRef.current;
       if (!clock) return;
@@ -1013,9 +1169,18 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const nowWall = performance.now();
       const dtMs = nowWall - lastWall;
       lastWall = nowWall;
-      if (webAudio && !audioAnchorRef.current && mgr && mgr.ctx.state === 'running') anchorNow(clock.t + (nowWall - clock.wall) / 1000);
+      if (prepRequestRef.current) {
+        prepRequestRef.current = false;
+        if (gate) enterPrep(clock.t, false);
+      }
+      if (phase === 'prep') {
+        prepStep(clock, nowWall);
+        rafRef.current = requestAnimationFrame(step);
+        return;
+      }
+      if (webAudio && !audioAnchorRef.current && mgr && mgr.ctx.state === 'running') anchorNow(clock.t + Math.max(0, nowWall - clock.wall) / 1000);
       const heard = heardTime();
-      let t = heard != null ? heard : clock.t + (nowWall - clock.wall) / 1000;
+      let t = heard != null ? heard : clock.t + Math.max(0, nowWall - clock.wall) / 1000;
       if (t >= sequenceDuration) {
         for (const [, v] of videosRef.current) v.pause();
         for (const [, a] of audiosRef.current) a.pause();
@@ -1123,8 +1288,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (fs) void fs.ready.then(() => fs.seekTo(startSrc));
       }
 
+      let audioGap = false;
       if (webAudio) {
-        scheduleAudio(t, dtMs);
+        audioGap = scheduleAudio(t, dtMs);
         // この先10秒に始まる音も、4回/秒ずつ前もって解読しておく（切れ目で読み込みを待たない）
         if (nowWall - lastAheadWall > 250) { lastAheadWall = nowWall; ensureAudioAhead(t, 10); }
       }
@@ -1157,7 +1323,19 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       prevActiveAudioRef.current = activeAudioClips;
       prevActiveVideoRef.current = activeVids;
 
-      drawFrame(t);
+      const drawn = drawFrame(t);
+      // 映像か音が時計に追いついていない: 0.15秒続いたら、全部止めてそろうまで待つ（時計だけ進めない）
+      const visualOk = drawn && visualReadyAt(t, 'run');
+      if (!visualOk) { const st = previewStats(); st.frozenMs = (st.frozenMs || 0) + dtMs; }
+      if (gate && (!visualOk || audioGap)) {
+        if (!badSince) badSince = nowWall;
+        else if (nowWall - badSince > 150) {
+          enterPrep(t, true);
+          onTimeChange(Number(t.toFixed(3)));
+          rafRef.current = requestAnimationFrame(step);
+          return;
+        }
+      } else badSince = 0;
       onTimeChange(Number(t.toFixed(3)));
       rafRef.current = requestAnimationFrame(step);
     };
@@ -1169,7 +1347,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     };
     // currentTime intentionally excluded: snapshotted into playClockRef at start
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded, srcByAssetId, scheduleAudio, stopAudioNodes, ensureAudioAhead]);
+  }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded, srcByAssetId, scheduleAudio, stopAudioNodes, ensureAudioAhead, visualReadyAt, audioReadyAt]);
 
   // 再生中に利用者が位置を動かした（目盛りを押した・クリップをダブルクリックした・矢印キー）:
   // 再生の時計をその位置に付け替え、映像と音の要素を新しい位置へ合わせ直す。止めずに続ける。
@@ -1184,6 +1362,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     prevActiveVideoRef.current = new Set();
     prevActiveAudioRef.current = new Set();
     stopAudioNodes();
+    if (gateRef.current) {
+      // 新しい位置の映像と音がそろってから流れ出す（再生の輪が準備に入る）
+      audioAnchorRef.current = null;
+      prepRequestRef.current = true;
+      return;
+    }
     const mgr = audioMgrRef.current;
     audioAnchorRef.current = mgr && mgr.ctx.state === 'running' ? { ctxT0: mgr.ctx.currentTime + 0.04, t0: currentTimeRef.current } : null;
   }, [seekRev, stopAudioNodes]);

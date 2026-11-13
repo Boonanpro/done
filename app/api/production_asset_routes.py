@@ -5739,16 +5739,213 @@ async def _audio_only_copy(room_id: str, asset: dict[str, Any]) -> Path | None:
         return out
 
 
+# --- タイムラインのクリップに載せる小さい絵と、音のクリップの波形 ---------------------------------------
+# 2026-11-13 本人「Envato などから入れた画像・動画にサムネが無い」「音声クリップに波形を」。
+# サムネは作る時に1枚しか作っておらず（ダンが入れた素材・画像は作っていなかった）、波形は無かった。
+# どちらも最初に頼まれた時に作って部屋のフォルダに置く。サムネはクリップの使っている所の絵（t 秒、1秒単位）。
+_THUMB_SEM: asyncio.Semaphore | None = None
+_PEAKS_LOCKS: dict[str, asyncio.Lock] = {}
+PEAKS_PER_SEC = 100
+THUMB_H = 96
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".heic"}
+
+
+def _first_file(asset: dict[str, Any], keys: tuple[str, ...]) -> Path | None:
+    for k in keys:
+        v = asset.get(k)
+        if v and Path(str(v)).is_file():
+            return Path(str(v))
+    return None
+
+
+def _is_image_asset(asset: dict[str, Any], src: Path) -> bool:
+    return str(asset.get("kind") or "") == "image" or src.suffix.lower() in _IMAGE_EXT
+
+
+async def _thumb_at(room_id: str, asset: dict[str, Any], t: float | None) -> Path | None:
+    global _THUMB_SEM
+    asset_id = str(asset.get("id") or "")
+    src = _first_file(asset, ("view_path", "proxy_path", "local_path"))
+    if not asset_id or not src:
+        return None
+    image = _is_image_asset(asset, src)
+    if image:
+        src = _first_file(asset, ("local_path", "proxy_path")) or src
+    sec = 0 if image else max(0, int(t if t is not None else 1))
+    out_dir = _room_dir(room_id) / "thumbs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{asset_id}_{'img' if image else sec}.jpg"
+    if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    if _THUMB_SEM is None:
+        _THUMB_SEM = asyncio.Semaphore(3)
+    async with _THUMB_SEM:
+        if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+            return out
+        tmp = out.with_name(out.stem + ".tmp.jpg")
+
+        def _run(seek: float | None) -> bool:
+            args = [_ffmpeg(), "-y", "-v", "error"]
+            if seek is not None:
+                args += ["-ss", f"{seek:.3f}"]
+            args += ["-i", str(src), "-frames:v", "1", "-vf", f"scale=-2:{THUMB_H}", "-q:v", "5", str(tmp)]
+            r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0
+
+        ok = await asyncio.to_thread(_run, None if image else float(sec))
+        if not ok and not image:  # 素材の長さの外・1秒未満の素材は先頭の絵
+            ok = await asyncio.to_thread(_run, 0.0)
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            return None
+        tmp.replace(out)
+        return out
+
+
+async def _peaks_for(room_id: str, asset: dict[str, Any]) -> Path | None:
+    """音の大きさの山（1秒に100個、0〜255）。83分の録画で約50万バイト、作るのに数秒。"""
+    asset_id = str(asset.get("id") or "")
+    src = await _audio_only_copy(room_id, asset)
+    if src is None:
+        src = _first_file(asset, ("local_path", "proxy_path"))
+    if not asset_id or src is None:
+        return None
+    out = _room_dir(room_id) / f"{asset_id}_peaks{PEAKS_PER_SEC}.u8"
+    if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    lock = _PEAKS_LOCKS.setdefault(str(out), asyncio.Lock())
+    async with lock:
+        if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+            return out
+
+        def _run() -> bool:
+            import numpy as np
+            rate = 8000
+            r = subprocess.run([_ffmpeg(), "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", str(rate), "-f", "s16le", "-"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            pcm = np.frombuffer(r.stdout, dtype=np.int16)
+            per = rate // PEAKS_PER_SEC
+            n = len(pcm) // per
+            if n <= 0:
+                peaks = np.zeros(0, dtype=np.uint8)
+            else:
+                blocks = np.abs(pcm[: n * per].astype(np.int32)).reshape(n, per).max(axis=1)
+                peaks = np.minimum(255, np.round(blocks / 32768.0 * 255)).astype(np.uint8)
+            tmp = out.with_suffix(".tmp")
+            tmp.write_bytes(peaks.tobytes())
+            tmp.replace(out)
+            return True
+
+        ok = await asyncio.to_thread(_run)
+        return out if ok else None
+
+
+FILMSTRIP_SEC = 60      # 1枚の帯に入れる長さ
+FILMSTRIP_EVERY = 2     # 何秒ごとの絵か（1枚の帯に30コマ）
+FILMSTRIP_H = 90
+
+
+async def _filmstrip(room_id: str, asset: dict[str, Any], minute: int) -> Path | None:
+    """素材の minute 分目の1分間の絵を、2秒ごとに30コマ横に並べた1枚（クリップに載せる絵）。
+    クリップごとに1枚ずつ頼むと、600個のクリップで数百回の要求になり、ブラウザの同時接続を埋めて
+    プレビューの映像の読み込みを止めていた（2026-11-13 試し）。1分ごとにまとめて1回にする。"""
+    global _THUMB_SEM
+    asset_id = str(asset.get("id") or "")
+    src = _first_file(asset, ("view_path", "proxy_path", "local_path"))
+    if not asset_id or not src or _is_image_asset(asset, src):
+        return None
+    out_dir = _room_dir(room_id) / "thumbs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{asset_id}_strip{minute}.jpg"
+    if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    if _THUMB_SEM is None:
+        _THUMB_SEM = asyncio.Semaphore(3)
+    async with _THUMB_SEM:
+        if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+            return out
+        tmp = out.with_name(out.stem + ".tmp.jpg")
+        n = FILMSTRIP_SEC // FILMSTRIP_EVERY
+
+        meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        dur = float(meta.get("duration") or 0) or float((_probe_video(src) or {}).get("duration") or 0)
+
+        def _run() -> bool:
+            # 2秒ごとの位置へそれぞれ飛んで1コマずつ取る（1分を全部解読するより速い）。
+            # 素材の終わりより後の位置は最後の絵にする（短い素材で終わりの外へ飛ぶと何も取れず失敗していた）
+            want = [minute * FILMSTRIP_SEC + k * FILMSTRIP_EVERY for k in range(n)]
+            if dur > 0:
+                want = [max(0.0, min(w, dur - 0.1)) for w in want]
+            uniq = sorted(set(round(w, 2) for w in want))
+            args = [_ffmpeg(), "-y", "-v", "error"]
+            for w in uniq:
+                args += ["-ss", f"{w:.3f}", "-i", str(src)]
+            uses = [uniq.index(round(w, 2)) for w in want]
+            parts = ""
+            for i in range(len(uniq)):
+                c = uses.count(i)
+                outs = "".join(f"[u{i}_{j}]" for j in range(c))
+                parts += f"[{i}:v:0]trim=end_frame=1,scale=-2:{FILMSTRIP_H},setsar=1,split={c}{outs};"
+            seen = [0] * len(uniq)
+            order = ""
+            for i in uses:
+                order += f"[u{i}_{seen[i]}]"
+                seen[i] += 1
+            filt = parts + order + f"hstack=inputs={n}[out]"
+            args += ["-filter_complex", filt, "-map", "[out]", "-frames:v", "1", "-q:v", "6", str(tmp)]
+            r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0
+
+        ok = await asyncio.to_thread(_run)
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            return None
+        tmp.replace(out)
+        return out
+
+
+@router.get("/filmstrip")
+async def get_asset_filmstrip(room_id: str = Query(...), asset_id: str = Query(...), m: int = Query(0, ge=0)):
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = await _filmstrip(room_id, asset, m)
+    if not path:
+        raise HTTPException(status_code=404, detail="no picture")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@router.get("/peaks")
+async def get_asset_peaks(room_id: str = Query(...), asset_id: str = Query(...)):
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = await _peaks_for(room_id, asset)
+    if not path:
+        raise HTTPException(status_code=404, detail="no audio")
+    return FileResponse(path, media_type="application/octet-stream",
+                        headers={"Cache-Control": "private, max-age=86400", "X-Peaks-Per-Sec": str(PEAKS_PER_SEC)})
+
+
 @router.get("/media")
 async def get_asset_media(
     request: Request,
     room_id: str = Query(...),
     asset_id: str = Query(...),
     variant: Literal["original", "proxy", "view", "thumbnail", "audio"] = Query("proxy"),
+    t: float | None = Query(None),
 ):
     asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
+    if variant == "thumbnail" and (t is not None or not asset.get("thumbnail_path") or not Path(str(asset.get("thumbnail_path"))).is_file()):
+        thumb = await _thumb_at(room_id, asset, t)
+        if not thumb:
+            raise HTTPException(status_code=404, detail="thumbnail is not available")
+        return FileResponse(thumb, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
     if variant == "audio":
         audio = await _audio_only_copy(room_id, asset)
         if not audio:

@@ -79,6 +79,10 @@ function assetMediaUrl(asset: ProductionAsset): string | undefined {
   return asset.view_url || asset.proxy_url || undefined;
 }
 
+function assetThumbBase(asset: ProductionAsset): string {
+  return `/api/v1/production-assets/media?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}&variant=thumbnail`;
+}
+
 function sequenceAssetForEditor(asset: ProductionAsset) {
   // Stills are served by the room's media route (the review route only streams video files).
   // 音の素材（BGM・効果音）も同じ所から配る（前は渡していなかったので、プレビューで BGM と効果音が鳴っていなかった）
@@ -90,6 +94,14 @@ function sequenceAssetForEditor(asset: ProductionAsset) {
     url: asset.view_url || asset.proxy_url || stillUrl,
     path: asset.view_url || asset.proxy_url || stillUrl ? undefined : assetMediaPath(asset),
     thumbnail_url: asset.thumbnail_url || undefined,
+    // クリップに載せる絵（&t=秒 でその所の絵）と、音の波形。無ければ最初に頼まれた時にサーバーが作る
+    thumb_base: asset.kind === 'video' || asset.kind === 'image' ? assetThumbBase(asset) : undefined,
+    filmstrip_base: asset.kind === 'video'
+      ? `/api/v1/production-assets/filmstrip?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}`
+      : undefined,
+    peaks_url: asset.kind === 'video' || asset.kind === 'audio'
+      ? `/api/v1/production-assets/peaks?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}`
+      : undefined,
     label: asset.filename || asset.original_uri,
     fps: asset.metadata?.fps as string | number | undefined,
     kind: asset.kind,
@@ -708,8 +720,8 @@ export function ProductionWorkspace({
                       className={`overflow-hidden rounded border border-border bg-muted/30 ${asset.kind === 'video' ? 'cursor-grab active:cursor-grabbing' : ''}`}
                     >
                       <div className="flex aspect-video items-center justify-center bg-muted">
-                        {asset.thumbnail_url ? (
-                          <img src={asset.thumbnail_url} alt="" className="pointer-events-none h-full w-full object-cover" />
+                        {asset.thumbnail_url || asset.kind === 'video' || asset.kind === 'image' ? (
+                          <img src={asset.thumbnail_url || assetThumbBase(asset)} alt="" loading="lazy" className="pointer-events-none h-full w-full object-cover" />
                         ) : (
                           <Film className="h-5 w-5 text-muted-foreground" />
                         )}
@@ -1055,9 +1067,7 @@ function assetPreviewUrl(asset: ProductionAsset): string {
 // 素材の小さな絵。サムネイルが無い動画は最初の方の1コマを、画像はその画像を（見えた時だけ）読む。
 function AssetThumb({ asset, fallback }: { asset: ProductionAsset; fallback: ReactNode }) {
   if (asset.thumbnail_url) return <img src={asset.thumbnail_url} alt="" loading="lazy" className="h-full w-full object-cover" />;
-  if (asset.kind === 'image') return <img src={assetPreviewUrl(asset)} alt="" loading="lazy" className="h-full w-full object-cover" />;
-  if (asset.kind === 'video') {
-    return <video src={`${assetPreviewUrl(asset)}#t=1`} preload="metadata" muted playsInline className="pointer-events-none h-full w-full object-cover" />;
-  }
+  // 小さい絵はサーバーが最初に頼まれた時に作る（大きな画像や動画をそのまま読まない）
+  if (asset.kind === 'image' || asset.kind === 'video') return <img src={assetThumbBase(asset)} alt="" loading="lazy" className="h-full w-full object-cover" />;
   return <>{fallback}</>;
 }
