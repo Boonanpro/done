@@ -813,10 +813,23 @@ def _sequence_z_items(
     every other visual item in draw order as ("overlay" | "fx" | "cap", clip)."""
     if not isinstance(sequence, dict):
         return [], []
-    tracks = [
-        t for t in (sequence.get("tracks") or [])
-        if isinstance(t, dict) and t.get("type") != "audio" and not t.get("hidden")
-    ]
+    visual_all = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict) and t.get("type") != "audio"]
+    tracks = [t for t in visual_all if not t.get("hidden")]
+    # A picture's stacking layer, the same rule the editor preview draws with: its own `layer`
+    # (set when the clip is dragged to another lane), else its lane's place in the stack.
+    lane_index = {id(t): i for i, t in enumerate(visual_all)}
+
+    def _pic_layer(track: dict[str, Any], clip: dict[str, Any]) -> float:
+        own = clip.get("layer")
+        if isinstance(own, (int, float)) and not isinstance(own, bool):
+            return float(own)
+        vi = lane_index.get(id(track), 0)
+        if track.get("type") == "caption":
+            return float(max(2, vi))
+        if track.get("type") == "overlay" or _is_overlay_clip(clip):
+            return 1.0
+        return float(vi)
+
     base_ti: int | None = None
     base_clips: list[dict[str, Any]] = []
     for ti, track in enumerate(tracks):
@@ -829,6 +842,7 @@ def _sequence_z_items(
             base_clips = sorted(spine, key=lambda c: float(c.get("timeline_start") or 0))
             break
     z_items: list[tuple[str, dict[str, Any]]] = []
+    pic_layers: dict[int, float] = {}
     for ti, track in enumerate(tracks):
         for clip in track.get("clips") or []:
             if not isinstance(clip, dict):
@@ -838,11 +852,19 @@ def _sequence_z_items(
                     continue  # part of the base concat
                 if _clip_video_enabled(clip):
                     z_items.append(("overlay", clip))
+                    pic_layers[id(clip)] = _pic_layer(track, clip)
             elif isinstance(clip.get("region"), dict):
                 if clip.get("style") != "note":  # 指示クリップ: 画には出さない
                     z_items.append(("fx", clip))
             elif str(clip.get("text") or "").strip() or _is_scene_clip(clip):
                 z_items.append(("cap", clip))
+    # Pictures stack by layer among themselves (a clip dragged up/down a lane in the editor goes
+    # in front of / behind the others in the export too). Effects and captions keep their places;
+    # with no layer moves the order is exactly the lane order as before.
+    slots = [i for i, (kind, _) in enumerate(z_items) if kind == "overlay"]
+    pics = sorted((z_items[i] for i in slots), key=lambda it: pic_layers.get(id(it[1]), 0.0))
+    for i, it in zip(slots, pics):
+        z_items[i] = it
     return base_clips, z_items
 
 

@@ -373,14 +373,74 @@ function audioRoleLabel(role?: string | null): string {
   }
 }
 
-// Effective z-order layer of a clip when not explicitly set (matches timelineLanes).
-function clipDefaultLayer(clip: SequenceClip): number {
-  if (clip.track === 'audio' || clip.role) return clip.role === 'sfx' ? 1 : clip.role === 'music' ? 2 : 0;
-  if (clip.track === 'caption' || typeof clip.text === 'string') return 2;
-  if (clip.track === 'effect') return 3;
-  if (clip.track === 'overlay' || clip.composition === 'pip' || clip.composition === 'overlay') return 1;
-  return 0;
+export type ClipLane = { zone: 'visual' | 'audio'; layer: number };
+
+/** The lane (zone + layer) every clip is SHOWN on. The single rule for drawing the lanes, picking
+ *  a drag's start lane, deciding which neighbours a move overwrites and what a ripple delete
+ *  closes up — these used to each have their own fallback (`layer ?? 0`), so a clip without its
+ *  own layer was on one lane on screen and another lane for the overwrite: moving the BGM wiped
+ *  every voice and SE clip shown on the other audio lanes.
+ *  Visual: own layer, else the lane's place in the stack (same as the preview and export).
+ *  Audio: own layer, else packed by role (voice, then SE, then BGM/music, then the rest) onto the
+ *  lowest lane where it overlaps nothing, so overlapping clips never share a lane (a lane with
+ *  overlaps hides the clips underneath and they can't be grabbed). Audio lanes don't change the
+ *  mix, so packing changes nothing in the output. */
+export function computeClipLanes(tracks: Array<{ type?: string | null; clips?: SequenceClip[] | null }>): Map<string, ClipLane> {
+  const out = new Map<string, ClipLane>();
+  let visualIndex = -1;
+  const audioPending: Array<{ clip: SequenceClip; group: number; order: number }> = [];
+  const audioBusy = new Map<number, Array<[number, number]>>();
+  const occupy = (layer: number, a: number, b: number) => {
+    if (!audioBusy.has(layer)) audioBusy.set(layer, []);
+    audioBusy.get(layer)!.push([a, b]);
+  };
+  const free = (layer: number, a: number, b: number) =>
+    !(audioBusy.get(layer) || []).some(([x, y]) => b > x + 0.001 && a < y - 0.001);
+  let order = 0;
+  for (const track of tracks) {
+    if (track.type !== 'audio') visualIndex += 1;
+    for (const clip of track.clips || []) {
+      if (clip.id == null) continue;
+      const id = String(clip.id);
+      if (track.type === 'audio') {
+        if (Number.isFinite(clip.layer as number)) {
+          out.set(id, { zone: 'audio', layer: Number(clip.layer) });
+          occupy(Number(clip.layer), clip.timeline_start, clip.timeline_end);
+        } else {
+          const role = String(clip.role || '');
+          const group = !role || role === 'dialogue' || role === 'voice' ? 0 : role === 'sfx' || role === 'se' ? 1 : role === 'music' || role === 'bgm' ? 2 : 3;
+          audioPending.push({ clip, group, order: order++ });
+        }
+        continue;
+      }
+      let layer: number;
+      if (Number.isFinite(clip.layer as number)) layer = Number(clip.layer);
+      else if (track.type === 'caption' || clip.track === 'caption') layer = Math.max(2, visualIndex);
+      else if (track.type === 'effect') layer = 3;
+      else if (track.type === 'overlay') layer = 1;
+      else layer = clip.composition === 'pip' || clip.composition === 'overlay' ? 1 : visualIndex;
+      out.set(id, { zone: 'visual', layer });
+    }
+  }
+  audioPending.sort((a, b) => a.group - b.group || a.clip.timeline_start - b.clip.timeline_start || a.order - b.order);
+  let floor = 0;
+  let group = -1;
+  let groupTop = -1;
+  for (const { clip, group: g } of audioPending) {
+    if (g !== group) { if (groupTop >= 0) floor = groupTop + 1; group = g; groupTop = -1; }
+    let layer = floor;
+    while (!free(layer, clip.timeline_start, clip.timeline_end)) layer += 1;
+    occupy(layer, clip.timeline_start, clip.timeline_end);
+    groupTop = Math.max(groupTop, layer);
+    out.set(String(clip.id), { zone: 'audio', layer });
+  }
+  return out;
 }
+
+const laneKeyOf = (lanes: Map<string, ClipLane>, id: string, layer?: number) => {
+  const l = lanes.get(String(id));
+  return `${l?.zone || 'visual'}#${layer ?? l?.layer ?? 0}`;
+};
 
 function itemTypeBadge(itemType: string): string {
   switch (itemType) {
@@ -873,6 +933,7 @@ export function VideoReviewEditor({
     () => (editSequence?.tracks || []).flatMap((track) => track.clips || []),
     [editSequence]
   );
+  const clipLanes = useMemo(() => computeClipLanes(editSequence?.tracks || []), [editSequence]);
 
   // NLE-style ordered lanes derived from the sequence tracks + annotations.
   // Order top→bottom: visual instructions, captions, effects, overlay video
@@ -885,42 +946,19 @@ export function VideoReviewEditor({
     // dedicated lanes.
     type Agg = { zone: 'visual' | 'audio'; layer: number; item: LaneItem };
     const aggs: Agg[] = [];
-    const audioRoleLayer = (role?: string | null) => (role === 'sfx' ? 1 : role === 'music' ? 2 : 0);
 
     let counter = 0;
-    let visualIndex = -1;
+    const clipLanes = computeClipLanes(tracks);
     for (const track of tracks) {
-      // A clip without its own layer sits at its lane's place in the stack (lane array order =
-      // stacking, the same rule as the exporter), so Dan's extra picture lanes don't collapse
-      // onto the base lane.
-      if (track.type !== 'audio') visualIndex += 1;
       for (const clip of track.clips || []) {
-        let zone: 'visual' | 'audio' = 'visual';
+        const lane = clipLanes.get(String(clip.id)) || { zone: track.type === 'audio' ? 'audio' : 'visual', layer: 0 };
         let itemType = 'video';
-        let layer = clip.layer ?? 0;
-        if (track.type === 'audio') {
-          zone = 'audio';
-          itemType = 'audio';
-          layer = clip.layer ?? audioRoleLayer(clip.role);
-        } else if (track.type === 'caption' || clip.track === 'caption') {
-          // A caption is what the clip is (track field / text), not its lane: Dan's add_caption may
-          // put it on a picture lane (timeline_commands: "text → caption, never from the lane").
-          itemType = 'caption';
-          layer = clip.layer ?? Math.max(2, visualIndex);
-        } else if (track.type === 'effect') {
-          itemType = 'effect';
-          layer = clip.layer ?? 3;
-        } else if (track.type === 'overlay') {
-          itemType = 'video';
-          layer = clip.layer ?? 1;
-        } else {
-          const overlay = clip.composition === 'pip' || clip.composition === 'overlay';
-          itemType = 'video';
-          layer = clip.layer ?? (overlay ? 1 : visualIndex);
-        }
+        if (track.type === 'audio') itemType = 'audio';
+        else if (track.type === 'caption' || clip.track === 'caption') itemType = 'caption';
+        else if (track.type === 'effect') itemType = 'effect';
         aggs.push({
-          zone,
-          layer,
+          zone: lane.zone,
+          layer: lane.layer,
           item: {
             key: clip.id || `${track.id || 'tk'}-${counter++}`,
             kind: 'clip',
@@ -1537,7 +1575,7 @@ export function VideoReviewEditor({
       const tracks = current.tracks || [];
       const tIdx = tracks.findIndex((tr) => (tr.clips || []).some((c) => c.id === clicked.id));
       const freeze: SequenceClip = {
-        id: makeId(), asset_id: clicked.asset_id, track: clicked.track, layer: clicked.layer ?? 0,
+        id: makeId(), asset_id: clicked.asset_id, track: clicked.track, layer: clicked.layer,
         composition: clicked.composition, position: clicked.position ?? null, transform: clicked.transform ?? null,
         crop: clicked.crop ?? null, shape: clicked.shape ?? null,
         timeline_start: r(t), timeline_end: r(t + F), source_start: srcT, source_end: srcT, // freeze
@@ -2009,7 +2047,8 @@ export function VideoReviewEditor({
       const r = (v: number) => Number(v.toFixed(2));
       const eps = 0.01;
       const del = new Set(clipIds);
-      const laneKey = (c: SequenceClip, fallbackTrack?: string) => `${c.track || fallbackTrack || ''}#${c.layer ?? 0}`;
+      const lanes = computeClipLanes(current.tracks || []);
+      const laneKey = (c: SequenceClip) => laneKeyOf(lanes, c.id);
       const allClips = (current.tracks || []).flatMap((t) => (t.clips || []).map((c) => ({ ...c, track: c.track || t.type })));
       if (linkAV) {
         const linkIds = new Set(allClips.filter((c) => del.has(c.id) && c.link_id).map((c) => c.link_id));
@@ -2028,7 +2067,7 @@ export function VideoReviewEditor({
         const out: SequenceClip[] = [];
         for (const c of track.clips || []) {
           if (del.has(c.id)) continue; // removed
-          const dels = delByLane.get(laneKey(c, track.type));
+          const dels = delByLane.get(laneKey(c));
           if (!dels) { out.push(c); continue; } // lane untouched
           // shift left by the total deleted duration that sat before this clip on the same lane
           const shift = dels.reduce((s, d) => s + (d.end <= c.timeline_start + eps ? d.dur : 0), 0);
@@ -3003,22 +3042,26 @@ export function VideoReviewEditor({
   // clips on one lane each overwrite their own neighbour.
   const commitMovedSet = useCallback((snap: EditSequence, moved: Map<string, Partial<SequenceClip>>) => {
     const r = (v: number) => Number(v.toFixed(2));
-    const allOrig = (snap.tracks || []).flatMap((t) => (t.clips || []).map((c) => ({ ...c, track: c.track || t.type })));
+    const lanes = computeClipLanes(snap.tracks || []);
     const targets = Array.from(moved.entries()).map(([id, f]) => {
-      const o = allOrig.find((c) => c.id === id)!;
+      const o = (snap.tracks || []).flatMap((t) => t.clips || []).find((c) => c.id === id)!;
       return {
         id,
-        lane: `${o.track || ''}#${f.layer ?? o.layer ?? 0}`,
+        lane: laneKeyOf(lanes, id, f.layer ?? undefined),
         as: Number(f.timeline_start ?? o.timeline_start),
         ae: Number(f.timeline_end ?? o.timeline_end),
       };
     });
     const tracks = (snap.tracks || []).map((track) => {
       const out: SequenceClip[] = [];
-      for (const c of track.clips || []) {
+      for (const c0 of track.clips || []) {
+        // Audio lanes are packed (computeClipLanes): pin every audio clip to the lane it is shown
+        // on, so moving one clip never reshuffles the others' lanes under the cursor.
+        const cl = lanes.get(String(c0.id));
+        const c = track.type === 'audio' && cl && !Number.isFinite(c0.layer as number) ? { ...c0, layer: cl.layer } : c0;
         const mv = moved.get(c.id);
-        if (mv) { out.push({ ...c, ...mv }); continue; }
-        const lane = `${c.track || track.type || ''}#${c.layer ?? 0}`;
+        if (mv) { out.push({ ...c, ...mv, ...(cl && mv.layer === undefined ? { layer: c.layer ?? cl.layer } : {}) }); continue; }
+        const lane = laneKeyOf(lanes, c.id);
         const t = targets.find((x) => x.lane === lane && x.id !== c.id && x.ae > c.timeline_start + 0.001 && x.as < c.timeline_end - 0.001);
         if (!t) { out.push(c); continue; } // not overlapped by any moved clip on this lane
         const bs = c.timeline_start, be = c.timeline_end;
@@ -3082,14 +3125,17 @@ export function VideoReviewEditor({
       // bump it down to the first free lane (auto-created — a clip on a new layer makes its lane).
       const pStart = Number(pf.timeline_start ?? partner.timeline_start);
       const pEnd = Number(pf.timeline_end ?? partner.timeline_end);
-      const pTrack = partner.track || '';
-      const overlapsAt = (L: number) => allOrig.some((c) =>
-        c.id !== partner.id && !moved.has(c.id) && (c.track || '') === pTrack && (c.layer ?? 0) === L &&
-        pEnd > c.timeline_start + 0.001 && pStart < c.timeline_end - 0.001);
-      let pLayer = partner.layer ?? 0;
+      const lanes = computeClipLanes(snap.tracks || []);
+      const pLane = lanes.get(String(partner.id)) || { zone: 'visual' as const, layer: partner.layer ?? 0 };
+      const overlapsAt = (L: number) => allOrig.some((c) => {
+        const cl = lanes.get(String(c.id));
+        return c.id !== partner.id && !moved.has(c.id) && cl?.zone === pLane.zone && cl.layer === L &&
+          pEnd > c.timeline_start + 0.001 && pStart < c.timeline_end - 0.001;
+      });
+      let pLayer = pLane.layer;
       let guard = 0;
       while (overlapsAt(pLayer) && guard++ < 50) pLayer += 1;
-      if (pLayer !== (partner.layer ?? 0)) pf.layer = pLayer;
+      if (pLayer !== pLane.layer) pf.layer = pLayer;
       moved.set(partner.id, pf);
     }
     commitMovedSet(snap, moved);
@@ -3130,7 +3176,8 @@ export function VideoReviewEditor({
       const inMulti = !additive && selectedSequenceClipIds.length > 1 && selectedSequenceClipIds.includes(clip.id);
       if (!inMulti) selectSequenceClip(clip.id, additive);
       dragSelectionRef.current = inMulti ? [...selectedSequenceClipIds] : [clip.id];
-      dragLayerRef.current = clip.layer ?? clipDefaultLayer(clip);
+      const startLane = clipLanes.get(String(clip.id)) || { zone: 'visual' as const, layer: clip.layer ?? 0 };
+      dragLayerRef.current = startLane.layer;
       dragLaneGeomRef.current = laneGeomRef.current.map((g) => ({ ...g })); // freeze for stable hit-testing
       seekTimeline(getTimelineTime(event));
       dragSnapshotRef.current = editSequence;
@@ -3139,11 +3186,11 @@ export function VideoReviewEditor({
         mode,
         startClientX: event.clientX,
         startClientY: event.clientY,
-        // Zone is the clip's TRACK only — NOT its role. dan_plan video clips carry a role too,
-        // and keying off role wrongly put video clips in the audio zone, so the lane hit-test
-        // never matched the visual lanes and video clips couldn't move up/down at all.
-        zone: clip.track === 'audio' ? 'audio' : 'visual',
-        originalLayer: clip.layer ?? clipDefaultLayer(clip),
+        // Zone/lane = the lane the clip is SHOWN on (computeClipLanes). Clips usually carry no
+        // `track` field — keying off it put every audio clip in the visual zone, so dragging an
+        // audio clip down never matched an audio lane and it couldn't change lanes.
+        zone: startLane.zone,
+        originalLayer: startLane.layer,
         originalTimelineStart: clip.timeline_start,
         originalTimelineEnd: clip.timeline_end,
         originalSourceStart: Number(clip.source_start || 0),
@@ -3157,7 +3204,7 @@ export function VideoReviewEditor({
         /* ignore */
       }
     },
-    [editSequence, getTimelineTime, seekTimeline, selectSequenceClip, selectedSequenceClipIds]
+    [editSequence, clipLanes, getTimelineTime, seekTimeline, selectSequenceClip, selectedSequenceClipIds]
   );
 
   useEffect(() => {
