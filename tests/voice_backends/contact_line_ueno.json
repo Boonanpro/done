@@ -1,0 +1,24 @@
+{
+ "note": "作った例（調整に使った）。個人のLINE: 上野貴司さん、11/13 9:04「ろじんxリサーチ」グループに記事の投稿。答えの中身は 11/13 時点の本物の受信箱・記録。中身が変わったら answer_all を今の最新に合わせる。",
+ "turns": [
+  {
+   "role": "user",
+   "text": "上野さんからLINE来てる？"
+  }
+ ],
+ "expect": {
+  "route": "contact",
+  "tools_none": [
+   "start_work",
+   "run_in_background"
+  ],
+  "answer_all": [
+   "記事"
+  ],
+  "answer_none": [
+   "確認できな",
+   "分からな",
+   "開いて見"
+  ]
+ }
+}

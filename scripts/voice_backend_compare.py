@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-REAL = {'get_calendar', 'get_location', 'get_saved_information', 'search_records', 'room_files', 'job_status', 'list_operations', 'dan_tool_help', 'read_chatwork'}
+REAL = {'get_calendar', 'get_location', 'get_saved_information', 'search_records', 'room_files', 'job_status', 'list_operations', 'dan_tool_help', 'read_chatwork', 'read_mail', 'read_line'}
 OWNER = '2582a188-ff24-4a4f-b989-6063034d90b2'
 ROOM = 'voice-backend-compare'
 

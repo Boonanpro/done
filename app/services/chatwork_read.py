@@ -105,6 +105,17 @@ def wanted(who):
     return HONORIFICS.sub('', norm(who))
 
 
+def words(who):
+    """The words of what the owner named, each without its honorific: a model asks 「イツキ 高橋さん」 (11/13)."""
+    return [w for w in (HONORIFICS.sub('', norm(part)) for part in re.split(r'[\s　、,・]+', str(who or ''))) if w]
+
+
+def found_in(names, *texts):
+    """Every word named is somewhere in these texts (the sender, the room, the account)."""
+    hay = ''.join(norm(t) for t in texts)
+    return bool(names) and all(n in hay for n in names)
+
+
 async def read(user_id, who='', room_id=None, messages=5, days=7):
     """What is in Chatwork now.
 
@@ -125,7 +136,7 @@ async def read(user_id, who='', room_id=None, messages=5, days=7):
         since = time.time() - days * 86400
         recent = [r for r in rooms if (r.get('last_update_time') or 0) >= since] or rooms[:3]
         picked, per_room = recent[:10], max(1, min(int(messages or 5), 20))
-    name = wanted(who)
+    names = words(who)
 
     async def latest(room):
         got = await _get(user_id, f"/rooms/{room['room_id']}/messages", {'force': 1})
@@ -134,9 +145,9 @@ async def read(user_id, who='', room_id=None, messages=5, days=7):
     read_rooms = await asyncio.gather(*(latest(r) for r in picked))
     out = []
     for room, items in read_rooms:
-        if name and not room_id:
-            in_name = name in norm(room.get('name'))
-            theirs = [m for m in items if name in norm((m.get('account') or {}).get('name'))]
+        if names and not room_id:
+            in_name = found_in(names, room.get('name'))
+            theirs = [m for m in items if found_in(names, (m.get('account') or {}).get('name'), room.get('name'))]
             if not in_name and not theirs:
                 continue
             if not in_name and room.get('type') == 'group':   # a big group room: only the last few things that person wrote
@@ -157,7 +168,7 @@ async def read(user_id, who='', room_id=None, messages=5, days=7):
     result = {'rooms': out, 'read_at': when(time.time()), 'account': me.get('name'),
               'note': ('「本人」は持ち主自身の発言。replied_after=true は相手の最後の発言の後に本人が返している。'
                        'unread は Chatwork の画面の未読数（ここで読んでも変わらない）。')}
-    if name and not out:
+    if names and not out:
         result['note'] = (f'最近{days}日に動いた部屋に「{who}」の名前の部屋も発言も無かった。部屋の一覧: '
                           + '、'.join(f"{r.get('name')}（{when(r.get('last_update_time'))}）" for r in rooms[:12]))
     return result
