@@ -28,7 +28,7 @@ import {
   Undo2,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { ClipBox, type ClipBoxFns } from './timeline-clip';
+import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipKind } from './timeline-clip';
 import { perfLog } from '@/lib/perf-log';
 import { TimelineRuler } from './timeline-ruler';
 import { FullscreenBar } from './fullscreen-bar';
@@ -222,6 +222,10 @@ export type SequenceAsset = {
   url?: string | null;
   path?: string | null;
   thumbnail_url?: string | null;
+  /** クリップに載せる絵の住所（&t=秒 を足すとその所の絵）。無ければサーバーが作る */
+  thumb_base?: string | null;
+  /** 音の波形（1秒に100個の山） */
+  peaks_url?: string | null;
   label?: string | null;
   fps?: number | string | null;
   kind?: string | null;
@@ -455,19 +459,6 @@ function itemTypeBadge(itemType: string): string {
       return '音声';
     default:
       return INTENTS.find((it) => it.value === itemType)?.label || itemType;
-  }
-}
-
-function clipItemColor(itemType: string): string {
-  switch (itemType) {
-    case 'caption':
-      return 'bg-violet-500/60';
-    case 'effect':
-      return 'bg-amber-600/70';
-    case 'audio':
-      return 'bg-lime-600/60';
-    default:
-      return 'bg-neutral-700/80';
   }
 }
 
@@ -1003,7 +994,8 @@ export function VideoReviewEditor({
           label: `${zone === 'visual' ? '映像' : '音声'}${i + 1}`,
           zone,
           layer,
-          height: zone === 'audio' ? 24 : hasVideo ? 42 : 28,
+          // 音は波形が見える高さに、映像は絵が見える高さに（2026-11-13 本人「波形を出すなら縦幅を大きく」）
+          height: zone === 'audio' ? 44 : hasVideo ? 44 : 28,
           items,
         };
       });
@@ -3474,7 +3466,7 @@ export function VideoReviewEditor({
     for (const lane of timelineLanes) for (const it of lane.items) if (it.clip) m.set(it.clip.id, { clip: it.clip, itemType: it.itemType });
     return m;
   }, [timelineLanes]);
-  const clipFns = useRef<ClipBoxFns>({ startDrag: () => {}, openMenu: () => {}, focusClip: () => {} });
+  const clipFns = useRef<ClipBoxFns>({ startDrag: () => {}, openMenu: () => {}, focusClip: () => {}, setVolume: () => {} });
   clipFns.current = {
     startDrag: (event, id, mode) => {
       const hit = laneClipLookup.get(id);
@@ -3491,6 +3483,9 @@ export function VideoReviewEditor({
       const hit = laneClipLookup.get(id);
       selectSequenceClip(id);
       if (hit) seekTimeline(hit.clip.timeline_start);
+    },
+    setVolume: (id, volume) => {
+      updateSequenceClip(id, { volume: Math.round(Math.max(0, Math.min(2, volume)) * 100) / 100 });
     },
   };
   // 見えている範囲（と左右に1画面ずつ）のクリップだけ描く。半画面ぶん動くまで描き直さない。
@@ -3626,20 +3621,38 @@ export function VideoReviewEditor({
                                 item.itemType === 'caption'
                                   ? clip.text || 'テロップ'
                                   : item.itemType === 'audio'
-                                    ? [audioRoleLabel(clip.role), clipAsset?.label || clip.label].filter(Boolean).join('・')
+                                    ? (assetName || clip.label || audioRoleLabel(clip.role))
                                     : clip.label || assetName || '素材';
-                              const badge = isScene ? '場面' : isVideo && ((clip as { kind?: string }).kind === 'image' || clipAsset?.kind === 'image') ? '画像' : itemTypeBadge(item.itemType);
+                              const isImage = isVideo && ((clip as { kind?: string }).kind === 'image' || clipAsset?.kind === 'image');
+                              const kind: ClipKind = isScene ? 'scene'
+                                : item.itemType === 'caption' ? 'caption'
+                                  : item.itemType === 'effect' ? 'effect'
+                                    : item.itemType === 'audio' ? (clip.role === 'music' ? 'bgm' : clip.role === 'sfx' ? 'se' : 'voice')
+                                      : isImage ? 'image' : 'video';
+                              const badge = CLIP_KIND_STYLE[kind].name;
+                              const srcStart = Number(clip.source_start || 0);
+                              const srcEnd = clip.source_end != null ? Number(clip.source_end) : srcStart + (clip.timeline_end - clip.timeline_start);
+                              // 絵: 動画はクリップが使っている所の絵、画像はその画像（サーバーが小さくして返す）
+                              const thumbBase = clipAsset?.thumb_base || null;
+                              const thumb = !isVideo || isScene ? undefined
+                                : thumbBase ? (isImage ? thumbBase : `${thumbBase}&t=${Math.floor(srcStart + 0.5)}`)
+                                  : clipAsset?.thumbnail_url || undefined;
+                              const widthPx = trackPx > 0 ? (width / 100) * trackPx : 200;
                               return (
                                 <ClipBox
                                   key={item.key}
                                   clipId={clip.id}
                                   left={left}
                                   width={width}
-                                  badge={badge}
+                                  widthPx={Math.round(widthPx)}
+                                  kind={kind}
                                   label={labelText}
-                                  colorClass={clipItemColor(item.itemType)}
-                                  thumb={isVideo ? clipAsset?.thumbnail_url || undefined : undefined}
-                                  narrow={!selected && trackPx > 0 && (width / 100) * trackPx < 28}
+                                  thumb={thumb}
+                                  peaksUrl={item.itemType === 'audio' ? clipAsset?.peaks_url || undefined : undefined}
+                                  sourceStart={srcStart}
+                                  sourceEnd={srcEnd}
+                                  volume={clip.volume ?? 1}
+                                  narrow={!selected && trackPx > 0 && widthPx < 28}
                                   selected={selected}
                                   linkedSelected={linkedSelected}
                                   touch={danTouch.ids.includes(clip.id)}

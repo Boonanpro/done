@@ -5739,16 +5739,137 @@ async def _audio_only_copy(room_id: str, asset: dict[str, Any]) -> Path | None:
         return out
 
 
+# --- タイムラインのクリップに載せる小さい絵と、音のクリップの波形 ---------------------------------------
+# 2026-11-13 本人「Envato などから入れた画像・動画にサムネが無い」「音声クリップに波形を」。
+# サムネは作る時に1枚しか作っておらず（ダンが入れた素材・画像は作っていなかった）、波形は無かった。
+# どちらも最初に頼まれた時に作って部屋のフォルダに置く。サムネはクリップの使っている所の絵（t 秒、1秒単位）。
+_THUMB_SEM: asyncio.Semaphore | None = None
+_PEAKS_LOCKS: dict[str, asyncio.Lock] = {}
+PEAKS_PER_SEC = 100
+THUMB_H = 96
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".heic"}
+
+
+def _first_file(asset: dict[str, Any], keys: tuple[str, ...]) -> Path | None:
+    for k in keys:
+        v = asset.get(k)
+        if v and Path(str(v)).is_file():
+            return Path(str(v))
+    return None
+
+
+def _is_image_asset(asset: dict[str, Any], src: Path) -> bool:
+    return str(asset.get("kind") or "") == "image" or src.suffix.lower() in _IMAGE_EXT
+
+
+async def _thumb_at(room_id: str, asset: dict[str, Any], t: float | None) -> Path | None:
+    global _THUMB_SEM
+    asset_id = str(asset.get("id") or "")
+    src = _first_file(asset, ("view_path", "proxy_path", "local_path"))
+    if not asset_id or not src:
+        return None
+    image = _is_image_asset(asset, src)
+    if image:
+        src = _first_file(asset, ("local_path", "proxy_path")) or src
+    sec = 0 if image else max(0, int(t if t is not None else 1))
+    out_dir = _room_dir(room_id) / "thumbs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{asset_id}_{'img' if image else sec}.jpg"
+    if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    if _THUMB_SEM is None:
+        _THUMB_SEM = asyncio.Semaphore(3)
+    async with _THUMB_SEM:
+        if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
+            return out
+        tmp = out.with_name(out.stem + ".tmp.jpg")
+
+        def _run(seek: float | None) -> bool:
+            args = [_ffmpeg(), "-y", "-v", "error"]
+            if seek is not None:
+                args += ["-ss", f"{seek:.3f}"]
+            args += ["-i", str(src), "-frames:v", "1", "-vf", f"scale=-2:{THUMB_H}", "-q:v", "5", str(tmp)]
+            r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0
+
+        ok = await asyncio.to_thread(_run, None if image else float(sec))
+        if not ok and not image:  # 素材の長さの外・1秒未満の素材は先頭の絵
+            ok = await asyncio.to_thread(_run, 0.0)
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            return None
+        tmp.replace(out)
+        return out
+
+
+async def _peaks_for(room_id: str, asset: dict[str, Any]) -> Path | None:
+    """音の大きさの山（1秒に100個、0〜255）。83分の録画で約50万バイト、作るのに数秒。"""
+    asset_id = str(asset.get("id") or "")
+    src = await _audio_only_copy(room_id, asset)
+    if src is None:
+        src = _first_file(asset, ("local_path", "proxy_path"))
+    if not asset_id or src is None:
+        return None
+    out = _room_dir(room_id) / f"{asset_id}_peaks{PEAKS_PER_SEC}.u8"
+    if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    lock = _PEAKS_LOCKS.setdefault(str(out), asyncio.Lock())
+    async with lock:
+        if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+            return out
+
+        def _run() -> bool:
+            import numpy as np
+            rate = 8000
+            r = subprocess.run([_ffmpeg(), "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", str(rate), "-f", "s16le", "-"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            pcm = np.frombuffer(r.stdout, dtype=np.int16)
+            per = rate // PEAKS_PER_SEC
+            n = len(pcm) // per
+            if n <= 0:
+                peaks = np.zeros(0, dtype=np.uint8)
+            else:
+                blocks = np.abs(pcm[: n * per].astype(np.int32)).reshape(n, per).max(axis=1)
+                peaks = np.minimum(255, np.round(blocks / 32768.0 * 255)).astype(np.uint8)
+            tmp = out.with_suffix(".tmp")
+            tmp.write_bytes(peaks.tobytes())
+            tmp.replace(out)
+            return True
+
+        ok = await asyncio.to_thread(_run)
+        return out if ok else None
+
+
+@router.get("/peaks")
+async def get_asset_peaks(room_id: str = Query(...), asset_id: str = Query(...)):
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = await _peaks_for(room_id, asset)
+    if not path:
+        raise HTTPException(status_code=404, detail="no audio")
+    return FileResponse(path, media_type="application/octet-stream",
+                        headers={"Cache-Control": "private, max-age=86400", "X-Peaks-Per-Sec": str(PEAKS_PER_SEC)})
+
+
 @router.get("/media")
 async def get_asset_media(
     request: Request,
     room_id: str = Query(...),
     asset_id: str = Query(...),
     variant: Literal["original", "proxy", "view", "thumbnail", "audio"] = Query("proxy"),
+    t: float | None = Query(None),
 ):
     asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
+    if variant == "thumbnail" and (t is not None or not asset.get("thumbnail_path") or not Path(str(asset.get("thumbnail_path"))).is_file()):
+        thumb = await _thumb_at(room_id, asset, t)
+        if not thumb:
+            raise HTTPException(status_code=404, detail="thumbnail is not available")
+        return FileResponse(thumb, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
     if variant == "audio":
         audio = await _audio_only_copy(room_id, asset)
         if not audio:
