@@ -126,3 +126,28 @@ export function SceneClipPanel({ clip, onChange }: { clip: SequenceClip; onChang
     </div>
   );
 }
+
+const BLENDS: [string, string][] = [
+  ['', '普通'], ['screen', 'スクリーン（黒が消えて光だけ乗る）'], ['add', '加算（もっと明るく）'], ['lighten', '比較（明）'],
+  ['multiply', '乗算（白が消える）'], ['overlay', 'オーバーレイ'], ['softlight', 'ソフトライト'],
+];
+
+/** How an overlay video/picture mixes with what is under it (light leaks, film burns and
+ *  particles shot on black use スクリーン). The export mixes the same way. */
+export function BlendSelect({ clip, onChange }: { clip: SequenceClip; onChange: (blend: string | undefined) => void }) {
+  if (!clip.asset_id || isSceneClip(clip)) return null;
+  const cur = String((clip as { blend?: string }).blend || '');
+  return (
+    <label className="flex items-center gap-2 text-[11px]">
+      <span className="shrink-0">重ね方</span>
+      <select
+        data-blend-select
+        className="min-w-0 flex-1 rounded border border-white/15 bg-black/40 p-1"
+        value={cur}
+        onChange={(e) => onChange(e.target.value || undefined)}
+      >
+        {BLENDS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+      </select>
+    </label>
+  );
+}

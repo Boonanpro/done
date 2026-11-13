@@ -37,7 +37,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { isSceneClip } from './scene-layer';
-import { SceneClipPanel } from './scene-clip-panel';
+import { BlendSelect, SceneClipPanel } from './scene-clip-panel';
 import { TimelinePreview } from './timeline-preview';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
@@ -4223,6 +4223,7 @@ export function VideoReviewEditor({
                     />
                   </div>
                   <SceneClipPanel clip={selectedSequenceClip} onChange={(scene) => updateSelectedSequenceClip({ scene } as Partial<SequenceClip>)} />
+                  <BlendSelect clip={selectedSequenceClip} onChange={(blend) => updateSelectedSequenceClip({ blend } as Partial<SequenceClip>)} />
                   {(selectedSequenceClip.track === 'video' || selectedSequenceClip.asset_id) ? (
                     <div className="grid grid-cols-2 gap-2">
                       <Input

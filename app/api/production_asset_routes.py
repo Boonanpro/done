@@ -791,6 +791,11 @@ def _blur_annotations(instruction: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+# clip.blend -> ffmpeg blend mode (same names the preview maps to canvas composite operations)
+_BLEND_MODES = {"screen": "screen", "add": "addition", "lighten": "lighten", "multiply": "multiply",
+                "overlay": "overlay", "softlight": "softlight"}
+
+
 def _is_overlay_clip(clip: dict[str, Any]) -> bool:
     return str(clip.get("composition") or "") in ("pip", "overlay")
 
@@ -2663,6 +2668,29 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             f"{_maskcrop}"
             f"[ov{oi}]"
         )
+        _bm = _BLEND_MODES.get(str(clip.get("blend") or ""))
+        if _bm and not shape_filt:
+            # Blend mode (light leaks, film burns, particles on black): the clip becomes a
+            # full-canvas layer (black — or white for multiply — outside its box and before it
+            # starts) and is mixed with what is below in RGB, like the preview's
+            # globalCompositeOperation.
+            _bg = "white" if _bm in ("multiply",) else "black"
+            _pl, _pt = max(0, _mx), max(0, _my)
+            filters.append(
+                f"[ov{oi}]format=gbrp,crop=w='min(iw\\,{output_width}-{_pl})':h='min(ih\\,{output_height}-{_pt})':x=0:y=0,"
+                f"pad={output_width}:{output_height}:{_pl}:{_pt}:color={_bg},setpts=PTS-STARTPTS,"
+                # whole frames of padding up to the clip's first frame, then half a frame early
+                # (the rule every layer here follows: a frame shows the latest picture <= t)
+                f"tpad=start={max(0, math.ceil(ov_offset * timeline_fps - 1e-6))}:start_mode=add:color={_bg},"
+                f"setpts=PTS-{half:.5f}/TB[ovb{oi}]"
+            )
+            filters.append(f"[{video_out}]format=gbrp[ovm{oi}]")
+            filters.append(
+                f"[ovm{oi}][ovb{oi}]blend=all_mode={_bm}:shortest=0:repeatlast=1:"
+                f"enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})',format=yuv420p[vov{oi}]"
+            )
+            video_out = f"vov{oi}"
+            continue
         filters.append(
             f"[{video_out}][ov{oi}]overlay={_mx}:{_my}{_ov_mode}:enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})'{_ov_back}[vov{oi}]"
         )

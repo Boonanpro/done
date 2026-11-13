@@ -181,6 +181,10 @@ function LiveCaptionLayer({ playing, currentTime, clockRef, outW, outH, captions
   return <CaptionLayer outW={outW} outH={outH} captions={captions} time={playing ? liveT : currentTime} />;
 }
 
+const BLEND_OPS: Record<string, GlobalCompositeOperation> = {
+  screen: 'screen', add: 'lighter', lighten: 'lighten', multiply: 'multiply', overlay: 'overlay', softlight: 'soft-light',
+};
+
 // プレビューを描く画素の倍率の上限: 長い辺 1920px まで（書き出しの 1080p と同じ細かさ）
 const MAX_CANVAS_LONG_SIDE = 1920;
 
@@ -577,6 +581,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       for (const { vc, got } of layers) {
         // colour grade: the same matrix the export applies (clip.grade)
         ctx.filter = gradeFilter((vc.clip as { grade?: unknown }).grade);
+        // blend mode (light leaks etc. on black): the export mixes the same way (clip.blend)
+        ctx.globalCompositeOperation = BLEND_OPS[String((vc.clip as { blend?: string }).blend || '')] || 'source-over';
         const tf = vc.clip.transform;
         const cr = vc.clip.crop;
         let px = vc.position ? vc.position.x * w : 0;
@@ -602,6 +608,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       }
 
       ctx.filter = 'none';
+      ctx.globalCompositeOperation = 'source-over';
       // blur / mosaic regions (effect clips active now)
       const baseGot = (layers.find((l) => l.vc.kind === 'base') || layers[0])?.got || null;
       for (const e of effectClips) {
