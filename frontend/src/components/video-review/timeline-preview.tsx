@@ -1007,12 +1007,16 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         }
         if (heard != null) {
           // 音の時計に映像を合わせる: 大きくずれた時だけ頭出し、小さいずれは再生の速さを少し変えて詰める
-          if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.25) {
-            try { v.currentTime = expected; } catch { /* not ready */ }
+          // 速さは3段だけで切り替える（毎コマ細かく変えると、ブラウザが再生を引っかけて余計にずれた）
+          if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.2) {
+            try { v.currentTime = expected + (v.paused ? 0 : 0.03); } catch { /* not ready */ }
+            if (v.playbackRate !== 1) v.playbackRate = 1;
+          } else if (signed < -0.025) {
+            if (v.playbackRate !== 1.06) v.playbackRate = 1.06;
+          } else if (signed > 0.025) {
+            if (v.playbackRate !== 0.94) v.playbackRate = 0.94;
+          } else if (drift < 0.008 && v.playbackRate !== 1) {
             v.playbackRate = 1;
-          } else {
-            const rate = drift > 0.015 ? Math.max(0.9, Math.min(1.1, 1 - signed * 1.5)) : 1;
-            if (Math.abs(v.playbackRate - rate) > 0.005) v.playbackRate = rate;
           }
         } else if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.15) {
           try { v.currentTime = expected; } catch { /* not ready */ }
