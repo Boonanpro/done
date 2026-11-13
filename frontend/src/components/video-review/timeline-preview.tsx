@@ -579,6 +579,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const urls = new Set<string>();
     for (const { clip } of audibleAudio) { const u = srcByAssetId.get(String(clip.asset_id || '')); if (u) urls.add(u); }
     mgr.retain(urls);
+    // 開いた時に全部の音の素材の目次（短い音は中身ごと）を読み始める: 再生がそこへ来てから読むと間に合わない
+    for (const u of urls) mgr.get(u);
   }, [audibleAudio, srcByAssetId, useWebAudio]);
 
   // 止まっている間も、再生位置の先の音を解読しておく（再生を押した瞬間から鳴る）
@@ -955,6 +957,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       return an.t0 + Math.max(0, now - an.ctxT0);
     };
     let lastWall = performance.now();
+    let lastAheadWall = 0;
     const PREROLL = 1.5; // pre-seek a clip about to start so its first frame is ready at the cut
     const step = () => {
       const clock = playClockRef.current;
@@ -1046,7 +1049,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (fs) void fs.ready.then(() => fs.seekTo(startSrc));
       }
 
-      if (webAudio) scheduleAudio(t, dtMs);
+      if (webAudio) {
+        scheduleAudio(t, dtMs);
+        // この先10秒に始まる音も、4回/秒ずつ前もって解読しておく（切れ目で読み込みを待たない）
+        if (nowWall - lastAheadWall > 250) { lastAheadWall = nowWall; ensureAudioAhead(t, 10); }
+      }
       // AUDIO（前の作り・?webaudio=0 の時）: align + play each active audio clip's element (one per clip).
       const activeAudioClips = new Set<string>();
       let elementGap = false;
@@ -1088,7 +1095,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     };
     // currentTime intentionally excluded: snapshotted into playClockRef at start
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded, srcByAssetId, scheduleAudio, stopAudioNodes]);
+  }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded, srcByAssetId, scheduleAudio, stopAudioNodes, ensureAudioAhead]);
 
   // 再生中に利用者が位置を動かした（目盛りを押した・クリップをダブルクリックした・矢印キー）:
   // 再生の時計をその位置に付け替え、映像と音の要素を新しい位置へ合わせ直す。止めずに続ける。
