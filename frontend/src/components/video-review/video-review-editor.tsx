@@ -28,6 +28,8 @@ import {
   Undo2,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { ClipBox, type ClipBoxFns } from './timeline-clip';
+import { perfLog } from '@/lib/perf-log';
 import { TimelineRuler } from './timeline-ruler';
 
 import { Button } from '@/components/ui/button';
@@ -226,7 +228,7 @@ export type SequenceAsset = {
 // ぼかし = hide it; 生成 = let Dan generate something there; ダンに指示 = free-text instruction.
 const INTENTS: Array<{ value: Intent; label: string }> = [
   { value: 'blur', label: 'ぼかし' },
-  { value: 'generate', label: '生成' },
+  { value: 'generate', label: 'AI映像（未作成）' },
   { value: 'comment', label: 'ダンに指示' },
 ];
 
@@ -540,6 +542,7 @@ export function VideoReviewEditor({
   initialAnnotations,
   initialSequence,
   sequenceAssets,
+  compact = false,
   embedded = false,
   onBack,
   onSaveTimeline,
@@ -569,6 +572,8 @@ export function VideoReviewEditor({
   initialAnnotations?: ReviewAnnotation[];
   initialSequence?: EditSequence | null;
   sequenceAssets?: SequenceAsset[];
+  /** スマホの幅: 道具の並び・調整欄・境目を畳み、プレビューと再生と小さいタイムラインだけにする */
+  compact?: boolean;
   embedded?: boolean;
   onBack?: () => void;
   onSaveTimeline?: (payload: SessionPayload) => void | Promise<void>;
@@ -683,7 +688,7 @@ export function VideoReviewEditor({
   const [currentTime, setCurrentTime] = useState(0);
   // 利用者が再生位置を動かすたびに増える。プレビューは再生中でもこれを見て新しい位置から続ける。
   const [seekRev, setSeekRev] = useState(0);
-  const [tool, setTool] = useState<Tool>('rect');
+  const [tool, setTool] = useState<Tool>('select');
   const [annotations, setAnnotations] = useState<ReviewAnnotation[]>(initialAnnotations || []);
   const [editSequence, setEditSequence] = useState<EditSequence | null>(initialSequence || null);
   // Native shell: mirror the WHOLE timeline to the GES engine on any edit (robust — covers
@@ -831,7 +836,17 @@ export function VideoReviewEditor({
   const laneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }>>([]);
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
   const [timelineZoom, setTimelineZoom] = useState(1);
+  // タイムラインの高さ（プレビューとの境目を引きずって変える）。次に開いた時も残す
   const [timelineHeight, setTimelineHeight] = useState(300);
+  const timelineHeightLoaded = useRef(false);
+  useEffect(() => {
+    if (!timelineHeightLoaded.current) {
+      timelineHeightLoaded.current = true;
+      const v = Number(window.localStorage.getItem('dan-editor-timeline-height'));
+      if (Number.isFinite(v) && v >= 180 && v !== timelineHeight) { setTimelineHeight(Math.min(v, 900)); return; }
+    }
+    try { window.localStorage.setItem('dan-editor-timeline-height', String(Math.round(timelineHeight))); } catch { /* ignore */ }
+  }, [timelineHeight]);
   const [timelineResizeStart, setTimelineResizeStart] = useState<{ clientY: number; height: number } | null>(null);
   // The preview canvas (TimelinePreview) fills the aspect-locked stage exactly, so
   // the annotation overlay always maps to the full stage rect — no per-frame measuring.
@@ -947,7 +962,7 @@ export function VideoReviewEditor({
           label: `${zone === 'visual' ? '映像' : '音声'}${i + 1}`,
           zone,
           layer,
-          height: zone === 'audio' ? 26 : hasVideo ? 52 : 30,
+          height: zone === 'audio' ? 24 : hasVideo ? 42 : 28,
           items,
         };
       });
@@ -1718,7 +1733,7 @@ export function VideoReviewEditor({
     if (!timelineResizeStart) return;
     const moveResize = (event: PointerEvent) => {
       const delta = timelineResizeStart.clientY - event.clientY;
-      setTimelineHeight(clamp(timelineResizeStart.height + delta, 180, 520));
+      setTimelineHeight(clamp(timelineResizeStart.height + delta, 180, Math.max(520, window.innerHeight - 220)));
     };
     const stopResize = () => setTimelineResizeStart(null);
     window.addEventListener('pointermove', moveResize);
@@ -3319,6 +3334,113 @@ export function VideoReviewEditor({
   // 押した時の処理は laneFns から最新の物を呼ぶので、ここは見た目の中身が変わった時だけ描き直す。
   const laneFns = useRef({ handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag });
   laneFns.current = { handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag };
+  // 画面が0.25秒以上止まったら、直前に何をしていたかと一緒に記録する（本人の画面の「固まる」を後から直せるように）
+  const freezeCtxRef = useRef({ clips: 0, zoom: 1, playing: false });
+  freezeCtxRef.current = { clips: allSequenceClips.length, zoom: timelineZoom, playing };
+  useEffect(() => {
+    if (typeof PerformanceObserver === 'undefined') return;
+    let lastAction = 'none';
+    let lastAt = 0;
+    let lastSent = 0;
+    const note = (e: Event) => {
+      const t = e.target as HTMLElement | null;
+      const el = t?.closest?.('[data-clip-id],[data-annotation-id],[data-timeline-ruler],button,input,textarea,canvas,[role="separator"]') as HTMLElement | null;
+      const what = el?.dataset?.clipId ? 'clip' : el?.dataset?.annotationId ? 'annotation' : el?.hasAttribute?.('data-timeline-ruler') ? 'ruler'
+        : el ? `${el.tagName.toLowerCase()}:${(el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '').trim().slice(0, 24)}` : (t?.tagName || '').toLowerCase();
+      lastAction = `${e.type}:${what}`;
+      lastAt = performance.now();
+    };
+    window.addEventListener('pointerdown', note, true);
+    window.addEventListener('keydown', note, true);
+    window.addEventListener('wheel', note, { capture: true, passive: true });
+    const obs = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.duration < 250) continue;
+        const now = performance.now();
+        if (now - lastSent < 5000) continue;
+        lastSent = now;
+        const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+        perfLog({
+          surface: 'web',
+          event: 'editor-freeze',
+          ms: Math.round(entry.duration),
+          room_id: roomId || null,
+          extra: {
+            ...freezeCtxRef.current,
+            content_id: contentId || null,
+            last_action: lastAction,
+            since_action_ms: Math.round(entry.startTime - lastAt),
+            heap_mb: mem ? Math.round(mem.usedJSHeapSize / 1048576) : null,
+            dom: document.getElementsByTagName('*').length,
+          },
+        });
+      }
+    });
+    try { obs.observe({ type: 'longtask', buffered: false }); } catch { /* unsupported */ }
+    return () => {
+      obs.disconnect();
+      window.removeEventListener('pointerdown', note, true);
+      window.removeEventListener('keydown', note, true);
+      window.removeEventListener('wheel', note, true);
+    };
+  }, [roomId, contentId]);
+
+  // クリップの押した時の処理（ClipBox は memo なので ref から最新を呼ぶ）
+  const laneClipLookup = useMemo(() => {
+    const m = new Map<string, { clip: SequenceClip; itemType: string }>();
+    for (const lane of timelineLanes) for (const it of lane.items) if (it.clip) m.set(it.clip.id, { clip: it.clip, itemType: it.itemType });
+    return m;
+  }, [timelineLanes]);
+  const clipFns = useRef<ClipBoxFns>({ startDrag: () => {}, openMenu: () => {}, focusClip: () => {} });
+  clipFns.current = {
+    startDrag: (event, id, mode) => {
+      const hit = laneClipLookup.get(id);
+      if (hit) startSequenceClipDrag(event, hit.clip, mode);
+    },
+    openMenu: (event, id) => {
+      event.preventDefault();
+      // A right-DRAG is a range-select (marquee) — don't open the menu.
+      if (rightDragRef.current) return;
+      const hit = laneClipLookup.get(id);
+      if (hit && hit.itemType === 'video' && hit.clip.asset_id) setClipMenu({ x: event.clientX, y: event.clientY, clip: hit.clip });
+    },
+    focusClip: (id) => {
+      const hit = laneClipLookup.get(id);
+      selectSequenceClip(id);
+      if (hit) seekTimeline(hit.clip.timeline_start);
+    },
+  };
+  // 見えている範囲（と左右に1画面ずつ）のクリップだけ描く。半画面ぶん動くまで描き直さない。
+  const [viewWin, setViewWin] = useState<[number, number]>([0, Number.POSITIVE_INFINITY]);
+  const [trackPx, setTrackPx] = useState(0);
+  useEffect(() => {
+    const sc = timelineScrollRef.current;
+    const tr = timelineRef.current;
+    if (!sc || !tr || !timelineDuration) return;
+    let raf = 0;
+    const update = () => {
+      raf = 0;
+      const tb = tr.getBoundingClientRect();
+      const sb = sc.getBoundingClientRect();
+      if (!tb.width) return;
+      setTrackPx((p) => (Math.abs(p - tb.width) > 1 ? tb.width : p));
+      const pxPerSec = tb.width / timelineDuration;
+      const l = (sb.left - tb.left) / pxPerSec;
+      const r = (sb.right - tb.left) / pxPerSec;
+      const span = Math.max(1, r - l);
+      const chunk = span / 2;
+      const a = Math.floor((l - span) / chunk) * chunk;
+      const b = Math.ceil((r + span) / chunk) * chunk;
+      setViewWin((p) => (p[0] === a && p[1] === b ? p : [a, b]));
+    };
+    const kick = () => { if (!raf) raf = requestAnimationFrame(update); };
+    update();
+    sc.addEventListener('scroll', kick, { passive: true });
+    const ro = new ResizeObserver(kick);
+    ro.observe(tr);
+    ro.observe(sc);
+    return () => { sc.removeEventListener('scroll', kick); ro.disconnect(); if (raf) cancelAnimationFrame(raf); };
+  }, [timelineDuration, timelineZoom]);
   const lanesView = useMemo(() => (
     timelineLanes.map((lane, laneIndex) => {
                         const zoneChanged = laneIndex > 0 && timelineLanes[laneIndex - 1].zone !== lane.zone;
@@ -3354,6 +3476,9 @@ export function VideoReviewEditor({
                               </div>
                             ) : null}
                             {lane.items.map((item) => {
+                              if (item.end < viewWin[0] || item.start > viewWin[1]) {
+                                if (!(item.clip && selectedSequenceClipIds.includes(item.clip.id)) && !(item.annotation && selectedIds.includes(item.annotation.id))) return null;
+                              }
                               const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
                               // accurate width (% of timeline); a pixel minWidth keeps short clips
                               // clickable WITHOUT the old 0.8%-of-timeline floor that, on a long
@@ -3411,68 +3536,34 @@ export function VideoReviewEditor({
                               const selected = selectedSequenceClipIds.includes(clip.id);
                               const linkedSelected = !selected && highlightedClipIds.has(clip.id);
                               const isVideo = item.itemType === 'video';
+                              const rawName = clipAsset?.label || '';
+                              const assetName = /^([a-zA-Z]:)?[\\/]/.test(rawName) ? rawName.split(/[\\/]/).pop() || '' : rawName;
                               const labelText =
                                 item.itemType === 'caption'
                                   ? clip.text || 'テロップ'
                                   : item.itemType === 'audio'
                                     ? [audioRoleLabel(clip.role), clipAsset?.label || clip.label].filter(Boolean).join('・')
-                                    : clip.label || '素材';
+                                    : clip.label || assetName || '素材';
+                              const badge = isVideo && ((clip as { kind?: string }).kind === 'image' || clipAsset?.kind === 'image') ? '画像' : itemTypeBadge(item.itemType);
                               return (
-                                <div
+                                <ClipBox
                                   key={item.key}
-                                  data-clip-id={clip.id}
-                                  className={`absolute flex cursor-grab items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm active:cursor-grabbing ${clipItemColor(item.itemType)} ${
-                                    danTouch.ids.includes(clip.id) ? 'dan-touch' : ''} ${danTouch.appear.includes(clip.id) ? 'dan-appear' : ''} ${
-                                    danTouch.vanish.includes(clip.id) ? 'dan-vanish' : ''} ${
-                                    selected
-                                      ? 'border-yellow-300 ring-2 ring-yellow-300/70'
-                                      : linkedSelected
-                                        ? 'border-yellow-300/70 ring-2 ring-yellow-300/40 ring-dashed'
-                                        : 'border-white/30'
-                                  }`}
-                                  onContextMenu={(event) => {
-                                    event.preventDefault();
-                                    // A right-DRAG is a range-select (marquee) — don't open the menu.
-                                    if (rightDragRef.current) return;
-                                    if (isVideo && clip.asset_id) setClipMenu({ x: event.clientX, y: event.clientY, clip });
-                                  }}
-                                  style={{
-                                    left: `${left}%`,
-                                    width: `${width}%`,
-                                    minWidth: '3px',
-                                    top: 3,
-                                    bottom: 3,
-                                    ...(isVideo && clipAsset?.thumbnail_url
-                                      ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url(${clipAsset.thumbnail_url})` }
-                                      : {}),
-                                  }}
-                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}${isVideo && clip.asset_id ? ' ／ 右クリックで再生位置を静止画に' : ''}`}
-                                >
-                                  <button
-                                    type="button"
-                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
-                                    onPointerDown={(event) => laneFns.current.startSequenceClipDrag(event, clip, 'start')}
-                                    aria-label="Resize clip start"
-                                  />
-                                  <div
-                                    className="flex h-full min-w-0 flex-1 cursor-grab items-center gap-1 truncate px-1 active:cursor-grabbing"
-                                    onPointerDown={(event) => laneFns.current.startSequenceClipDrag(event, clip, 'move')}
-                                    onDoubleClick={(event) => {
-                                      event.stopPropagation();
-                                      laneFns.current.selectSequenceClip(clip.id);
-                                      laneFns.current.seekTimeline(clip.timeline_start);
-                                    }}
-                                  >
-                                    <span className="shrink-0 rounded bg-black/45 px-1 text-[8px] leading-tight">{itemTypeBadge(item.itemType)}</span>
-                                    <span className="truncate">{labelText}</span>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
-                                    onPointerDown={(event) => laneFns.current.startSequenceClipDrag(event, clip, 'end')}
-                                    aria-label="Resize clip end"
-                                  />
-                                </div>
+                                  clipId={clip.id}
+                                  left={left}
+                                  width={width}
+                                  badge={badge}
+                                  label={labelText}
+                                  colorClass={clipItemColor(item.itemType)}
+                                  thumb={isVideo ? clipAsset?.thumbnail_url || undefined : undefined}
+                                  narrow={!selected && trackPx > 0 && (width / 100) * trackPx < 28}
+                                  selected={selected}
+                                  linkedSelected={linkedSelected}
+                                  touch={danTouch.ids.includes(clip.id)}
+                                  appear={danTouch.appear.includes(clip.id)}
+                                  vanish={danTouch.vanish.includes(clip.id)}
+                                  title={`${badge}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}${isVideo && clip.asset_id ? ' ／ 右クリックで再生位置を静止画に' : ''}`}
+                                  fns={clipFns}
+                                />
                               );
                             })}
                             {showPending && pendingAnnotation ? (
@@ -3502,7 +3593,7 @@ export function VideoReviewEditor({
                           </div>
                         );
                       })
-  ), [timelineLanes, pendingAnnotation, isTimelineScrubbing, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch]);
+  ), [timelineLanes, pendingAnnotation, isTimelineScrubbing, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch, viewWin, trackPx]);
 
   return (
     <div className={`flex h-full text-foreground ${nativeShell ? '' : 'bg-background'} ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
@@ -3571,11 +3662,11 @@ export function VideoReviewEditor({
           <Button variant="ghost" size="sm" onClick={redo} title="やり直す (Ctrl+Shift+Z)">
             <Redo2 className="h-4 w-4" />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => void saveSession()} disabled={isSaving}>
+          <Button variant="outline" size="sm" className={compact ? 'hidden' : ''} onClick={() => void saveSession()} disabled={isSaving}>
             <Save className="mr-1 h-4 w-4" />
             Save
           </Button>
-          {onExecute ? (
+          {onExecute && !compact ? (
             <Button
               size="sm"
               disabled={isSaving}
@@ -3637,6 +3728,11 @@ export function VideoReviewEditor({
                     selectedClipId={selectedSequenceClipId}
                     onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
                     onTransformChange={(clipId, transform) => updateSequenceClip(clipId, { transform })}
+                    onPick={(clipId) => { if (clipId) selectSequenceClip(clipId); else clearSelection(); }}
+                    onCaptionMove={(clipId, nudge) => {
+                      const c = allSequenceClips.find((x) => x.id === clipId);
+                      updateSequenceClip(clipId, { style: { ...((c?.style || {}) as Record<string, unknown>), x: nudge.x, y: nudge.y } } as Partial<SequenceClip>);
+                    }}
                   />
                 )}
                 {/* Browser only: in the desktop app the NATIVE engine composites the pop-out
@@ -3882,7 +3978,7 @@ export function VideoReviewEditor({
                 </div>
               </div>
             </div>
-            {showInspector ? (
+            {showInspector && !compact ? (
             <aside className="flex w-[360px] shrink-0 flex-col overflow-y-auto border-l border-border bg-background" aria-label="選んだ物の調整">
               <div className={sidePanelTop || pendingAnnotation ? 'p-3' : 'hidden'}>
                 {sidePanelTop}
@@ -4622,7 +4718,7 @@ export function VideoReviewEditor({
             </div>
 
             <div
-              className="h-1.5 shrink-0 cursor-row-resize bg-border hover:bg-primary"
+              className={`h-1.5 shrink-0 cursor-row-resize bg-border hover:bg-primary ${compact ? 'hidden' : ''}`}
               onPointerDown={(event) => {
                 event.preventDefault();
                 setTimelineResizeStart({ clientY: event.clientY, height: timelineHeight });
@@ -4630,8 +4726,9 @@ export function VideoReviewEditor({
               title="ドラッグしてタイムラインの高さを調整"
             />
 
-            <div className="shrink-0 border-t border-neutral-800 bg-background p-3" style={{ height: timelineHeight }}>
-              <div className="flex items-center gap-2">
+            <div className={`shrink-0 border-t border-neutral-800 bg-background ${compact ? 'p-1.5' : 'p-3'}`} style={{ height: compact ? 150 : timelineHeight }}>
+              {compact ? <style>{'[data-editor-toolbar] > *:not([data-keep]) { display: none !important; }'}</style> : null}
+              <div className="flex items-center gap-2" data-editor-toolbar>
                 <Button variant={tool === 'select' ? 'default' : 'outline'} size="sm" title="選択・移動" onClick={() => setTool('select')}>
                   <MousePointer2 className="h-4 w-4" />
                   <span className="hidden sm:inline">選択</span>
@@ -4656,7 +4753,7 @@ export function VideoReviewEditor({
                     title="再生位置にクリップを足す。右の欄で指示とモデルを決めると、そのクリップの長さの映像をAIで作れます"
                     onClick={addAiClip}
                   >
-                    + クリップ
+                    + AI映像の枠
                   </Button>
                 ) : null}
                 <Button
@@ -4699,6 +4796,7 @@ export function VideoReviewEditor({
                   variant="outline"
                   size="sm"
                   className="h-7 w-7 p-0"
+                  data-keep
                   title={playing ? '一時停止 (Space)' : '再生 (Space)'}
                   onClick={() => setPlaying((p) => !p)}
                 >
@@ -4717,12 +4815,13 @@ export function VideoReviewEditor({
                   variant="outline"
                   size="sm"
                   className="h-7 w-7 p-0"
+                  data-keep
                   title="プレビューを全画面 (P)"
                   onClick={togglePreviewFullscreen}
                 >
                   <Maximize2 className="h-4 w-4" />
                 </Button>
-                <div className="flex shrink-0 items-center gap-1" title={`タイムラインの拡大率 ${Math.round(timelineZoom * 100)}%（左端＝全体表示・＋／－キーでも変わる）`}>
+                <div data-keep className="flex shrink-0 items-center gap-1" title={`タイムラインの拡大率 ${Math.round(timelineZoom * 100)}%（左端＝全体表示・＋／－キーでも変わる）`}>
                   <input
                     type="range"
                     min={1}
@@ -4739,7 +4838,7 @@ export function VideoReviewEditor({
                     className="h-1 w-24 cursor-pointer accent-sky-500"
                   />
                 </div>
-                <div className="shrink-0 whitespace-nowrap text-sm tabular-nums text-muted-foreground">
+                <div data-keep className="shrink-0 whitespace-nowrap text-sm tabular-nums text-muted-foreground">
                   <span ref={timeReadoutRef}>{fmtTime(currentTime)}</span> / {fmtTime(contentDuration)}
                 </div>
               </div>

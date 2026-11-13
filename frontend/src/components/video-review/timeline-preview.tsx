@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import type { EditSequence, SequenceAsset, SequenceClip } from './video-review-editor';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
@@ -37,6 +37,10 @@ type Props = {
   selectedClipId?: string | null;
   onPositionChange?: (clipId: string, position: { x: number; y: number; width: number; height: number }) => void;
   onTransformChange?: (clipId: string, transform: { scale: number; x: number; y: number }) => void;
+  /** プレビューの上で押した物（テロップ・重ねた絵・映像）を選ぶ。何も無い所なら null */
+  onPick?: (clipId: string | null) => void;
+  /** 選んだテロップをプレビューの上で引きずって動かした（x・y は画面の幅・高さに対する割合のずれ） */
+  onCaptionMove?: (clipId: string, nudge: { x: number; y: number }) => void;
 };
 
 type VisualClip = {
@@ -178,7 +182,7 @@ function LiveCaptionLayer({ playing, currentTime, clockRef, outW, outH, captions
 // プレビューを描く画素の倍率の上限: 長い辺 1920px まで（書き出しの 1080p と同じ細かさ）
 const MAX_CANVAS_LONG_SIDE = 1920;
 
-export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange }: Props) {
+export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange, onPick, onCaptionMove }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   // WebCodecs frame decoders, one per asset URL (shared across all clips of that asset). Used
@@ -910,11 +914,76 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     [selectedBox, onPositionChange, onTransformChange],
   );
 
+  // 選んだテロップの枠: 描かれたテロップの文字の箱を測って、映像と同じ青い枠を出す
+  const [capBox, setCapBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const selectedCaption = selectedClipId ? renderCaptions.find((c) => c.id === String(selectedClipId)) || null : null;
+  useLayoutEffect(() => {
+    if (!selectedCaption || playing) { setCapBox(null); return; }
+    const measure = () => {
+      const wrap = wrapRef.current;
+      const el = wrap?.querySelector(`[data-caption-id="${CSS.escape(selectedCaption.id || "")}"]`) as HTMLElement | null;
+      if (!wrap || !el) { setCapBox(null); return; }
+      const wb = wrap.getBoundingClientRect();
+      const eb = el.getBoundingClientRect();
+      if (!wb.width || !wb.height || !eb.width) { setCapBox(null); return; }
+      setCapBox({ x: (eb.left - wb.left) / wb.width, y: (eb.top - wb.top) / wb.height, width: eb.width / wb.width, height: eb.height / wb.height });
+    };
+    measure();
+    const raf = requestAnimationFrame(measure);   // 書体の読み込み直後に1回測り直す
+    return () => cancelAnimationFrame(raf);
+  }, [selectedCaption, currentTime, playing, contentRect]);
+
+  const startCaptionDrag = useCallback((e: React.PointerEvent) => {
+    if (!selectedCaption || !onCaptionMove || !contentRect) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const start = { x: e.clientX, y: e.clientY };
+    // y はテロップの高さ（画面の下からの割合、上へ＋、未指定は0.08）。x は右への寄せ（画面の幅に対する割合）
+    const d0 = { x: Number(selectedCaption.design?.x || 0), y: selectedCaption.design?.y == null ? 0.08 : Number(selectedCaption.design.y) };
+    const id = selectedCaption.id || "";
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - start.x) / contentRect.width;
+      const dy = (ev.clientY - start.y) / contentRect.height;
+      onCaptionMove(id, { x: Number((d0.x + dx).toFixed(4)), y: Number(Math.max(0, Math.min(0.92, d0.y - dy)).toFixed(4)) });
+    };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }, [selectedCaption, onCaptionMove, contentRect]);
+
+  // プレビューの上で押した所にある一番手前の物を選ぶ: テロップ → 重ねた絵（上の段から）→ 映像
+  const pickAt = useCallback((e: React.PointerEvent) => {
+    if (!onPick || e.button !== 0) return;
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    for (const el of Array.from(wrap.querySelectorAll('[data-caption-id]')).reverse() as HTMLElement[]) {
+      const b = el.getBoundingClientRect();
+      if (e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom) {
+        onPick(el.dataset.captionId || null);
+        return;
+      }
+    }
+    if (!contentRect) return;
+    const wb = wrap.getBoundingClientRect();
+    const fx = (e.clientX - wb.left - contentRect.left) / contentRect.width;
+    const fy = (e.clientY - wb.top - contentRect.top) / contentRect.height;
+    const t = currentTime;
+    for (let i = visualClips.length - 1; i >= 0; i -= 1) {
+      const vc = visualClips[i];
+      if (!(t >= vc.clip.timeline_start && t < vc.clip.timeline_end)) continue;
+      const p = vc.position;
+      if (p && !(fx >= p.x && fx <= p.x + p.width && fy >= p.y && fy <= p.y + p.height)) continue;
+      onPick(String(vc.clip.id));
+      return;
+    }
+    onPick(null);
+  }, [onPick, contentRect, currentTime, visualClips]);
+
   const box = selectedBox?.rect;
   const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
 
   return (
-    <div ref={wrapRef} className={`relative ${className || ''}`} style={{ width: '100%', height: '100%' }}>
+    <div ref={wrapRef} className={`relative ${className || ''}`} style={{ width: '100%', height: '100%' }} onPointerDown={pickAt}>
       <canvas
         ref={canvasRef}
         width={Math.round(dims.w * pxScale)}
@@ -947,7 +1016,20 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           </div>
         </div>
       ) : null}
-      {box ? (
+      {capBox ? (
+        <div
+          data-caption-select-box
+          className="absolute cursor-move rounded-sm border-2 border-sky-400 bg-sky-400/10"
+          style={{
+            left: `${capBox.x * 100}%`, top: `${capBox.y * 100}%`,
+            width: `${capBox.width * 100}%`, height: `${capBox.height * 100}%`,
+            touchAction: 'none',
+          }}
+          onPointerDown={startCaptionDrag}
+          title="引きずるとテロップの位置が動きます"
+        />
+      ) : null}
+      {box && !capBox ? (
         <div
           className="absolute cursor-move border-2 border-sky-400"
           style={{
