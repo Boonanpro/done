@@ -1033,7 +1033,17 @@ export function VideoReviewEditor({
   }, [videoPath, videoUrl]);
 
   const selected = annotations.find((a) => a.id === selectedId) || null;
-  const selectedSequenceClip = allSequenceClips.find((clip) => clip.id === selectedSequenceClipId) || null;
+  // Clips usually carry no `track` field (their lane's type is on the track). The side panel keys
+  // its controls (size/position, crop, volume, pop-out) off clip.track, so without this a clip of
+  // such a work showed only its times — no volume, no size. Fill it from the lane it sits in.
+  const selectedSequenceClip = useMemo(() => {
+    if (!selectedSequenceClipId) return null;
+    for (const track of editSequence?.tracks || []) {
+      const c = (track.clips || []).find((clip) => clip.id === selectedSequenceClipId);
+      if (c) return c.track ? c : { ...c, track: track.type };
+    }
+    return null;
+  }, [editSequence, selectedSequenceClipId]);
   // Clips that should appear selected: the explicitly selected ones, PLUS their A/V-linked
   // partners (so clicking audio also highlights its video and vice versa) when link is on.
   const highlightedClipIds = useMemo(() => {
@@ -4270,7 +4280,9 @@ export function VideoReviewEditor({
                     />
                   </div>
                   <SceneClipPanel clip={selectedSequenceClip} onChange={(scene) => updateSelectedSequenceClip({ scene } as Partial<SequenceClip>)} />
-                  <BlendSelect clip={selectedSequenceClip} onChange={(blend) => updateSelectedSequenceClip({ blend } as Partial<SequenceClip>)} />
+                  {clipLanes.get(String(selectedSequenceClip.id))?.zone !== 'audio' ? (
+                    <BlendSelect clip={selectedSequenceClip} onChange={(blend) => updateSelectedSequenceClip({ blend } as Partial<SequenceClip>)} />
+                  ) : null}
                   {(selectedSequenceClip.track === 'video' || selectedSequenceClip.asset_id) ? (
                     <div className="grid grid-cols-2 gap-2">
                       <Input
