@@ -17,7 +17,7 @@ window.createScenePreview=function(item,host){
  function message(e){
   if(e.source!==frame.contentWindow)return;
   if(e.data?.type==='dan-scene-ready'){ready=true;host.items=Array.isArray(e.data.items)?e.data.items:[];complete(true);send();schedule();host.onitems?.(host.items);}
-  else if(e.data?.type==='dan-scene-seeked'){host.seekedTime=Number(e.data.time);host.onseeked?.(host.seekedTime);}
+  else if(e.data?.type==='dan-scene-seeked'){host.seekedTime=Number(e.data.time);host.onsceneseeked?.(host.seekedTime);}
   else if(e.data?.type==='dan-scene-error'){ready=false;running=false;cancelAnimationFrame(timer);complete(false,String(e.data.error||'描画エラー'));host.dataset.failed='true';host.sceneError=String(e.data.error||'描画エラー');}
  }
  window.addEventListener('message',message);
@@ -69,7 +69,8 @@ window.createScenePreview=function(item,host){
    const E=(window.danParams&&window.danParams.edits)||{};
    const tweens=timeline.getChildren(true,true,false);
    const at=tw=>{let s=tw.startTime(),p=tw.parent;while(p&&p!==timeline){s+=p.startTime();p=p.parent;}return s;};
-   const hits=(tw,el)=>{try{return tw.targets().some(x=>x&&x.nodeType===1&&(x===el||el.contains(x)));}catch{return false;}};
+   const big=x=>x===document.documentElement||x===document.body||x.id==='dan-html-stage'||x.id==='root';
+   const hits=(tw,el)=>{try{return tw.targets().some(x=>x&&x.nodeType===1&&(x===el||el.contains(x)||(!big(x)&&x.contains(el))));}catch{return false;}};
    for(const el of document.querySelectorAll('[data-edit]')){const sh=Number(E[el.dataset.edit]?.shift)||0;if(sh)for(const tw of tweens)if(hits(tw,el))tw.startTime(tw.startTime()+sh);}
    const items=[...document.querySelectorAll('[data-edit]')].map(el=>{let s=Infinity,e=-Infinity;for(const tw of tweens)if(hits(tw,el)){const a=at(tw);s=Math.min(s,a);e=Math.max(e,a+tw.totalDuration());}
     const cs=getComputedStyle(el);return {key:el.dataset.edit,label:el.dataset.label||'',text:el.textContent,start:Number.isFinite(s)?s:0,end:Number.isFinite(e)?Math.max(e,s):${Number(c.duration)},font:cs.fontFamily.split(',')[0].replace(/['"]/g,'').trim(),color:cs.color,size:parseFloat(cs.fontSize)};});

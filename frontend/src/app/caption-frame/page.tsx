@@ -22,7 +22,7 @@ type Payload = {
   captions: (RenderCaption & {scene?: Record<string, unknown>})[];
 };
 
-type SceneHost = HTMLDivElement & {ready?: Promise<{ok:boolean}>;seek?: (t:number)=>void;dispose?:()=>void;onseeked?:(t:number)=>void};
+type SceneHost = HTMLDivElement & {ready?: Promise<{ok:boolean}>;seek?: (t:number)=>void;dispose?:()=>void;onsceneseeked?:(t:number)=>void};
 let sceneScript: Promise<void> | undefined;
 function loadSceneScript(){
   return sceneScript ||= new Promise<void>((resolve,reject)=>{
@@ -43,7 +43,7 @@ function EditableScene({clip,time}:{clip:RenderCaption & {scene?:Record<string,u
       const frame=h.querySelector('iframe');if(frame)frame.style.cssText='width:100%;height:100%;border:0;display:block;background:transparent;color-scheme:light';
       const controls=h.querySelector<HTMLElement>('.proposal-controls');if(controls)controls.style.display='none';
       // the frame answers each seek after it has drawn it; only then is that time on screen
-      h.onseeked=(local)=>{window.__nativeSceneTime=local+clip.start;};
+      h.onsceneseeked=(local)=>{window.__nativeSceneTime=local+clip.start;};
       h.seek?.(latest.current-clip.start);
       h.ready?.then(result=>{if(!canceled){target.dataset.sceneReady=String(result.ok);h.seek?.(latest.current-clip.start);}});
     }).catch(()=>{if(target)target.dataset.sceneReady='false';});

@@ -25,3 +25,8 @@ export function useSceneInfo(clipId: string | null | undefined): SceneInfo | nul
   useSyncExternalStore(subscribe, () => version, () => version);
   return clipId ? infos.get(clipId) || null : null;
 }
+
+/** this clip's scene contents only (re-renders just that clip when it changes) */
+export function useSceneInfoFor(clipId: string): SceneInfo | null {
+  return useSyncExternalStore(subscribe, () => infos.get(clipId) || null, () => null);
+}

@@ -36,6 +36,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { isSceneClip } from './scene-layer';
+import { SceneClipPanel } from './scene-clip-panel';
 import { TimelinePreview } from './timeline-preview';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
@@ -3538,13 +3540,14 @@ export function VideoReviewEditor({
                               const isVideo = item.itemType === 'video';
                               const rawName = clipAsset?.label || '';
                               const assetName = /^([a-zA-Z]:)?[\\/]/.test(rawName) ? rawName.split(/[\\/]/).pop() || '' : rawName;
-                              const labelText =
+                              const isScene = isSceneClip(clip);
+                              const labelText = isScene ? clip.label || '場面' :
                                 item.itemType === 'caption'
                                   ? clip.text || 'テロップ'
                                   : item.itemType === 'audio'
                                     ? [audioRoleLabel(clip.role), clipAsset?.label || clip.label].filter(Boolean).join('・')
                                     : clip.label || assetName || '素材';
-                              const badge = isVideo && ((clip as { kind?: string }).kind === 'image' || clipAsset?.kind === 'image') ? '画像' : itemTypeBadge(item.itemType);
+                              const badge = isScene ? '場面' : isVideo && ((clip as { kind?: string }).kind === 'image' || clipAsset?.kind === 'image') ? '画像' : itemTypeBadge(item.itemType);
                               return (
                                 <ClipBox
                                   key={item.key}
@@ -4219,6 +4222,7 @@ export function VideoReviewEditor({
                       onChange={(e) => updateSelectedSequenceClip({ timeline_end: Number(e.target.value) })}
                     />
                   </div>
+                  <SceneClipPanel clip={selectedSequenceClip} onChange={(scene) => updateSelectedSequenceClip({ scene } as Partial<SequenceClip>)} />
                   {(selectedSequenceClip.track === 'video' || selectedSequenceClip.asset_id) ? (
                     <div className="grid grid-cols-2 gap-2">
                       <Input
@@ -4457,7 +4461,7 @@ export function VideoReviewEditor({
                       );
                     })()
                   ) : null}
-                  {selectedSequenceClip.track === 'caption' || typeof selectedSequenceClip.text === 'string' ? (
+                  {!isSceneClip(selectedSequenceClip) && (selectedSequenceClip.track === 'caption' || typeof selectedSequenceClip.text === 'string') ? (
                     <>
                       <Textarea
                         value={selectedSequenceClip.text || ''}

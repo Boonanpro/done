@@ -1057,16 +1057,26 @@ def _focus_chain(video_in: str, idx: int | str, x: int, y: int, w: int, h: int,
 
 def _kf_expr(keys: list[tuple[float, float]], scale: int, maxv: int, tvar: str = "t") -> str:
     """Piecewise-linear ffmpeg expression over time variable `tvar` (t for overlay/crop,
-    T for geq) from (abs_time, normalized_value) keyframes. Ends clamp to first/last key."""
+    T for geq) from (abs_time, normalized_value) keyframes. Ends clamp to first/last key.
+    Balanced if() tree (see _pl_expr) so many keys stay shallow."""
     def px(v: float) -> int:
         return max(0, min(maxv, round(v * scale)))
     if len(keys) == 1:
         return str(px(keys[0][1]))
-    expr = str(px(keys[-1][1]))
-    for (t0, v0), (t1, v1) in reversed(list(zip(keys, keys[1:]))):
-        seg = f"lerp({px(v0)}\\,{px(v1)}\\,({tvar}-{t0:.3f})/{max(t1 - t0, 1e-6):.3f})"
-        expr = f"if(lt({tvar}\\,{t1:.3f})\\,{seg}\\,{expr})"
-    return f"if(lt({tvar}\\,{keys[0][0]:.3f})\\,{px(keys[0][1])}\\,{expr})"
+
+    def seg(i: int) -> str:
+        (t0, v0), (t1, v1) = keys[i], keys[i + 1]
+        return f"lerp({px(v0)}\\,{px(v1)}\\,({tvar}-{t0:.3f})/{max(t1 - t0, 1e-6):.3f})"
+
+    def tree(i: int, j: int) -> str:
+        if j - i == 1:
+            return seg(i)
+        m = (i + j) // 2
+        return f"if(lt({tvar}\\,{keys[m][0]:.3f})\\,{tree(i, m)}\\,{tree(m, j)})"
+
+    inner = tree(0, len(keys) - 1)
+    return (f"if(lt({tvar}\\,{keys[0][0]:.3f})\\,{px(keys[0][1])}\\,"
+            f"if(lt({tvar}\\,{keys[-1][0]:.3f})\\,{inner}\\,{px(keys[-1][1])}))")
 
 
 def _blur_chain_kf_sized(video_in: str, idx: int, kf: list[tuple[float, float, float, float, float]],
@@ -1706,17 +1716,29 @@ def _keyed_box(box: tuple[float, float, float, float], k: dict[str, float]) -> t
 
 def _pl_expr(points: list[tuple[float, float]], tv: str) -> str:
     """Piecewise-linear float expression of `tv` through (t, v) points, ends held. Commas are
-    escaped for a quoted filter option."""
+    escaped for a quoted filter option. The segments are picked by a balanced tree of if()s,
+    so a smooth (eased) move with hundreds of keys stays a shallow expression (a linear chain
+    of if()s failed to build the filter at ~100+ keys)."""
     def num(v: float) -> str:
         return f"{v:.4f}"
     if len(points) == 1 or all(abs(v - points[0][1]) < 1e-9 for _, v in points):
         return num(points[0][1])
-    expr = num(points[-1][1])
-    for (t0, v0), (t1, v1) in reversed(list(zip(points, points[1:]))):
+
+    def seg(i: int) -> str:
+        (t0, v0), (t1, v1) = points[i], points[i + 1]
         dt = max(t1 - t0, 1e-6)
-        seg = f"{num(v0)}+({num(v1 - v0)})*({tv}-{t0:.4f})/{dt:.4f}"
-        expr = f"if(lt({tv}\\,{t1:.4f})\\,{seg}\\,{expr})"
-    return f"if(lt({tv}\\,{points[0][0]:.4f})\\,{num(points[0][1])}\\,{expr})"
+        return f"{num(v0)}+({num(v1 - v0)})*({tv}-{t0:.4f})/{dt:.4f}"
+
+    def tree(i: int, j: int) -> str:  # segments i..j-1
+        if j - i == 1:
+            return seg(i)
+        m = (i + j) // 2
+        return f"if(lt({tv}\\,{points[m][0]:.4f})\\,{tree(i, m)}\\,{tree(m, j)})"
+
+    n = len(points) - 1
+    inner = tree(0, n)
+    return (f"if(lt({tv}\\,{points[0][0]:.4f})\\,{num(points[0][1])}\\,"
+            f"if(lt({tv}\\,{points[-1][0]:.4f})\\,{inner}\\,{num(points[-1][1])}))")
 
 
 def _moving_video_layer(src: str, idx: int | str, keys: list[dict[str, float]],

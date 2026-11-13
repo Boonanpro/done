@@ -20,9 +20,7 @@ type SceneHost = HTMLDivElement & {
   onitems?: (items: SceneItem[]) => void;
 };
 
-declare global {
-  interface Window { createScenePreview?: (item: unknown, host: HTMLDivElement) => HTMLDivElement }
-}
+const sceneApi = () => window as unknown as { createScenePreview?: (item: unknown, host: HTMLDivElement) => HTMLDivElement };
 
 let scriptLoad: Promise<void> | undefined;
 function loadSceneScript(): Promise<void> {
@@ -67,12 +65,12 @@ function SceneFrame({ clip, time, playing, clockRef }: {
     const box = boxRef.current;
     if (!box) return;
     loadSceneScript().then(() => {
-      if (cancelled || !window.createScenePreview) return;
+      if (cancelled || !sceneApi().createScenePreview) return;
       const h = document.createElement('div') as SceneHost;
       h.style.cssText = 'position:absolute;inset:0;opacity:0';
       box.append(h);
       const made = performance.now();
-      window.createScenePreview({ id: clip.id, title: '場面', scene: clipRef.current.scene }, h);
+      sceneApi().createScenePreview!({ id: clip.id, title: '場面', scene: clipRef.current.scene }, h);
       const frame = h.querySelector('iframe');
       if (frame) frame.style.cssText = 'width:100%;height:100%;border:0;display:block;background:transparent;color-scheme:light';
       const controls = h.querySelector<HTMLElement>('.proposal-controls');
