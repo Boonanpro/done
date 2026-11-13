@@ -35,6 +35,7 @@ import { ShapeBlock, ShapePointContext, checkCompleteShape } from '@/components/
 export type StageCard = {
   proposal_id: string; status: string; channel: string; to: string; to_name?: string; subject?: string; body: string;
   intent?: string; revision?: number; sent_at?: string; sendable?: boolean;
+  attachments?: { name: string; url: string; type?: string }[];
 };
 
 export type StageDoc = {
@@ -340,7 +341,7 @@ export function StageFact({cue}: {cue:StageCue}) {
 
 const CHANNEL_LABEL: Record<string, string> = {
   email: 'メール', instagram_dm: 'Instagram DM', instagram_comment: 'Instagram コメント', line: 'LINE', sms: 'SMS', web_form: 'Webフォーム',
-  chatwork: 'Chatwork', slack: 'Slack', x_dm: 'X DM', collab: '窓口のチャット', other: 'メッセージ',
+  chatwork: 'Chatwork', slack: 'Slack', x_dm: 'X DM', x_post: 'X 投稿', collab: '窓口のチャット', other: 'メッセージ',
 };
 
 /** The message draft as the call's screen shows it: who it goes to, the subject, the body line by line. A revision
@@ -369,6 +370,7 @@ export function StageMessageCard({ card: snapshot }: { card: StageCard }) {
         <span className={`ml-auto rounded-md border px-1.5 py-0.5 text-[11px] ${status.cls}`}>{status.text}</span>
       </div>
       {card.subject ? <div className="mb-1.5 truncate text-[13px] text-foreground/90">{card.subject}</div> : null}
+      <DraftAttachments files={card.attachments || []} />
       {editor || <div className="whitespace-pre-wrap break-words leading-6" data-stage-card-body>
         {lines.map((line, i) => (
           <div key={changed.has(i) ? `${i}-${card.revision || 1}` : i} className="-mx-1 rounded px-1"
@@ -379,6 +381,24 @@ export function StageMessageCard({ card: snapshot }: { card: StageCard }) {
       </div>}
     </div>
   );
+}
+
+function DraftAttachments({ files }: { files: NonNullable<StageCard['attachments']> }) {
+  return <div className="space-y-3">
+    {files.map(file => {
+      const url = stageImageUrl(file.url);
+      if (!url) return null;
+      return <figure key={url} className="mb-3">
+        {file.type?.startsWith('video/') ? <video src={url} controls playsInline preload="metadata"
+          aria-label={file.name || '添付動画'} className="max-h-[32dvh] w-full rounded-lg bg-black" />
+          : file.type?.startsWith('image/') ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={url} alt={file.name} className="max-h-[32dvh] w-full rounded-lg object-contain" />
+          ) : <a href={url} className="text-blue-300 underline">{file.name}</a>}
+        <figcaption className="mt-1 text-xs text-neutral-400">{file.type?.startsWith('video/') ? '添付する動画' : file.name}</figcaption>
+      </figure>;
+    })}
+  </div>;
 }
 
 /** The lines of a text and which of them differ from the version shown before (a revision by voice): the changed ones

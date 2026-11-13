@@ -226,7 +226,7 @@ async def _call_tool(name: str, arguments: dict):
 
     if job_id:
         from app.services.voice_worker_screen import observe
-        await observe(job_id, name, arguments)
+        await observe(job_id, name, arguments, result)
 
     contents: list[types.TextContent | types.ImageContent] = []
 
