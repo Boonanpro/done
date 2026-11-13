@@ -38,7 +38,7 @@ export function FullscreenBar({
   const knobRef = useRef<HTMLDivElement | null>(null);
   const timeRef = useRef<HTMLSpanElement | null>(null);
   const playingRef = useRef(playing);
-  playingRef.current = playing;
+  useEffect(() => { playingRef.current = playing; }, [playing]);
 
   // マウスを動かすと出す。再生中に止まったら消す
   useEffect(() => {

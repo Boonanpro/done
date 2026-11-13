@@ -251,6 +251,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // 比べる時だけ前の作りに戻せる: ?previewfix=0（段のそろえ）・?webaudio=0（音を前の <video> で鳴らす）
   const fixLayers = useMemo(() => urlFlag('previewfix') !== '0', []);
   const useWebAudio = useMemo(() => urlFlag('webaudio') !== '0' && webAudioSupported() && supported, [supported]);
+  // Web Audio が作れなかった時だけ、前の <video> で音を鳴らす
+  const [webAudioBroken, setWebAudioBroken] = useState(false);
   const dims = useMemo(() => canvasDims(format), [format]);
   // キャンバスは画面に出ている大きさ×画面の細かさで描く（前は長い辺 900px 固定を引き伸ばしていて、ぼやけていた）。
   // 座標は今までどおり dims（900 基準）で計算し、描く時だけ倍率をかける。
@@ -458,7 +460,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const loadBucket = Math.floor((currentTime || 0) / WINDOW_STEP);
   useEffect(() => {
     const map = audiosRef.current;
-    if (useWebAudio) { for (const [, el] of map) el.remove(); map.clear(); return; }
+    if (useWebAudio && !webAudioBroken) { for (const [, el] of map) el.remove(); map.clear(); return; }
     const lo = (currentTime || 0) - PRELOAD_BEHIND;
     const hi = (currentTime || 0) + PRELOAD_AHEAD;
     const wanted = new Map<string, string>();
@@ -493,7 +495,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     }
     for (const list of orphansByAsset.values()) for (const el of list) el.remove();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioClips, assetById, loadBucket, useWebAudio]);
+  }, [audioClips, assetById, loadBucket, useWebAudio, webAudioBroken]);
 
   // Muted VIDEO <video> elements — one per visual clip near the playhead, recycled by asset so a
   // split/ripple reuses an already-decoded element (no reload). These are only drawn during
@@ -559,7 +561,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   useEffect(() => {
     if (!useWebAudio) return;
     let mgr: AudioSourceManager;
-    try { mgr = new AudioSourceManager(); } catch { return; }
+    try { mgr = new AudioSourceManager(); } catch { queueMicrotask(() => setWebAudioBroken(true)); return; }
     audioMgrRef.current = mgr;
     if (showDiag) (window as unknown as { __previewAudio?: AudioSourceManager }).__previewAudio = mgr; // 確かめの道具が出口の音を録る
     // ブラウザは、人が操作するまで音を出させない。最初に押した・キーを打った時に動かす
@@ -947,7 +949,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       playClockRef.current = null;
       prevActiveAudioRef.current = new Set();
       prevActiveVideoRef.current = new Set();
-      for (const [, v] of videosRef.current) { v.pause(); v.playbackRate = 1; }
+      for (const [, v] of videosRef.current) { v.pause(); v.defaultPlaybackRate = 1; v.playbackRate = 1; }
       for (const [, a] of audiosRef.current) a.pause();
       stopAudioNodes();
       audioAnchorRef.current = null;
