@@ -2156,6 +2156,7 @@ export function VideoReviewEditor({
   // 逆に入力欄を押せば入力欄に移るのはブラウザのまま。
   const editorRootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('keyfix') === '0') return; // 比べる時だけ前の作り
     const TEXT = 'input, textarea, select, [contenteditable="true"], [contenteditable=""]';
     const onDown = (event: PointerEvent) => {
       const root = editorRootRef.current;

@@ -81,7 +81,8 @@ function assetMediaUrl(asset: ProductionAsset): string | undefined {
 
 function sequenceAssetForEditor(asset: ProductionAsset) {
   // Stills are served by the room's media route (the review route only streams video files).
-  const stillUrl = asset.kind === 'image' && !asset.proxy_url
+  // 音の素材（BGM・効果音）も同じ所から配る（前は渡していなかったので、プレビューで BGM と効果音が鳴っていなかった）
+  const stillUrl = (asset.kind === 'image' || asset.kind === 'audio') && !asset.proxy_url && !asset.view_url
     ? `/api/v1/production-assets/media?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}&variant=original`
     : undefined;
   return {
@@ -95,13 +96,13 @@ function sequenceAssetForEditor(asset: ProductionAsset) {
   };
 }
 
-// Every picture the timeline draws: the content's own videos plus any video/image a clip points
+// Every picture and sound the timeline plays: the content's own videos plus any video/image/audio a clip points
 // at (Dan adds generated or imported pictures to the room without adding them to asset_ids).
 function sequencePictureAssets(content: ProductionContent, assets: ProductionAsset[]) {
   const sequence = (content.timeline?.sequence || {}) as { tracks?: Array<{ clips?: Array<{ asset_id?: string }> }> };
   const used = new Set(content.asset_ids);
   for (const track of sequence.tracks || []) for (const clip of track.clips || []) if (clip.asset_id) used.add(clip.asset_id);
-  return assets.filter((asset) => (asset.kind === 'video' || asset.kind === 'image') && used.has(asset.id));
+  return assets.filter((asset) => (asset.kind === 'video' || asset.kind === 'image' || asset.kind === 'audio') && used.has(asset.id));
 }
 
 export function ProductionWorkspace({

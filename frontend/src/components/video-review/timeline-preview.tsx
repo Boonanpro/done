@@ -551,6 +551,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     let mgr: AudioSourceManager;
     try { mgr = new AudioSourceManager(); } catch { return; }
     audioMgrRef.current = mgr;
+    if (showDiag) (window as unknown as { __previewAudio?: AudioSourceManager }).__previewAudio = mgr; // 確かめの道具が出口の音を録る
     // ブラウザは、人が操作するまで音を出させない。最初に押した・キーを打った時に動かす
     const wake = () => { if (mgr.ctx.state !== 'running') void mgr.ctx.resume().catch(() => {}); };
     window.addEventListener('pointerdown', wake, true);
@@ -564,7 +565,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       audioMgrRef.current = null;
       mgr.close();
     };
-  }, [useWebAudio]);
+  }, [useWebAudio, showDiag]);
 
   const stopAudioNodes = useCallback(() => {
     for (const v of audioNodesRef.current.values()) if (v) { try { v.node.stop(); } catch { /* noop */ } v.gain.disconnect(); }
