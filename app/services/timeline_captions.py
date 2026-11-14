@@ -244,6 +244,8 @@ def _bunsetsu(text: str) -> list[list[Any]]:
             or (pos[0] == "名詞" and ppos and ppos[0] == "名詞" and ppos[1] == "非自立" and pos[1] == "接尾")
             or (t.surface in {"なんか", "なんて"} and ppos and ppos[0] == "名詞")  # 仕事なんか
             or (pos[0] == "動詞" and t.base_form in {"する", "できる"} and ppos and ppos[1] == "サ変接続")  # 受注できる
+            or (pos[0] == "動詞" and prev is not None and prev.surface in {"て", "で"} and ppos[1] == "接続助詞"
+                and t.base_form in {"いく", "くる", "いる", "おく", "しまう", "みる", "もらう", "あげる", "くれる", "いける", "いきすぎる", "すぎる"})  # 持っていく
             or (ppos and prev.surface == "つ" and pos[0] == "名詞" and len(groups[-1][1]) >= 2
                 and groups[-1][1][-2].part_of_speech.startswith("名詞,数"))  # 3つ目
         )
@@ -279,7 +281,9 @@ def _bunsetsu(text: str) -> list[list[Any]]:
         return 0.0
 
     out: list[list[Any]] = []
+    depth = 0
     for i, (surf, ts) in enumerate(groups):
+        depth = max(0, depth + surf.count("「") + surf.count("『") - surf.count("」") - surf.count("』"))
         last = ts[-1]
         lp = last.part_of_speech.split(",")
         form = getattr(last, "infl_form", "*")
@@ -296,6 +300,8 @@ def _bunsetsu(text: str) -> list[list[Any]]:
             c = 0.0
         elif surf.endswith(("、", ",")):
             c = 1.0
+            if len(ts) >= 2 and ts[-2].part_of_speech.startswith("名詞"):
+                c = 6.0  # 小学校、|中学、高校: a 、 inside a list of nouns
         elif lp[0] == "助詞" or (lp[0] == "フィラー" and last.surface in {"なんか", "なんて"}):
             if lp[0] == "フィラー":
                 lp = ["助詞", "副助詞"]  # 仕事なんか|ない
@@ -305,13 +311,17 @@ def _bunsetsu(text: str) -> list[list[Any]]:
                 c = 10.0  # 私の|太陽光, この中の|1つ目
             if last.surface in {"と", "とか"} and np[0] == "名詞" and lp[1] == "並立助詞":
                 c = 9.0
+            if last.surface == "と" and nxt is not None and nxt.surface.startswith("同じ"):
+                c = 10.0  # 彼と|同じ
+            if surf.endswith("という") and np[0] in {"名詞", "接頭詞", "連体詞"}:
+                c = 8.0  # すべきという|考え方
             if last.surface == "より":
                 c = 10.0  # 勉強より|先に
             if last.surface in {"たり", "だり"}:
                 c = 2.5  # 持ったり|アートを買ったり: clauses, not nouns
             if lp[1] in {"格助詞", "係助詞", "副助詞"} and last.surface not in {"の", "は"}:
                 pr = predicate(i + 1)
-                c += 3.0 * pr
+                c += 4.0 * pr
                 if pr and nxt.base_form in {"ある", "ない", "いる"}:
                     c += 3.0  # 必要が|ある, 経験も|ない: the pair is one expression
             if (last.surface == "に" and len(ts) >= 2 and ts[-2].part_of_speech.split(",")[1] in {"数", "接尾"}
@@ -319,11 +329,12 @@ def _bunsetsu(text: str) -> list[list[Any]]:
                 c = max(c, 9.0)  # 1ヶ月に|5本  # 大波に|乗って, 必要が|ある, 経験も|ない: keep an argument with its predicate
         elif lp[0] in {"動詞", "形容詞", "助動詞"}:
             if lp[0] == "形容詞" and form.startswith("連用テ") and last.surface.endswith("く"):
-                c = 7.0  # 大きく|資産を増やして: an adverb stays with its verb
+                c = 10.0  # 大きく|資産を増やして, 深く|考える: an adverb stays with its verb
             elif form.startswith("連用") or form in {"連用形", "連用タ接続"}:
                 c = 2.0  # 稼ぎ / 改良し / であり: a clause ends here
-            elif form == "体言接続" or (form == "基本形" and np[0] == "名詞" and np[1] != "非自立"):
-                c = 9.0  # 自由な|人生, 生み出した|収入
+            elif form == "体言接続" or (form == "基本形" and (
+                    (np[0] == "名詞" and np[1] != "非自立") or np[0] in {"連体詞", "接頭詞"})):
+                c = 9.0  # 続いた|その常識, だった|保護者  # 自由な|人生, 生み出した|収入
             elif form == "基本形":
                 c = 1.0  # sentence end without punctuation (speech transcripts)
             elif form == "仮定形":
@@ -340,6 +351,8 @@ def _bunsetsu(text: str) -> list[list[Any]]:
             c = 6.0
         else:
             c = 5.0
+        if depth > 0 and not hard:
+            c += 4.0  # 「前でリリースした方が|いいよ」: keep a short quote whole
         out.append([surf, c, hard])
     return out
 
@@ -378,7 +391,7 @@ def _segment(phr: list[list[Any]], maxw: float, times=None, base: int = 0) -> li
             if width < 4.0 and (i > 0 or j < n):
                 cost += (4.0 - width) * 2.0  # 'では、' alone flashes by and says nothing
             elif width > hi:
-                cost += (width - hi) * 0.9
+                cost += (width - hi) * 0.45
             if width > maxw:
                 cost += 30.0  # a single phrase longer than a caption
             if j < n:
