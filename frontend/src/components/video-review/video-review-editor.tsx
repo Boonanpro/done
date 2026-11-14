@@ -3141,6 +3141,166 @@ export function VideoReviewEditor({
     setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)), tracks });
   }, []);
 
+  // ── コピー・切り取り・貼り付け・複製（2026-11-14 本人「クリップのコピペや複製もできるようにして」）──
+  // 写しは元のクリップの中身を全部持ち（字幕の文字・書体、場面、音量、切り抜き…）、新しい id と、
+  // A/V の組なら組ごとの新しい link_id を付ける。置く段は元の段のまま（Premiere・DaVinci と同じ）。
+  // 置いた所で同じ段の別クリップと重なれば、動かした時と同じ上書き（commitMovedSet）で切り詰める。
+  const clipClipboardRef = useRef<{ clips: Array<{ clip: SequenceClip; trackId: string; trackType: string; zone: 'visual' | 'audio'; layer: number }>; annotations: ReviewAnnotation[]; origin: number; end: number } | null>(null);
+
+  // 選んでいる物（A/V リンクが入っていれば相方も）を、段の情報つきで集める。
+  const buildCopySource = useCallback((clipIdList: string[], annIdList: string[]) => {
+    const seq = editSequence;
+    const annIds = new Set(annIdList);
+    const clipIdSet = new Set(clipIdList);
+    const lanes = computeClipLanes(seq?.tracks || []);
+    const all = (seq?.tracks || []).flatMap((t) => (t.clips || []).map((c) => ({ clip: c, trackId: t.id, trackType: t.type })));
+    if (linkAV && clipIdSet.size > 0) {
+      const linkIds = new Set(all.filter((x) => clipIdSet.has(x.clip.id) && x.clip.link_id).map((x) => x.clip.link_id));
+      all.forEach((x) => { if (x.clip.link_id && linkIds.has(x.clip.link_id)) clipIdSet.add(x.clip.id); });
+    }
+    const clips = all.filter((x) => clipIdSet.has(x.clip.id)).map((x) => {
+      const l = lanes.get(String(x.clip.id)) || { zone: (x.trackType === 'audio' ? 'audio' : 'visual') as 'visual' | 'audio', layer: Number(x.clip.layer ?? 0) };
+      return { ...x, clip: JSON.parse(JSON.stringify(x.clip)) as SequenceClip, zone: l.zone, layer: l.layer };
+    });
+    const anns = annotations.filter((a) => annIds.has(a.id)).map((a) => JSON.parse(JSON.stringify(a)) as ReviewAnnotation);
+    const starts = [...clips.map((x) => x.clip.timeline_start), ...anns.map((a) => a.start)];
+    const ends = [...clips.map((x) => x.clip.timeline_end), ...anns.map((a) => a.end ?? a.start + 0.5)];
+    if (starts.length === 0) return null;
+    return { clips, annotations: anns, origin: Math.min(...starts), end: Math.max(...ends) };
+  }, [annotations, editSequence, linkAV]);
+
+  const gatherSelectionForCopy = useCallback(() => buildCopySource(
+    selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : [],
+    selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : [],
+  ), [buildCopySource, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds]);
+
+  // 写しを shift 秒ずらして置く。overwrite=true は同じ段の重なった所を上書き、false は重ねて置くだけ
+  // （Alt で引きずる複製の出だし。そのあとの引きずりが上書きを受け持つ）。置いた写しの id を返す。
+  const placeClipCopies = useCallback((
+    src: NonNullable<typeof clipClipboardRef.current>,
+    shift: number,
+    overwrite: boolean,
+  ): { clipIds: string[]; seq: EditSequence | null } => {
+    const r = (v: number) => Number(v.toFixed(2));
+    const newClipIds: string[] = [];
+    let nextSeq: EditSequence | null = editSequence;
+    if (src.clips.length > 0 && editSequence) {
+      const lanes = computeClipLanes(editSequence.tracks || []);
+      // 音声の段は詰めて並べる作り（computeClipLanes）なので、写しを足す前に今の段を全部のクリップに
+      // 書き込んで固定する。そうしないと写しが入った段にいた元のクリップが別の段へ押し出される。
+      const tracks = (editSequence.tracks || []).map((t) => ({
+        ...t,
+        clips: (t.clips || []).map((c) => {
+          const l = lanes.get(String(c.id));
+          return t.type === 'audio' && l && !Number.isFinite(c.layer as number) ? { ...c, layer: l.layer } : c;
+        }),
+      }));
+      const linkMap = new Map<string, string>();
+      const moved = new Map<string, Partial<SequenceClip>>();
+      for (const item of src.clips) {
+        const base = String(item.clip.id).split('__')[0];
+        const id = `${base}__c_${makeId()}`;
+        let link: string | null | undefined = item.clip.link_id;
+        if (link) {
+          if (!linkMap.has(link)) linkMap.set(link, `lk_${makeId()}`);
+          link = linkMap.get(link);
+        }
+        const copy: SequenceClip = {
+          ...item.clip,
+          id,
+          link_id: link ?? item.clip.link_id ?? null,
+          timeline_start: r(Math.max(0, item.clip.timeline_start + shift)),
+          timeline_end: r(Math.max(0, item.clip.timeline_start + shift) + (item.clip.timeline_end - item.clip.timeline_start)),
+          layer: item.layer,
+          locked: false,
+        };
+        if (!item.clip.link_id) delete copy.link_id;
+        let target = tracks.find((t) => t.id === item.trackId);
+        if (!target) target = tracks.find((t) => t.type === item.trackType);
+        if (!target) { target = { id: `${item.trackType}_${makeId()}`, type: item.trackType, clips: [] }; tracks.push(target); }
+        target.clips = [...(target.clips || []), copy];
+        newClipIds.push(id);
+        moved.set(id, {});
+      }
+      const snap: EditSequence = { ...editSequence, tracks };
+      if (overwrite) {
+        // commitMovedSet が setEditSequence まで行う。返す seq は呼び手の目安なので snap で足りる。
+        commitMovedSet(snap, moved);
+      } else {
+        const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
+        setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)) });
+      }
+      nextSeq = snap;
+    }
+    if (src.annotations.length > 0) {
+      const now = new Date().toISOString();
+      const copies = src.annotations.map((a) => {
+        const d = (a.data || {}) as { keyframes?: Keyframe[]; track_boxes?: Record<string, number[]> };
+        const data = {
+          ...d,
+          ...(d.keyframes ? { keyframes: d.keyframes.map((k) => ({ ...k, t: r(k.t + shift) })) } : {}),
+          ...(d.track_boxes ? { track_boxes: Object.fromEntries(Object.entries(d.track_boxes).map(([k, v]) => [String(r(Number(k) + shift)), v])) } : {}),
+        };
+        return { ...a, id: makeId(), created_at: now, start: r(Math.max(0, a.start + shift)), end: a.end == null ? a.end : r(Math.max(0, a.end + shift)), data };
+      });
+      setAnnotations((prev) => [...prev, ...copies]);
+      if (newClipIds.length === 0) {
+        setSelectedSequenceClipId(null);
+        setSelectedSequenceClipIds([]);
+        setSelectedIds(copies.map((a) => a.id));
+        setSelectedId(copies[copies.length - 1].id);
+      }
+    }
+    if (newClipIds.length > 0) {
+      setSelectedId(null);
+      setSelectedIds([]);
+      setSelectedSequenceClipIds(newClipIds);
+      setSelectedSequenceClipId(newClipIds[newClipIds.length - 1]);
+    }
+    return { clipIds: newClipIds, seq: nextSeq };
+  }, [editSequence, commitMovedSet]);
+
+  const copySelectedClips = useCallback((): boolean => {
+    const got = gatherSelectionForCopy();
+    if (!got) return false;
+    clipClipboardRef.current = got;
+    return true;
+  }, [gatherSelectionForCopy]);
+
+  // 貼り付け: 写した物のうち一番早い所を再生位置（赤線）に合わせ、間隔はそのままで元の段に置く。
+  const pasteClips = useCallback(() => {
+    const src = clipClipboardRef.current;
+    if (!src) return;
+    setPlaying(false);
+    placeClipCopies(src, Number(currentTime.toFixed(2)) - src.origin, true);
+  }, [currentTime, placeClipCopies]);
+
+  // 複製: 選んだ物のすぐ後ろ（同じ段）に写しを置く。クリップボードは変えない。
+  const duplicateSelectedClips = useCallback(() => {
+    const got = gatherSelectionForCopy();
+    if (!got) return;
+    placeClipCopies(got, got.end - got.origin, true);
+  }, [gatherSelectionForCopy, placeClipCopies]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return;
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const k = event.key.toLowerCase();
+      if (k !== 'c' && k !== 'x' && k !== 'v' && k !== 'd') return;
+      // チャットなどの文字を選んでいる時の Ctrl+C はブラウザのコピーのまま
+      const sel = window.getSelection?.();
+      if ((k === 'c' || k === 'x') && sel && !sel.isCollapsed && String(sel).trim()) return;
+      if (k === 'c') { if (copySelectedClips()) event.preventDefault(); return; }
+      if (k === 'x') { if (copySelectedClips()) { event.preventDefault(); deleteSelected(); } return; }
+      if (k === 'v') { if (clipClipboardRef.current) { event.preventDefault(); pasteClips(); } return; }
+      if (k === 'd') { event.preventDefault(); duplicateSelectedClips(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [copySelectedClips, deleteSelected, duplicateSelectedClips, pasteClips]);
+
   const applyDragOverwrite = useCallback((draggedId: string, fields: Partial<SequenceClip>) => {
     const snap = dragSnapshotRef.current;
     if (!snap) return;
@@ -3221,6 +3381,9 @@ export function VideoReviewEditor({
     commitMovedSet(snap, moved);
   }, [linkAV, commitMovedSet]);
 
+  // Alt で引きずる複製の出だしの状態。動かさずに離したら写しを取り消す（元の上に重なったまま残さない）。
+  const altDupRef = useRef<{ before: EditSequence | null; origIds: string[]; moved: boolean } | null>(null);
+
   const startSequenceClipDrag = useCallback(
     (event: React.PointerEvent, clip: SequenceClip, mode: SequenceClipDrag['mode']) => {
       if (event.button !== 0) return; // let right-drag fall through to rubber-band select
@@ -3237,8 +3400,30 @@ export function VideoReviewEditor({
       dragLaneGeomRef.current = laneGeomRef.current.map((g) => ({ ...g })); // freeze for stable hit-testing
       seekTimeline(getTimelineTime(event));
       dragSnapshotRef.current = editSequence;
+      // Alt（Mac は Option）を押しながら真ん中をつかむと、写しを作って写しの方を引きずる
+      // （Premiere・DaVinci と同じ）。元のクリップはその場に残る。
+      let dragId = clip.id;
+      if (event.altKey && mode === 'move' && !additive) {
+        const src = buildCopySource(dragSelectionRef.current, []);
+        if (src && src.clips.length > 0) {
+          const placed = placeClipCopies(src, 0, false);
+          const idx = src.clips.findIndex((x) => x.clip.id === clip.id);
+          if (placed.seq && idx >= 0 && placed.clipIds[idx]) {
+            dragId = placed.clipIds[idx];
+            // 写しの相方（A/V の組）は applyDragOverwrite が link_id で連れて行くので、
+            // 引きずる組は選んでいたクリップの写しだけにする。
+            const origIds = [...dragSelectionRef.current];
+            const picked = new Set(origIds);
+            dragSelectionRef.current = src.clips
+              .map((x, i) => (picked.has(x.clip.id) ? placed.clipIds[i] : null))
+              .filter((x): x is string => !!x);
+            dragSnapshotRef.current = placed.seq;
+            altDupRef.current = { before: editSequence, origIds, moved: false };
+          }
+        }
+      }
       setSequenceClipDrag({
-        id: clip.id,
+        id: dragId,
         mode,
         startClientX: event.clientX,
         startClientY: event.clientY,
@@ -3260,7 +3445,7 @@ export function VideoReviewEditor({
         /* ignore */
       }
     },
-    [editSequence, clipLanes, getTimelineTime, seekTimeline, selectSequenceClip, selectedSequenceClipIds]
+    [editSequence, clipLanes, getTimelineTime, seekTimeline, selectSequenceClip, selectedSequenceClipIds, buildCopySource, placeClipCopies]
   );
 
   useEffect(() => {
@@ -3271,6 +3456,8 @@ export function VideoReviewEditor({
       const delta = ((event.clientX - sequenceClipDrag.startClientX) / rect.width) * timelineDuration;
       const clip = allSequenceClips.find((item) => item.id === sequenceClipDrag.id);
       if (!clip) return;
+      if (altDupRef.current && Math.abs(event.clientX - sequenceClipDrag.startClientX) + Math.abs(event.clientY - sequenceClipDrag.startClientY) >= 3) altDupRef.current.moved = true;
+      if (altDupRef.current && !altDupRef.current.moved) return;
       const isVideoClip = clip.track === 'video' || Number.isFinite(clip.source_end);
       const sourceDuration = clip.source_duration || Math.max(Number(clip.source_end || 0), sequenceClipDrag.originalSourceEnd);
       // Magnet: snap a time to the nearest neighbour edge / playhead / ends within ~8px. Returns the
@@ -3356,6 +3543,14 @@ export function VideoReviewEditor({
       }
     };
     const clearDrag = () => {
+      const dup = altDupRef.current;
+      altDupRef.current = null;
+      if (dup && !dup.moved) {
+        // 動かさずに離した: 写しを取り消して、元のクリップを選んだ状態に戻す
+        setEditSequence(dup.before);
+        setSelectedSequenceClipIds(dup.origIds);
+        setSelectedSequenceClipId(dup.origIds[dup.origIds.length - 1] ?? null);
+      }
       setSequenceClipDrag(null);
       dragSnapshotRef.current = null;
       dragSelectionRef.current = [];
@@ -4341,6 +4536,9 @@ export function VideoReviewEditor({
                   <div className="flex items-center justify-between">
                     <div className="text-sm font-medium">選択中クリップ</div>
                     <div className="flex items-center gap-1">
+                      <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" title="すぐ後ろに複製（Ctrl+D）。コピーは Ctrl+C、再生位置に貼り付けは Ctrl+V、Alt を押しながら引きずっても複製できます" onClick={duplicateSelectedClips}>
+                        複製
+                      </Button>
                       <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" title="詰めて削除（後続を前へ・Shift+Delete）" onClick={rippleDelete}>
                         詰めて削除
                       </Button>
