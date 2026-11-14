@@ -55,10 +55,11 @@ _BACKGROUND_TOOLS = {'generate_speech','generate_image','generate_look_frame','w
 def _run_tool_thread(name,args):
     if name in _BACKGROUND_TOOLS:
         return asyncio.run(_dispatch(name,args))
-    with _draft_lock:
+    with _draft_lock, td.content_edit_lock(ROOM_ID, CONTENT_ID or _load().get('content_id', '')):
         if td.refresh_checkpoint(ROOM_ID, DRAFT_ID):
             return _ok({'ok': False, 'human_edit_received': True,
-                'note': 'ユーザーの手編集を取り込みました。最新のtimeline_outlineを読んでから必要な編集を続けてください。今回の操作は未実行です。'})
+                'note': 'ほかの編集（本人の手、または同じ作品で並行して動いている別のダンの作業）を取り込みました。'
+                        '最新のtimeline_outlineを読んでから必要な編集を続けてください。今回の操作は未実行です。'})
         result = asyncio.run(_dispatch(name,args))
         try:
             payload = json.loads(result[0].text)

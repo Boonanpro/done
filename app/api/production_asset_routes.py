@@ -8600,3 +8600,53 @@ async def editor_room(data: EditorRoomRequest, current_user: TokenData = Depends
     _room_dir(data.room_id)  # 400 on malformed room_id
     from app.services import editor_rooms
     return await editor_rooms.ensure_room(current_user.user_id, data.room_id, data.content_id)
+
+
+# ── エディターのタイムラインに書いた指示を、送った時からダンに動かす・効果音の一覧（app/services/editor_instructions.py）──
+
+class EditorInstructionRequest(BaseModel):
+    room_id: str
+    annotation: dict[str, Any]
+
+
+@router.post("/contents/{content_id}/instructions")
+async def send_editor_instruction(content_id: str, data: EditorInstructionRequest,
+                                  current_user: TokenData = Depends(get_current_user)):
+    """ピン・ペン・枠・素材の枠の指示1つを、作品の部屋の並行作業として始める。"""
+    _room_dir(data.room_id)
+    from app.services import editor_instructions
+    try:
+        return await editor_instructions.send(current_user.user_id, data.room_id, content_id, data.annotation)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/instructions/status")
+def editor_instruction_status(job_ids: str = Query(""), current_user: TokenData = Depends(get_current_user)):
+    from app.services import editor_instructions
+    ids = [j for j in job_ids.split(",") if j.strip()]
+    return {"jobs": editor_instructions.states(current_user.user_id, ids)}
+
+
+@router.get("/sfx-library")
+def get_sfx_library(room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    _room_dir(room_id)
+    from app.services import editor_instructions
+    return {"items": editor_instructions.sfx_library(room_id)}
+
+
+class UseSfxRequest(BaseModel):
+    room_id: str
+    source_room_id: str
+    source_asset_id: str
+
+
+@router.post("/sfx-library/use")
+def use_sfx_from_library(data: UseSfxRequest, current_user: TokenData = Depends(get_current_user)):
+    _room_dir(data.room_id)
+    _room_dir(data.source_room_id)
+    from app.services import editor_instructions
+    try:
+        return editor_instructions.use_sfx(data.room_id, data.source_room_id, data.source_asset_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

@@ -47,6 +47,38 @@ def edit_transaction(room_id, draft_id):
             _transaction.reset(token)
 
 
+@contextmanager
+def content_edit_lock(room_id: str, content_id: str, timeout: float = 90.0):
+    """One AI edit step at a time per work, across processes (2026-11-14: several Dans of one work room run in
+    parallel — エディターのピン・ペンの指示ごとに1人。Without this, a step that read the timeline could publish
+    after another Dan's step and be refused as a conflict). Held only around read→edit→publish of one tool call.
+    The OS drops the lock when its holder dies. Where flock is unavailable (Windows) it does not lock."""
+    try:
+        import fcntl
+    except ImportError:  # Windows: the old behaviour (CAS refuses a stale publish)
+        yield True
+        return
+    path = _room_dir(room_id) / f"edit-{content_id}.lock"
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
+    got = False
+    try:
+        deadline = time.time() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except BlockingIOError:
+                if time.time() > deadline:
+                    break
+                time.sleep(0.05)
+        yield got
+    finally:
+        if got:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def _room_dir(room_id: str) -> Path:
     return UPLOAD_ROOT / room_id
 

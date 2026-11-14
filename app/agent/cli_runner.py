@@ -1913,6 +1913,90 @@ def _cleanup_mcp_config(room_id: str):
         pass
 
 
+async def attach_timeline_tools(room_id: str, mcp_config_path: str, system_prompt: str,
+                                timeline_refs: Optional[List[Dict[str, Any]]] = None):
+    """Give this turn (or a parallel job of the room) the timeline MCP on a live-updating draft of the room's work.
+
+    Used by the room's own turns and by parallel jobs started in a work room (エディターのピン・ペンの指示,
+    app/services/editor_instructions.py) so every Dan of the room edits the timeline the same way.
+    Returns (system_prompt, draft or None)."""
+    timeline_draft: Optional[Dict[str, Any]] = None
+    if not timeline_refs:
+        # 作品の部屋（エディターの中の「ダンと制作」）は、どの経路の番（声・見張り・続きの仕事）でもその作品を直せる
+        try:
+            from app.services.editor_rooms import room_info as _editor_room_info
+            _info = await asyncio.to_thread(_editor_room_info, room_id)
+            if _info and _info.get("content_id"):
+                timeline_refs = [{"content_id": _info["content_id"], "room_id": _info["asset_room_id"]}]
+        except Exception:  # noqa: BLE001
+            pass
+    if timeline_refs:
+        # A chat mention supplies an explicit creative artifact.  Give the same
+        # normal Dan session a draft-only timeline MCP; its other capabilities
+        # remain unchanged and the live sequence is still CAS-protected.
+        ref = timeline_refs[0]
+        content_id = str(ref.get("content_id") or "")
+        if content_id:
+            try:
+                from app.services import timeline_draft as _timeline_draft
+                from app.services.editor_rooms import asset_room as _asset_room
+                # 制作の部屋では素材と作品は本体の部屋の物（app/services/editor_rooms.py）
+                asset_room_id = str(ref.get("room_id") or "") or _asset_room(room_id)
+                # 作ったばかりの作品（中身がまだ空）にも道具を渡す: 空のタイムラインを先に置く
+                _timeline_draft.ensure_sequence(asset_room_id, content_id)
+                timeline_draft = _timeline_draft.create_draft(
+                    asset_room_id, content_id, job_id=f"chat_{uuid.uuid4().hex[:12]}"
+                )
+                # 道具1回ごとに本番へ出し、開いているエディターに手の動きで見せる（2026-11-12 本人
+                # 「喋りながら動画が出来ていく」）。本人の手の編集とぶつかったら上書きせず止まる（CAS）。
+                timeline_draft["live_updates"] = True
+                _timeline_draft.save_draft(timeline_draft)
+                cfg = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
+                cfg.setdefault("mcpServers", {})["timeline"] = {
+                    "command": sys.executable,
+                    "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
+                    "env": {
+                        "DAN_ROOM_ID": asset_room_id,
+                        "DAN_DRAFT_ID": timeline_draft["draft_id"],
+                        "DAN_JOB_ID": timeline_draft["job_id"],
+                        "DAN_CONTENT_ID": content_id,
+                        "PYTHONIOENCODING": "utf-8",
+                    },
+                }
+                Path(mcp_config_path).write_text(json.dumps(cfg), encoding="utf-8")
+                title = str(ref.get("title") or content_id)
+                system_prompt += (
+                    "\n\n## Mentioned timeline\n"
+                    f"The user explicitly mentioned the production timeline '{title}' (content_id={content_id}). "
+                    "Use mcp__timeline__* to inspect, edit, or export it. Each successful mutating tool call is "
+                    "validated and published at once, so the owner watches the timeline change in the open editor; "
+                    "build and edit the video ON this timeline (clips that point at source ranges), never by rendering "
+                    "a cut file yourself and attaching it. Export a file only when the owner asks or for delivery. "
+                    "For a rough cut with many ranges from one recording use append_clips (it lays them out in "
+                    "visible one-minute steps). "
+                    "Lanes are layers (video/audio only); blur and highlight frames are region clips "
+                    "(add_region / set_region); touch only what the user asked for; check with render_frame."
+                )
+                try:
+                    from app.services import timeline_live as _tl
+                    _ctx = _tl.context_text(asset_room_id, content_id)
+                    if _ctx:
+                        system_prompt += "\n\n" + _ctx
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    from app.services.editor_instructions import room_work_text
+                    _work = await asyncio.to_thread(room_work_text, room_id)
+                    if _work:
+                        system_prompt += "\n\n" + _work
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("timeline mention setup failed: %s", exc)
+                timeline_draft = None
+    return system_prompt, timeline_draft
+
+
 def _commit_mentioned_timeline_draft(room_id: str, draft: Optional[Dict[str, Any]]) -> Optional[str]:
     """Commit the timeline draft attached to one normal chat turn, if changed."""
     if not draft:
@@ -4309,74 +4393,9 @@ async def _process_message_cli_with_failover(
             return
         if skill_injection:
             system_prompt += f"\n\n{skill_injection}"
-        timeline_draft: Optional[Dict[str, Any]] = None
         timeline_turn_succeeded = False
-        if not timeline_refs:
-            # 作品の部屋（エディターの中の「ダンと制作」）は、どの経路の番（声・見張り・続きの仕事）でもその作品を直せる
-            try:
-                from app.services.editor_rooms import room_info as _editor_room_info
-                _info = await asyncio.to_thread(_editor_room_info, room_id)
-                if _info and _info.get("content_id"):
-                    timeline_refs = [{"content_id": _info["content_id"], "room_id": _info["asset_room_id"]}]
-            except Exception:  # noqa: BLE001
-                pass
-        if timeline_refs:
-            # A chat mention supplies an explicit creative artifact.  Give the same
-            # normal Dan session a draft-only timeline MCP; its other capabilities
-            # remain unchanged and the live sequence is still CAS-protected.
-            ref = timeline_refs[0]
-            content_id = str(ref.get("content_id") or "")
-            if content_id:
-                try:
-                    from app.services import timeline_draft as _timeline_draft
-                    from app.services.editor_rooms import asset_room as _asset_room
-                    # 制作の部屋では素材と作品は本体の部屋の物（app/services/editor_rooms.py）
-                    asset_room_id = str(ref.get("room_id") or "") or _asset_room(room_id)
-                    # 作ったばかりの作品（中身がまだ空）にも道具を渡す: 空のタイムラインを先に置く
-                    _timeline_draft.ensure_sequence(asset_room_id, content_id)
-                    timeline_draft = _timeline_draft.create_draft(
-                        asset_room_id, content_id, job_id=f"chat_{uuid.uuid4().hex[:12]}"
-                    )
-                    # 道具1回ごとに本番へ出し、開いているエディターに手の動きで見せる（2026-11-12 本人
-                    # 「喋りながら動画が出来ていく」）。本人の手の編集とぶつかったら上書きせず止まる（CAS）。
-                    timeline_draft["live_updates"] = True
-                    _timeline_draft.save_draft(timeline_draft)
-                    cfg = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
-                    cfg.setdefault("mcpServers", {})["timeline"] = {
-                        "command": sys.executable,
-                        "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
-                        "env": {
-                            "DAN_ROOM_ID": asset_room_id,
-                            "DAN_DRAFT_ID": timeline_draft["draft_id"],
-                            "DAN_JOB_ID": timeline_draft["job_id"],
-                            "DAN_CONTENT_ID": content_id,
-                            "PYTHONIOENCODING": "utf-8",
-                        },
-                    }
-                    Path(mcp_config_path).write_text(json.dumps(cfg), encoding="utf-8")
-                    title = str(ref.get("title") or content_id)
-                    system_prompt += (
-                        "\n\n## Mentioned timeline\n"
-                        f"The user explicitly mentioned the production timeline '{title}' (content_id={content_id}). "
-                        "Use mcp__timeline__* to inspect, edit, or export it. Each successful mutating tool call is "
-                        "validated and published at once, so the owner watches the timeline change in the open editor; "
-                        "build and edit the video ON this timeline (clips that point at source ranges), never by rendering "
-                        "a cut file yourself and attaching it. Export a file only when the owner asks or for delivery. "
-                        "For a rough cut with many ranges from one recording use append_clips (it lays them out in "
-                        "visible one-minute steps). "
-                        "Lanes are layers (video/audio only); blur and highlight frames are region clips "
-                        "(add_region / set_region); touch only what the user asked for; check with render_frame."
-                    )
-                    try:
-                        from app.services import timeline_live as _tl
-                        _ctx = _tl.context_text(asset_room_id, content_id)
-                        if _ctx:
-                            system_prompt += "\n\n" + _ctx
-                    except Exception:  # noqa: BLE001
-                        pass
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("timeline mention setup failed: %s", exc)
-                    timeline_draft = None
+        system_prompt, timeline_draft = await attach_timeline_tools(
+            room_id, mcp_config_path, system_prompt, timeline_refs)
         resume_session_id = None if skip_resume else _load_session(room_id)
 
         # --- Backend selection (Claude CLI / Codex CLI) ---------------------------

@@ -14,8 +14,9 @@ import {
 import {
   ArrowLeft,
   Check,
+  MapPin,
   Maximize2,
-  MessageSquare,
+  Music2,
   MousePointer2,
   Pause,
   Pencil,
@@ -32,6 +33,7 @@ import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipKind } from './time
 import { perfLog } from '@/lib/perf-log';
 import { TimelineRuler } from './timeline-ruler';
 import { FullscreenBar } from './fullscreen-bar';
+import { SfxPanel, SFX_DND_TYPE, type SfxItem } from './sfx-panel';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -235,11 +237,30 @@ export type SequenceAsset = {
 
 // A drawn region is given a TYPE after you draw it (popover on the shape) — not pre-selected.
 // ぼかし = hide it; 生成 = let Dan generate something there; ダンに指示 = free-text instruction.
+// 2026-11-14 本人「指示の出し方は、ピンポイントにピンを打つやり方と、クリップを配置・追加するやり方の2種類」:
+// 画面に印を付ける指示（ピン・ペン・枠）は「ダンに指示」、区間に映像を入れる指示は「素材の枠」（探して入れる／AIで作る）。
 const INTENTS: Array<{ value: Intent; label: string }> = [
   { value: 'blur', label: 'ぼかし' },
-  { value: 'generate', label: 'AI映像（未作成）' },
   { value: 'comment', label: 'ダンに指示' },
+  { value: 'generate', label: '素材の枠' },
 ];
+// 枠を描いた後に選ぶ種類（素材の枠はタイムラインの「＋ 素材の枠」から作る）
+const RECT_INTENTS = INTENTS.filter((it) => it.value !== 'generate');
+
+/** 送った指示（ピン・ペン・枠・素材の枠）の進み具合。ダンの作業1つずつ */
+type InstrJob = { state: string; label: string; active: boolean; progress?: string | null; result?: string | null };
+type InstrData = { job_id?: string; sent_at?: string; mode?: 'find' | 'ai'; model?: string };
+function instrJobOf(a: ReviewAnnotation, jobs: Record<string, InstrJob>): InstrJob | null {
+  const jid = (a.data as InstrData | undefined)?.job_id;
+  if (!jid) return null;
+  return jobs[jid] || { state: 'queued', label: '送信済み', active: true };
+}
+function instrBadge(job: InstrJob | null): string {
+  if (!job) return '';
+  if (job.active) return job.state === 'running' ? '作業中' : '順番待ち';
+  if (job.state === 'completed') return '済み';
+  return job.label || '止まった';
+}
 
 function fmtTime(value: number | null | undefined): string {
   const seconds = Math.max(0, value || 0);
@@ -250,6 +271,12 @@ function fmtTime(value: number | null | undefined): string {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+// 拡大率を範囲に収め、小さい所は細かく・大きい所は粗く丸める（大きい倍率を小数2桁で持たない）
+function zoomStep(value: number, max: number): number {
+  const v = clamp(value, 1, max);
+  return v < 10 ? Number(v.toFixed(2)) : v < 100 ? Number(v.toFixed(1)) : Math.round(v);
 }
 
 // Default span of a freshly-drawn clip, anchored AT the playhead (seconds). Short on purpose —
@@ -620,7 +647,7 @@ export function VideoReviewEditor({
   /** With roomId: Dan's published steps on this content are replayed as visible motion. */
   contentId?: string;
   /** Called when Dan's steps arrive, so the parent reloads assets Dan may have added. */
-  onExternalEdit?: () => void;
+  onExternalEdit?: () => void | Promise<void>;
   initialPath?: string;
   initialUrl?: string;
   initialThumbnailUrl?: string;
@@ -889,6 +916,12 @@ export function VideoReviewEditor({
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
   const [openNoteKey, setOpenNoteKey] = useState<string | null>(null);
+  // 送った指示（ピン・ペン・枠・素材の枠）の進み具合と、置いた直後に言葉の欄へ入る印（sendInstruction の所に説明）
+  const [instrJobs, setInstrJobs] = useState<Record<string, InstrJob>>({});
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [focusNoteId, setFocusNoteId] = useState<string | null>(null);
+  const instrJobsRef = useRef(instrJobs);
+  useEffect(() => { instrJobsRef.current = instrJobs; }, [instrJobs]);
   const laneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }>>([]);
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
   const [timelineZoom, setTimelineZoom] = useState(1);
@@ -1330,9 +1363,10 @@ export function VideoReviewEditor({
   // drop/move clips (otherwise the last clip is flush against the right edge = cramped).
   // Every px<->sec mapping uses this, so clips, drags and scrub all stay consistent.
   const timelineDuration = contentDuration > 0 ? contentDuration + Math.max(3, contentDuration * 0.08) : contentDuration;
-  // Long timelines need a deeper zoom: at most ~20 seconds across the view (8x was a few px per
-  // second on a 17-minute video).
-  const maxTimelineZoom = Math.max(8, Math.ceil((timelineDuration || 0) / 20));
+  // Long timelines need a deeper zoom. 2026-11-14 本人「最大にズームしても寄りきれない」: 前は画面に約20秒が
+  // 映る所で止まっていた。今は約0.5秒（30コマの動画で1コマ70px前後）まで寄れる。タイムラインの幅は
+  // ブラウザが扱える長さ（約3,300万px）より十分小さい1,200万倍×画面幅までに抑える。
+  const maxTimelineZoom = Math.max(8, Math.min(12000, Math.ceil((timelineDuration || 0) / 0.5)));
   const previewAspect = useMemo(() => {
     const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':');
     return `${Number(a) || 9} / ${Number(b) || 16}`;
@@ -1859,11 +1893,11 @@ export function VideoReviewEditor({
   // line) with a short default span (NOT the whole clip / not [0,playhead]). Trim start/end on
   // the timeline, or with the "開始/終了＝再生位置" buttons.
   const commitAnnotation = useCallback(
-    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>, intentArg: Intent = 'blur') => {
+    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>, intentArg: Intent = 'blur', span = DEFAULT_ANN_SPAN) => {
       const draft = makeDraftAnnotation(annotation, intentArg);
-      const maxDur = contentDuration > 0 ? contentDuration : effectiveDrawStart + DEFAULT_ANN_SPAN;
+      const maxDur = contentDuration > 0 ? contentDuration : effectiveDrawStart + span;
       const start = Number(clamp(effectiveDrawStart, 0, Math.max(0, maxDur - 0.1)).toFixed(2));
-      const end = Number(clamp(start + DEFAULT_ANN_SPAN, start + 0.1, maxDur).toFixed(2));
+      const end = Number(clamp(start + span, start + 0.1, maxDur).toFixed(2));
       const next: ReviewAnnotation = {
         ...draft,
         id: makeId(),
@@ -1875,6 +1909,7 @@ export function VideoReviewEditor({
       setSelectedId(next.id);
       setSelectedIds([next.id]);
       setPendingAnnotation(null);
+      if (intentArg === 'comment') setFocusNoteId(next.id);
     },
     [contentDuration, effectiveDrawStart, makeDraftAnnotation]
   );
@@ -1891,13 +1926,14 @@ export function VideoReviewEditor({
       note: '',
       start,
       end: Number((start + 5).toFixed(2)),
-      data: { model: AI_VIDEO_MODELS[0].id },
+      data: { mode: 'find', model: AI_VIDEO_MODELS[0].id },
       created_at: new Date().toISOString(),
     };
     setAnnotations((prev) => [...prev, next]);
     setSelectedId(next.id);
     setSelectedIds([next.id]);
     setPendingAnnotation(null);
+    setFocusNoteId(next.id);
   }, [currentTime]);
 
   const updateSelected = useCallback((patch: Partial<ReviewAnnotation>) => {
@@ -1960,6 +1996,66 @@ export function VideoReviewEditor({
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', up);
   }, [currentTime, selectAnnotation, upsertKeyframe]);
+
+  // ── タイムラインに書いた指示を、送った時からダンに動かす（2026-11-14 本人「いちいちチャットに送信しなくても、
+  // 送信されたタイミングから実行が順次始まっていく。別々に始まるけど、エディターの中のダンは全体を把握している」）──
+  // 1つ送るごとに、右の「ダンと制作」の部屋の並行作業が1つ始まる（app/services/editor_instructions.py）。
+  // 指示はタイムラインに残り、色と札で「順番待ち・作業中・済み」が分かる。済んだ指示は本人が消す。
+  const sendInstruction = useCallback(async (ann: ReviewAnnotation) => {
+    if (!roomId || !contentId) { toast.error('この画面からは指示を送れません'); return; }
+    if (!(ann.note || '').trim()) { toast.error('ダンにやってほしいことを書いてください'); return; }
+    setSendingId(ann.id);
+    try {
+      const res = await fetch(`/api/v1/production-assets/contents/${encodeURIComponent(contentId)}/instructions`, {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room_id: roomId, annotation: ann }),
+      });
+      if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+      const out = await res.json() as { job_id: string };
+      setInstrJobs((m) => ({ ...m, [out.job_id]: { state: 'queued', label: '送信済み', active: true } }));
+      setAnnotations((prev) => prev.map((a) => (a.id === ann.id
+        ? { ...a, data: { ...(a.data || {}), job_id: out.job_id, sent_at: new Date().toISOString() } }
+        : a)));
+    } catch (error) {
+      toast.error('指示を送れませんでした', { description: String(error).slice(0, 180) });
+    } finally {
+      setSendingId(null);
+    }
+  }, [roomId, contentId]);
+  const instrJobIdsKey = useMemo(() => annotations
+    .map((a) => (a.data as InstrData | undefined)?.job_id)
+    .filter((j): j is string => !!j)
+    .sort()
+    .join(','), [annotations]);
+  useEffect(() => {
+    if (!instrJobIdsKey) return;
+    let alive = true;
+    let timer: number | null = null;
+    const poll = async () => {
+      // 済んだ物は1回読めば足りる。動いている物が残っている間だけ3秒ごとに読む
+      const ids = instrJobIdsKey.split(',').filter((id) => !instrJobsRef.current[id] || instrJobsRef.current[id].active);
+      if (ids.length) {
+        try {
+          const res = await fetch(`/api/v1/production-assets/instructions/status?job_ids=${encodeURIComponent(ids.join(','))}`, { credentials: 'include' });
+          if (res.ok) {
+            const body = await res.json() as { jobs: Array<InstrJob & { job_id: string }> };
+            if (alive && body.jobs.length) {
+              setInstrJobs((m) => {
+                const next = { ...m };
+                for (const j of body.jobs) next[j.job_id] = { state: j.state, label: j.label, active: j.active, progress: j.progress, result: j.result };
+                return next;
+              });
+            }
+          }
+        } catch { /* 次の回にまた読む */ }
+      }
+      if (alive && instrJobIdsKey.split(',').some((id) => !instrJobsRef.current[id] || instrJobsRef.current[id].active)) {
+        timer = window.setTimeout(poll, 3000);
+      }
+    };
+    void poll();
+    return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
+  }, [instrJobIdsKey]);
 
   // Per-clip 実行 (生成/ダンに指示): dispatch this one instruction clip to Dan and reflect it.
   const [executingId, setExecutingId] = useState<string | null>(null);
@@ -2275,7 +2371,7 @@ export function VideoReviewEditor({
       if (!modKey && (event.key === '+' || event.key === '=' || event.key === '-' || event.key === '_')) {
         event.preventDefault();
         const dir = event.key === '-' || event.key === '_' ? -1 : 1;
-        setTimelineZoom((value) => Number(clamp(value * (dir > 0 ? 1.25 : 0.8), 1, maxTimelineZoom).toFixed(2)));
+        setTimelineZoom((value) => zoomStep(value * (dir > 0 ? 1.25 : 0.8), maxTimelineZoom));
         return;
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -2322,7 +2418,7 @@ export function VideoReviewEditor({
         setDraftPath([point]);
       } else if (tool === 'marker') {
         // A marker is a point note → always a "ダンに指示" pin (no type choice needed).
-        commitAnnotation({ kind: 'marker', label: 'comment', data: { point } }, 'comment');
+        commitAnnotation({ kind: 'marker', label: 'comment', data: { point } }, 'comment', 1);
       }
     },
     [clearSelection, commitAnnotation, getPoint, tool]
@@ -2354,16 +2450,11 @@ export function VideoReviewEditor({
       setDraftRect(null);
     }
     if (draftPath) {
-      if (draftPath.length > 1) {
-        const xs = draftPath.map((p) => p.x);
-        const ys = draftPath.map((p) => p.y);
-        const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-        const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-        setTypePicker({ kind: 'freehand', data: { points: draftPath }, cx, cy });
-      }
+      // ペンは「ここをこうして」を描いて伝える道具。描き終えたらそのまま指示になり、右の欄で言葉を足して送る
+      if (draftPath.length > 1) commitAnnotation({ kind: 'freehand', label: 'comment', data: { points: draftPath } }, 'comment', 1);
       setDraftPath(null);
     }
-  }, [draftPath, draftRect]);
+  }, [draftPath, draftRect, commitAnnotation]);
 
   const rectStyle = (data: Record<string, unknown>) => {
     const x = Number(data.x || 0);
@@ -2578,11 +2669,14 @@ export function VideoReviewEditor({
     [clearSelection, beginScrub]
   );
 
-  const handleTimelineWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
-    if (!event.shiftKey) return;
+  const handleTimelineWheel = useCallback((event: WheelEvent) => {
+    // Shift+ホイール、またはトラックパッドのつまみ（ブラウザには Ctrl+ホイールとして届く）で拡大・縮小
+    if (!event.shiftKey && !event.ctrlKey) return;
     event.preventDefault();
-    const direction = event.deltaY > 0 ? -1 : 1;
-    setTimelineZoom((value) => Number(clamp(value * (direction > 0 ? 1.15 : 1 / 1.15), 1, maxTimelineZoom).toFixed(2)));
+    const factor = event.ctrlKey && !event.shiftKey
+      ? Math.exp(clamp(-event.deltaY, -50, 50) * 0.01)
+      : (event.deltaY > 0 ? 1 / 1.2 : 1.2);
+    setTimelineZoom((value) => zoomStep(value * factor, maxTimelineZoom));
     window.requestAnimationFrame(() => {
       const scroller = timelineScrollRef.current;
       const track = timelineRef.current;
@@ -2591,6 +2685,14 @@ export function VideoReviewEditor({
       scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
     });
   }, [timelineDuration, maxTimelineZoom]);
+  // React の onWheel は受け身の受け手で、既定の動き（Ctrl+ホイールでページ全体の拡大）を止められない。
+  // タイムラインの上では止めたいので、止められる受け手を直に付ける。
+  useEffect(() => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', handleTimelineWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleTimelineWheel);
+  }, [handleTimelineWheel]);
 
   // Edge-scroll on playhead MOVEMENT: only scroll when the playhead reaches the viewport edge —
   // staying put for fine adjustments in the middle (centering on every move made the whole timeline
@@ -3048,6 +3150,63 @@ export function VideoReviewEditor({
     [selectSequenceClip]
   );
 
+  // ── 効果音を自分で入れる（2026-11-14 本人「使いたい効果音を全部消しちゃった状態では自分で追加する術がない」）──
+  // 一覧の音をこの作品の素材にしてから（同じ名前があればそれを使う）、音の段に置く。段は、置く所が空いている
+  // 効果音の段（無ければ声の段より上の空いた段、それも無ければ新しい段）。音量は同じ音の既存の置き方に合わせる。
+  const [sfxOpen, setSfxOpen] = useState(false);
+  const addSfx = useCallback(async (item: SfxItem, at: number, layerArg?: number) => {
+    if (!roomId) return;
+    let assetId = item.in_room_asset_id;
+    if (!assetId) {
+      try {
+        const res = await fetch('/api/v1/production-assets/sfx-library/use', {
+          method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ room_id: roomId, source_room_id: item.source_room_id, source_asset_id: item.source_asset_id }),
+        });
+        if (!res.ok) throw new Error((await res.text()).slice(0, 160));
+        assetId = String((await res.json()).id);
+        await onExternalEditRef.current?.(); // 素材の一覧を読み直す（波形と再生に要る）
+      } catch (error) {
+        toast.error('効果音を入れられませんでした', { description: String(error).slice(0, 160) });
+        return;
+      }
+    }
+    const len = Math.max(0.05, Number(item.duration) || 1);
+    const t0 = Math.max(0, Number(at) || 0);
+    const r = (v: number) => Number(v.toFixed(3));
+    const id = `clip_${makeId()}`;
+    setEditSequence((current) => {
+      const base = current || { tracks: [] };
+      const tracks = (base.tracks || []).map((t) => ({ ...t, clips: [...(t.clips || [])] }));
+      const lanes = computeClipLanes(tracks);
+      const audioClips = tracks.filter((t) => t.type === 'audio').flatMap((t) => t.clips || []);
+      const layerOf = (c: SequenceClip) => lanes.get(String(c.id))?.layer ?? Number(c.layer ?? 0);
+      const isFree = (layer: number) => !audioClips.some((c) => layerOf(c) === layer && c.timeline_start < t0 + len - 0.001 && c.timeline_end > t0 + 0.001);
+      const sfxLayers = Array.from(new Set(audioClips.filter((c) => c.role === 'sfx' || c.role === 'se').map(layerOf))).sort((a, b) => a - b);
+      const used = Array.from(new Set(audioClips.map(layerOf)));
+      const top = used.length ? Math.max(...used) : 0;
+      let layer = layerArg;
+      if (layer === undefined) {
+        layer = sfxLayers.find(isFree);
+        if (layer === undefined) for (let l = 1; l <= top; l += 1) if (isFree(l)) { layer = l; break; }
+        if (layer === undefined) layer = top + 1;
+      }
+      const same = audioClips.filter((c) => c.asset_id === assetId && Number.isFinite(c.volume as number)).map((c) => Number(c.volume)).sort((a, b) => a - b);
+      const volume = same.length ? same[Math.floor(same.length / 2)] : 0.5;
+      const clip: SequenceClip = {
+        id, asset_id: assetId!, label: `SE ${item.name}`, track: 'audio', role: 'sfx', layer, volume,
+        source_start: 0, source_end: r(len), timeline_start: r(t0), timeline_end: r(t0 + len),
+      };
+      let at = tracks.find((t) => t.type === 'audio' && (t.clips || []).some((c) => c.role === 'sfx' || c.role === 'se'))
+        || tracks.find((t) => t.type === 'audio');
+      if (!at) { at = { id: `tk_${makeId()}`, type: 'audio', clips: [] }; tracks.push(at); }
+      at.clips = [...(at.clips || []), clip];
+      const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
+      return { ...base, tracks, duration: Number(nextDuration.toFixed(3)) };
+    });
+    selectSequenceClip(id);
+  }, [roomId, selectSequenceClip]);
+
   // While a material is dragged over the timeline, show a live ghost of where it will land
   // (and how long it is) so it's visually clear it entered — even before the button is
   // released. The drag payload isn't readable during dragover (HTML5), so the source side
@@ -3060,10 +3219,12 @@ export function VideoReviewEditor({
   }, [timelineDuration]);
 
   const handleLaneDragOver = useCallback((event: React.DragEvent, lane: TimelineLane) => {
-    if (!Array.from(event.dataTransfer.types).includes(ASSET_DND_TYPE)) return;
+    const types = Array.from(event.dataTransfer.types);
+    const isSfx = types.includes(SFX_DND_TYPE);
+    if (!isSfx && !types.includes(ASSET_DND_TYPE)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
-    if (lane.zone !== 'visual') { setDropPreview(null); return; } // video lands on a visual lane
+    if (lane.zone !== (isSfx ? 'audio' : 'visual')) { setDropPreview(null); return; } // 映像は映像の段、効果音は音の段
     const start = dropTimeFromEvent(event.clientX);
     if (start === null) return;
     const dragged = (typeof window !== 'undefined' ? (window as unknown as { __danDragAsset?: { duration?: number | string | null } }).__danDragAsset : null) || null;
@@ -3075,6 +3236,14 @@ export function VideoReviewEditor({
   const handleLaneDrop = useCallback(
     (event: React.DragEvent, lane: TimelineLane) => {
       setDropPreview(null);
+      const sfxRaw = event.dataTransfer.getData(SFX_DND_TYPE);
+      if (sfxRaw) {
+        event.preventDefault();
+        const t = dropTimeFromEvent(event.clientX);
+        if (t === null || lane.zone !== 'audio') return;
+        try { void addSfx(JSON.parse(sfxRaw) as SfxItem, t, lane.layer); } catch { /* 壊れた印は無視 */ }
+        return;
+      }
       const raw = event.dataTransfer.getData(ASSET_DND_TYPE);
       if (!raw) return;
       event.preventDefault();
@@ -3084,7 +3253,7 @@ export function VideoReviewEditor({
       if (dropTime === null) return;
       insertSequenceClip(payload, dropTime, lane.zone, lane.layer);
     },
-    [insertSequenceClip, dropTimeFromEvent]
+    [insertSequenceClip, dropTimeFromEvent, addSfx]
   );
 
   // DaVinci/Premiere-style overwrite: place the dragged clip at its new range and trim,
@@ -3805,11 +3974,16 @@ export function VideoReviewEditor({
                               const width = timelineDuration ? ((item.end - item.start) / timelineDuration) * 100 : 1;
                               if (item.kind === 'annotation' && item.annotation) {
                                 const a = item.annotation;
+                                const ijob = instrJobOf(a, instrJobs);
+                                const jobLook = !ijob || selectedIds.includes(a.id) ? ''
+                                  : ijob.active ? ' ring-2 ring-amber-300 animate-pulse'
+                                    : ijob.state === 'completed' ? ' !border-emerald-300 !bg-emerald-600/60 !text-white' : ' !border-red-300 !bg-red-600/60 !text-white';
                                 return (
                                   <div
                                     key={item.key}
                                     data-annotation-id={a.id}
-                                    className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
+                                    data-instr-state={ijob ? (ijob.active ? 'active' : ijob.state) : undefined}
+                                    className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}${jobLook}`}
                                     style={{ left: `${left}%`, width: `${width}%`, minWidth: '3px' }}
                                     onPointerDown={(event) => laneFns.current.startTimelineDrag(event, a, 'move')}
                                     onDoubleClick={() => {
@@ -3824,7 +3998,11 @@ export function VideoReviewEditor({
                                       onPointerDown={(event) => laneFns.current.startTimelineDrag(event, a, 'start')}
                                       aria-label="Resize start"
                                     />
-                                    <span className="min-w-0 flex-1 truncate px-1">{itemTypeBadge(item.itemType)}</span>
+                                    <span className="min-w-0 flex-1 truncate px-1">
+                                      {ijob ? <b className="mr-1">{instrBadge(ijob) === '済み' ? '✓' : instrBadge(ijob)}</b> : null}
+                                      {a.intent === 'comment' ? ({ marker: 'ピン', freehand: 'ペン', rect: '枠' } as Record<string, string>)[a.kind] || '指示' : itemTypeBadge(item.itemType)}
+                                      {a.note && a.intent !== 'blur' ? `：${a.note}` : ''}
+                                    </span>
                                     {a.note ? (
                                       <button
                                         type="button"
@@ -3938,7 +4116,7 @@ export function VideoReviewEditor({
                           </div>
                         );
                       })
-  ), [timelineLanes, pendingAnnotation, isTimelineScrubbing, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch, viewWin, trackPx]);
+  ), [timelineLanes, pendingAnnotation, isTimelineScrubbing, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch, viewWin, trackPx, instrJobs]);
 
   return (
     <div
@@ -4249,7 +4427,8 @@ export function VideoReviewEditor({
                             selectAnnotation(a.id, e.shiftKey || e.ctrlKey || e.metaKey);
                           }}
                           className={`pointer-events-auto absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 ${
-                            selectedIds.includes(a.id) ? 'border-yellow-300 bg-yellow-300' : 'border-emerald-300 bg-emerald-400'
+                            selectedIds.includes(a.id) ? 'border-yellow-300 bg-yellow-300'
+                              : (() => { const j = instrJobOf(a, instrJobs); return !j ? 'border-orange-300 bg-orange-400' : j.active ? 'animate-pulse border-amber-200 bg-amber-400' : j.state === 'completed' ? 'border-emerald-300 bg-emerald-400' : 'border-red-300 bg-red-500'; })()
                           }`}
                           style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%` }}
                           title={a.note || a.intent}
@@ -4330,7 +4509,7 @@ export function VideoReviewEditor({
                         style={{ left: `${clamp(typePicker.cx, 0.08, 0.92) * 100}%`, top: `${clamp(typePicker.cy, 0.04, 0.96) * 100}%` }}
                         onPointerDown={(e) => e.stopPropagation()}
                       >
-                        {INTENTS.map((it) => (
+                        {RECT_INTENTS.map((it) => (
                           <button
                             key={it.value}
                             type="button"
@@ -4521,45 +4700,91 @@ export function VideoReviewEditor({
                       </div>
                     );
                   })() : null}
-                  <Textarea
-                    value={selected.note || ''}
-                    onChange={(e) => updateSelected({ note: e.target.value })}
-                    rows={3}
-                    placeholder={selected.intent === 'blur' ? 'メモ（任意）' : selected.intent === 'generate' ? 'このクリップに映したいもの（例: 朝の光の入るサロンで、スタイリストが笑顔で髪を整える。カメラはゆっくり寄る）' : 'この範囲でDanにやってほしいこと'}
-                  />
-                  {selected.intent === 'generate' ? (() => {
-                    const span = Math.max(0.1, (selected.end ?? selected.start + 5) - selected.start);
-                    const fit = aiModelsForLength(span);
-                    const model = aiModelFor(span, (selected.data as { model?: string } | undefined)?.model);
-                    const makes = aiDurationFor(model, span);
+                  {(() => {
+                    const sd = (selected.data || {}) as InstrData;
+                    const isGen = selected.intent === 'generate';
+                    const genMode = isGen ? (sd.mode === 'ai' ? 'ai' : 'find') : null;
+                    const toDan = selected.intent === 'comment' || genMode === 'find';
+                    const job = instrJobOf(selected, instrJobs);
+                    const tab = (active: boolean) => `flex-1 rounded px-2 py-1 text-xs ${active ? 'bg-amber-500 text-black' : 'bg-background text-muted-foreground'}`;
+                    const send = () => { if (toDan) void sendInstruction(selected); else if (genMode === 'ai') void runExecuteClip(selected); };
                     return (
-                      <div className="space-y-1">
-                        <select
-                          value={model.id}
-                          onChange={(e) => updateSelected({ data: { ...(selected.data || {}), model: e.target.value } })}
-                          className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                          aria-label="AIのモデル"
-                        >
-                          {fit.map((m) => (
-                            <option key={m.id} value={m.id}>{m.label}（{m.note}・{m.durations[m.durations.length - 1]}秒まで）</option>
-                          ))}
-                        </select>
-                        <p className="text-[10px] text-muted-foreground">
-                          クリップの長さ {span.toFixed(1)}秒 → {model.label}で{makes}秒の映像を作り、このクリップの長さで置きます。
-                        </p>
-                      </div>
+                      <>
+                        {isGen ? (
+                          <div className="flex gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 p-1">
+                            <button type="button" className={tab(genMode === 'find')} onClick={() => updateSelected({ data: { ...sd, mode: 'find' } })}>素材を探して入れる</button>
+                            <button type="button" className={tab(genMode === 'ai')} onClick={() => updateSelected({ data: { ...sd, mode: 'ai' } })}>AIで作る</button>
+                          </div>
+                        ) : null}
+                        <Textarea
+                          key={selected.id}
+                          autoFocus={focusNoteId === selected.id}
+                          onFocus={() => { if (focusNoteId === selected.id) setFocusNoteId(null); }}
+                          value={selected.note || ''}
+                          onChange={(e) => updateSelected({ note: e.target.value })}
+                          onKeyDown={(e) => {
+                            // Ctrl(⌘)+Enter で送る。文字を打っている間はタイムラインのキー操作に渡さない
+                            e.stopPropagation();
+                            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && (toDan || genMode === 'ai')) { e.preventDefault(); send(); }
+                          }}
+                          rows={3}
+                          placeholder={selected.intent === 'blur'
+                            ? 'メモ（任意）'
+                            : genMode === 'ai'
+                              ? 'このクリップに映したいもの（例: 朝の光の入るサロンで、スタイリストが笑顔で髪を整える。カメラはゆっくり寄る）'
+                              : genMode === 'find'
+                                ? 'この区間に入れたい映像（例: 札束を数える手元のアップ。実写で）'
+                                : 'ここでダンにやってほしいこと（例: ここに和太鼓のドンを入れて）'}
+                        />
+                        {genMode === 'ai' ? (() => {
+                          const span = Math.max(0.1, (selected.end ?? selected.start + 5) - selected.start);
+                          const fit = aiModelsForLength(span);
+                          const model = aiModelFor(span, sd.model);
+                          const makes = aiDurationFor(model, span);
+                          return (
+                            <div className="space-y-1">
+                              <select
+                                value={model.id}
+                                onChange={(e) => updateSelected({ data: { ...sd, model: e.target.value } })}
+                                className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                                aria-label="AIのモデル"
+                              >
+                                {fit.map((m) => (
+                                  <option key={m.id} value={m.id}>{m.label}（{m.note}・{m.durations[m.durations.length - 1]}秒まで）</option>
+                                ))}
+                              </select>
+                              <p className="text-[10px] text-muted-foreground">
+                                クリップの長さ {span.toFixed(1)}秒 → {model.label}で{makes}秒の映像を作り、このクリップの長さで置きます。
+                              </p>
+                            </div>
+                          );
+                        })() : null}
+                        {job ? (
+                          <div className={`rounded-md border p-2 text-xs ${job.active ? 'border-amber-400/60 bg-amber-500/10' : job.state === 'completed' ? 'border-emerald-400/60 bg-emerald-500/10' : 'border-red-400/60 bg-red-500/10'}`}>
+                            <div className="flex items-center gap-1.5 font-medium">
+                              {job.active ? <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" /> : null}
+                              {job.active ? (job.state === 'running' ? 'ダンが作業中' : 'ダンに送りました（順番待ち）') : job.state === 'completed' ? '✓ ダンが直しました' : `止まりました（${job.label}）`}
+                            </div>
+                            {job.active && job.progress ? <div className="mt-1 text-muted-foreground">{job.progress}</div> : null}
+                            {!job.active && job.result ? <div className="mt-1 line-clamp-4 whitespace-pre-wrap text-muted-foreground">{job.result}</div> : null}
+                            {!job.active ? <div className="mt-1 text-[10px] text-muted-foreground">確かめたら、この指示は Delete で消せます。</div> : null}
+                          </div>
+                        ) : null}
+                        {toDan ? (
+                          <Button size="sm" className="w-full" disabled={sendingId === selected.id || !(selected.note || '').trim()} onClick={send}>
+                            {sendingId === selected.id ? '送っています…' : job ? '書き直して、もう一度送る' : 'ダンに送る（Ctrl+Enter）'}
+                          </Button>
+                        ) : genMode === 'ai' && onGenerateClip ? (
+                          <Button size="sm" className="w-full" disabled={executingId === selected.id} onClick={send}>
+                            {executingId === selected.id ? '実行中…' : '▶ AIで映像を作る'}
+                          </Button>
+                        ) : null}
+                        {toDan && !job ? (
+                          <p className="text-[10px] text-muted-foreground">送るとすぐ、エディターのダンがこの指示だけを直し始めます。いくつ送っても、それぞれ並んで進みます。結果は右の「ダンと制作」にも出ます。</p>
+                        ) : null}
+                      </>
                     );
-                  })() : null}
-                  {(selected.intent === 'generate' ? onGenerateClip : onExecuteClip) ? (
-                    <Button
-                      size="sm"
-                      className="w-full"
-                      disabled={executingId === selected.id}
-                      onClick={() => runExecuteClip(selected)}
-                    >
-                      {executingId === selected.id ? '実行中…' : selected.intent === 'generate' ? '▶ AIで映像を作る' : '▶ 実行（Danに反映）'}
-                    </Button>
-                  ) : null}
+                  })()}
                 </div>
               )}
 
@@ -5111,36 +5336,45 @@ export function VideoReviewEditor({
               title="ドラッグしてタイムラインの高さを調整"
             />
 
-            <div className={`shrink-0 border-t border-neutral-800 bg-background ${compact ? 'p-1.5' : 'p-3'}`} style={{ height: compact ? 150 : timelineHeight }}>
+            <div className={`relative shrink-0 border-t border-neutral-800 bg-background ${compact ? 'p-1.5' : 'p-3'}`} style={{ height: compact ? 150 : timelineHeight }}>
+              {sfxOpen && roomId ? <SfxPanel roomId={roomId} onAdd={(it) => void addSfx(it, liveTimeRef.current)} onClose={() => setSfxOpen(false)} /> : null}
               {compact ? <style>{'[data-editor-toolbar] > *:not([data-keep]) { display: none !important; }'}</style> : null}
               <div className="flex items-center gap-2" data-editor-toolbar>
                 <Button variant={tool === 'select' ? 'default' : 'outline'} size="sm" title="選択・移動" onClick={() => setTool('select')}>
                   <MousePointer2 className="h-4 w-4" />
                   <span className="hidden sm:inline">選択</span>
                 </Button>
-                <Button variant={tool === 'rect' ? 'default' : 'outline'} size="sm" title="矩形で範囲指定。描いたあと「生成」を選べます" onClick={() => setTool('rect')}>
-                  <Square className="h-4 w-4" />
-                  <span className="hidden sm:inline">矩形指定</span>
+                <Button variant={tool === 'marker' ? 'default' : 'outline'} size="sm" title="ピン：プレビューの指したい所を押して、ダンにやってほしいことを書いて送る（再生位置に1秒の指示が置かれる）" onClick={() => setTool('marker')}>
+                  <MapPin className="h-4 w-4" />
+                  <span className="hidden sm:inline">ピン</span>
                 </Button>
-                <Button variant={tool === 'freehand' ? 'default' : 'outline'} size="sm" title="ペンで範囲指定。描いたあと「生成」を選べます" onClick={() => setTool('freehand')}>
+                <Button variant={tool === 'freehand' ? 'default' : 'outline'} size="sm" title="ペン：プレビューに線や丸を描いて、言葉を足して送る。ダンには描いた線ごとその場面の絵が届く" onClick={() => setTool('freehand')}>
                   <Pencil className="h-4 w-4" />
-                  <span className="hidden sm:inline">ペン指定</span>
+                  <span className="hidden sm:inline">ペン</span>
                 </Button>
-                <Button variant={tool === 'marker' ? 'default' : 'outline'} size="sm" title="コメントを置く" onClick={() => setTool('marker')}>
-                  <MessageSquare className="h-4 w-4" />
-                  <span className="hidden sm:inline">コメント</span>
+                <Button variant={tool === 'rect' ? 'default' : 'outline'} size="sm" title="枠：囲んだ範囲をぼかす、または囲んだ範囲についてダンに指示する" onClick={() => setTool('rect')}>
+                  <Square className="h-4 w-4" />
+                  <span className="hidden sm:inline">枠</span>
                 </Button>
-                {onGenerateClip ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="shrink-0"
-                    title="再生位置にクリップを足す。右の欄で指示とモデルを決めると、そのクリップの長さの映像をAIで作れます"
-                    onClick={addAiClip}
-                  >
-                    + AI映像の枠
-                  </Button>
-                ) : null}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  title="素材の枠：再生位置に5秒の枠を置く。枠の長さに合う映像を、ダンが素材から探して入れるか、AIで作る"
+                  onClick={addAiClip}
+                >
+                  + 素材の枠
+                </Button>
+                <Button
+                  variant={sfxOpen ? 'default' : 'outline'}
+                  size="sm"
+                  className="shrink-0"
+                  title="効果音の一覧。押すと再生位置に入る・タイムラインの音の段へ引きずっても入る"
+                  onClick={() => setSfxOpen((v) => !v)}
+                >
+                  <Music2 className="h-4 w-4" />
+                  <span className="hidden sm:inline">効果音</span>
+                </Button>
                 <Button
                   variant={snapEnabled ? 'default' : 'outline'}
                   size="sm"
@@ -5209,12 +5443,13 @@ export function VideoReviewEditor({
                 <div data-keep className="flex shrink-0 items-center gap-1" title={`タイムラインの拡大率 ${Math.round(timelineZoom * 100)}%（左端＝全体表示・＋／－キーでも変わる）`}>
                   <input
                     type="range"
-                    min={1}
-                    max={maxTimelineZoom}
-                    step={0.1}
-                    value={timelineZoom}
+                    min={0}
+                    max={1000}
+                    step={1}
+                    // 拡大率は倍々に効くので、つまみは対数で動かす（左端＝全体、右端＝約0.5秒）
+                    value={Math.round((Math.log(Math.max(1, timelineZoom)) / Math.log(Math.max(1.0001, maxTimelineZoom))) * 1000)}
                     aria-label="タイムラインズーム"
-                    onChange={(event) => setTimelineZoom(Number(clamp(Number(event.target.value), 1, maxTimelineZoom).toFixed(2)))}
+                    onChange={(event) => setTimelineZoom(zoomStep(Math.exp((Number(event.target.value) / 1000) * Math.log(maxTimelineZoom)), maxTimelineZoom))}
                     onDoubleClick={() => setTimelineZoom(1)}
                     // Drop focus after dragging so a following Space goes to play/pause, not the
                     // slider (a focused range input eats Space/arrow keys).
@@ -5235,7 +5470,7 @@ export function VideoReviewEditor({
                   </button>
                 </div>
               ) : null}
-              <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2 ${danReplay ? 'dan-replay' : ''}`} onWheel={handleTimelineWheel}>
+              <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2 ${danReplay ? 'dan-replay' : ''}`}>
                 <div className="flex gap-x-2 text-[11px]">
                   {/* 段の名前は横に動かしても左に残す（2026-11-13 拡大して右へ動かすと「映像3」などが消えていた） */}
                   <div ref={laneLabelColRef} className="relative z-30 flex w-[82px] shrink-0 flex-col bg-background will-change-transform">
@@ -5258,6 +5493,7 @@ export function VideoReviewEditor({
                         headRef={playheadHeadRef}
                         duration={timelineDuration || 0}
                         zoom={timelineZoom}
+                        fps={fps}
                         onScrubStart={beginScrub}
                       />
                     </div>
