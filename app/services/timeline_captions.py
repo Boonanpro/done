@@ -458,6 +458,29 @@ def chunk_script(text: str, maxlen: float = MAX_CHARS, max_lines: int = 1, times
     return merged
 
 
+def lint_cards(text: str, maxlen: float = MAX_CHARS, max_lines: int = 1) -> list[str]:
+    """Warnings for a script the caller split by hand with '|': cards too wide for one line and
+    breaks that look like they cut inside a phrase (the same costs the auto-splitter uses)."""
+    pieces = parse_markup(text)
+    out: list[str] = []
+    for k, (piece, _kind) in enumerate(pieces):
+        shown = piece.strip("、。, \n")
+        if _width(shown) > maxlen * max(1, int(max_lines)) + 0.05:
+            out.append(f"長すぎる（{_width(shown):.0f}字幅）: {shown}")
+        if k + 1 < len(pieces):
+            a, b = piece, pieces[k + 1][0]
+            if a.endswith(_SENT_END):
+                continue
+            pos = 0
+            for surf, cost, _hard in _bunsetsu(a + b):
+                pos += len(surf)
+                if pos == len(a) and cost >= 9.0:
+                    out.append(f"意味の途中で切れている可能性: {shown}｜{b.strip('、。')}")
+                if pos >= len(a):
+                    break
+    return out
+
+
 def chunk_text(text: str, maxlen: int = MAX_CHARS) -> list[str]:
     """Plain-text chunks at meaning boundaries (kept for callers that only need strings)."""
     return [c["text"] for c in chunk_script(text, maxlen)]
@@ -632,5 +655,11 @@ def auto_captions(sequence: dict[str, Any], assets: dict[str, dict[str, Any]], w
         r = tc.add_caption(sequence, text=sp["text"], timeline_start=sp["start"], timeline_end=sp["end"], style=used[kind])
         if r.get("ok"):
             ids.append(r["clip_id"])
+    warnings: list[str] = []
+    for seg in segments:
+        t = str(seg.get("text") or "")
+        if "|" in t:
+            warnings += lint_cards(t, maxlen, max_lines)
     return {"ok": True, "captions": len(ids), "clip_ids": ids, "words": len(words), "style": st, "styles": used,
+            "warnings": warnings,
             "specs": specs, "timing_source": "supplied" if supplied else "transcribed"}

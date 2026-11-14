@@ -70,3 +70,15 @@ def test_kind_style_override_and_unknown_font_rejected(tmp_path):
     r = c.auto_captions(seq, {}, tmp_path, [{'t0': 0, 't1': 4, 'text': '<key>決め言葉</key>'}],
                         words=[[0, 1, '決め言葉']], styles={'key': {'color': '#00FF00'}})
     assert r['ok'] and r['styles']['key']['color'] == '#00FF00'
+
+
+def test_hand_split_cards_are_kept_and_checked(tmp_path):
+    text = '勝手にアプリや|ホームページを作ったわけでは|ありませんよね。|<key>AIは単なる労働力です。</key>'
+    warn = c.lint_cards(text)
+    assert any('アプリや｜ホームページ' in w for w in warn)
+    words = [[0, 1, '勝手にアプリや'], [1, 2.2, 'ホームページを作ったわけでは'], [2.2, 3, 'ありませんよね'], [3.5, 5, 'AIは単なる労働力です']]
+    seq = {'duration': 6, 'tracks': []}
+    r = c.auto_captions(seq, {}, tmp_path, [{'t0': 0, 't1': 6, 'text': text}], words=words)
+    assert r['ok'] and [s['text'] for s in r['specs']] == ['勝手にアプリや', 'ホームページを作ったわけでは', 'ありませんよね', 'AIは単なる労働力です']
+    assert r['warnings']
+    assert not c.lint_cards('勝手にアプリやホームページを|作ったわけではありませんよね。')

@@ -283,7 +283,9 @@ def tool_definitions() -> list[types.Tool]:
               "読み間違いそうな語は readings={'車検証':'しゃけんしょう'} で読みを指定（既定辞書あり）。voice省略=owner。",
               {"text": _STR, "voice": _STR, "readings": {"type": "object"}, "name": _STR}, ["text"]),
         _tool("auto_captions", "全文字幕: segments=[{t0,t1,text}] に『その範囲で話している正確な台本』（句読点つき）を渡すと、"
-              "発話の単語時刻に合わせ、意味のまとまり（文節）で1行 max_chars 字（既定16）以下に区切った字幕クリップを置く。"
+              "発話の単語時刻に合わせた字幕クリップを置く。区切りは自分で決めて | で1枚ずつ渡す（意味のまとまりで、"
+              "1枚だけで読める所で切る。1行 max_chars 字（既定16）以下）。| を省いた所は道具が文節で自動に区切るが、"
+              "手で区切るより質が落ちる。返る warnings（長すぎる札・句の途中の切れ目）は直して置き直す。"
               "各字幕は声の出だしで出て、短い間ではつながったまま次へ替わる（範囲内の既存字幕は置き換え）。"
               "台本の中で決め言葉を <key>…</key>、否定の言葉を <neg>…</neg> で囲むと、その言葉は1枚に分かれ、"
               "key=黄色の極太・neg=赤の極太・どちらも普通の字幕より少し大きく出る（styles={key:{…},neg:{…}} で上書き）。"
@@ -1236,6 +1238,7 @@ def _auto_captions(draft: dict, seq: dict, assets: dict, segments: list, style: 
         if n and n not in notes:
             notes.append(n)
     out = {"ok": True, "captions": res["captions"], "words_heard": res["words"],
+           **({"warnings": res["warnings"]} if res.get("warnings") else {}),
            "placed": [{"start": s["start"], "end": s["end"], "text": s["text"], **({"kind": s["kind"]} if s.get("kind") not in (None, "normal") else {})}
                       for s in res.get("specs") or []]}
     if notes:
