@@ -415,13 +415,43 @@ def add_overlay(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_st
     return {"ok": True, "clip_id": cid}
 
 
-_CAPTION_STYLE_KEYS = {"font", "fontSize", "maxWidth", "textAlign", "color", "outlineColor", "outlineWidth", "x", "y"}
+_CAPTION_STYLE_KEYS = {"font", "fontSize", "maxWidth", "textAlign", "color", "outlineColor", "outlineWidth", "x", "y",
+                       "bg", "shadow", "skew", "letterSpacing"}
+# Sub-keys of the nested caption style objects, with the numeric ones clamped to a sane range
+# (relative units: bg radius/padding are fractions of the font size, shadow in output px).
+_CAPTION_BG_KEYS = {"color": None, "opacity": (0.0, 1.0), "radius": (0.0, 2.0), "padX": (0.0, 3.0), "padY": (0.0, 3.0)}
+_CAPTION_SHADOW_KEYS = {"color": None, "blur": (0.0, 200.0), "dx": (-200.0, 200.0), "dy": (-200.0, 200.0)}
 
 # Font ids the caption renderer knows. Mirrors the keys of CAPTION_FONTS in
 # frontend/src/components/video-review/caption-design.ts (tests/test_caption_font_ids.py
 # fails if the two drift). A font outside this list (e.g. "Hiragino Sans") once crashed the
 # /caption-frame renderer and every exported frame came out as an error screen.
-CAPTION_FONT_IDS = ("noto-sans", "dela-gothic", "zen-maru", "reggae", "mplus-rounded", "rocknroll", "mincho")
+# hiragino-w6/-w8/toppan-mincho are the owner's fonts (~/.dan/fonts, served by scene_fonts).
+CAPTION_FONT_IDS = ("noto-sans", "dela-gothic", "zen-maru", "reggae", "mplus-rounded", "rocknroll", "mincho",
+                    "hiragino-w6", "hiragino-w8", "toppan-mincho")
+
+
+def _caption_sub_style(value: Any, keys: dict[str, tuple[float, float] | None]) -> dict[str, Any] | None:
+    """bg / shadow object: known keys only, colors as strings, numbers finite and clamped.
+    None when anything is off (the caller rejects instead of guessing)."""
+    if not isinstance(value, dict) or set(value) - set(keys):
+        return None
+    out: dict[str, Any] = {}
+    for k, v in value.items():
+        rng = keys[k]
+        if rng is None:
+            if not isinstance(v, str) or not v.strip():
+                return None
+            out[k] = v.strip()
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(fv):
+            return None
+        out[k] = max(rng[0], min(rng[1], fv))
+    return out
 
 
 def caption_font_error(style: Any) -> str | None:
@@ -461,6 +491,19 @@ def _sanitize_caption_style(style: dict[str, Any] | None) -> dict[str, Any] | No
         elif k == "textAlign":
             if v in {"left", "center", "right"}:
                 out[k] = v
+        elif k in ("bg", "shadow", "skew") and v is None:
+            out[k] = None  # set_clip: remove the box / shadow / slant
+        elif k in ("bg", "shadow"):
+            sub = _caption_sub_style(v, _CAPTION_BG_KEYS if k == "bg" else _CAPTION_SHADOW_KEYS)
+            if sub is not None:
+                out[k] = sub
+        elif k in ("skew", "letterSpacing"):
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(fv):
+                out[k] = max(-30.0, min(30.0, fv)) if k == "skew" else max(-0.5, min(1.0, fv))
         else:
             out[k] = v
     return out or None
@@ -487,7 +530,8 @@ def add_caption(seq: dict[str, Any], *, text: str, timeline_start: float, timeli
     lane_obj.setdefault("clips", []).append({
         "id": cid, "track": "caption", "text": text,
         "timeline_start": round(ts, 3), "timeline_end": round(te, 3),
-        **({"style": _sanitize_caption_style(style)} if _sanitize_caption_style(style) else {}),
+        **({"style": clean} if (clean := {k: v for k, v in (_sanitize_caption_style(style) or {}).items()
+                                          if v is not None}) else {}),
     })
     _sorted(lane_obj)
     _recompute_duration(seq)
@@ -524,12 +568,14 @@ def set_clip(seq: dict[str, Any], *, clip_id: str, text: str | None = None,
         return {"ok": False, "error": f"clip not found: {clip_id}"}
     if style is not None:
         if not isinstance(style, dict) or set(style) - _CAPTION_STYLE_KEYS:
-            return {"ok": False, "error": "Invalid caption style. Use fontSize (number, normalized scale), not font_size."}
+            return {"ok": False, "error": "Invalid caption style key(s) "
+                    f"{sorted(set(style) - _CAPTION_STYLE_KEYS) if isinstance(style, dict) else ''}. "
+                    f"Allowed: {sorted(_CAPTION_STYLE_KEYS)} (fontSize is a normalized scale, not font_size)."}
         font_err = caption_font_error(style)
         if font_err:
             return {"ok": False, "error": font_err}
-        for key in ('fontSize', 'maxWidth', 'outlineWidth', 'x', 'y'):
-            if key in style:
+        for key in ('fontSize', 'maxWidth', 'outlineWidth', 'x', 'y', 'skew', 'letterSpacing'):
+            if key in style and not (key == 'skew' and style[key] is None):
                 try:
                     value = float(style[key])
                     if not math.isfinite(value) or (key == 'fontSize' and value <= 0):
@@ -538,7 +584,8 @@ def set_clip(seq: dict[str, Any], *, clip_id: str, text: str | None = None,
                     return {'ok': False, 'error': f'Invalid numeric caption style: {key}'}
         cleaned = _sanitize_caption_style(style) or {}
         if set(cleaned) != set(style):
-            return {"ok": False, "error": "Invalid caption style value; no changes applied."}
+            return {"ok": False, "error": "Invalid caption style value; no changes applied. bg takes "
+                    "{color,opacity,radius,padX,padY}, shadow takes {color,blur,dx,dy} (numbers except color)."}
         style = cleaned
     if text is not None:
         if clip.get("text") is None:
@@ -547,7 +594,11 @@ def set_clip(seq: dict[str, Any], *, clip_id: str, text: str | None = None,
     if isinstance(style, dict):
         style = _sanitize_caption_style(style) or {}
         merged = dict(clip.get("style") or {})
-        merged.update(style)
+        for k, v in style.items():
+            if v is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = v
         clip["style"] = merged
     return {"ok": True}
 

@@ -12,10 +12,16 @@ export type CaptionFontId =
   | 'reggae'
   | 'mplus-rounded'
   | 'rocknroll'
-  | 'mincho';
+  | 'mincho'
+  | 'hiragino-w6'
+  | 'hiragino-w8'
+  | 'toppan-mincho';
 
-// Registry of the bundled OFL fonts (all commercial / video-burn-in OK). `css` is the
-// font-family value; `weight` is what we actually request (display faces are single-weight).
+// Registry of caption fonts. The first seven are the bundled OFL fonts (frontend/public/fonts).
+// The last three are the owner's own fonts (macOS / Morisawa faces kept in ~/.dan/fonts, NOT in
+// git — redistributing them is not allowed), served by the backend's scene font route; their
+// fallbacks keep a caption readable when that file can't be loaded. `css` is the font-family
+// value; `weight` is what we actually request (display faces are single-weight).
 export const CAPTION_FONTS: Record<CaptionFontId, { label: string; css: string; weight: number }> = {
   'noto-sans':     { label: '標準',     css: '"NotoSansJP"',    weight: 900 },
   'dela-gothic':   { label: '極太',     css: '"DelaGothicOne"', weight: 400 },
@@ -24,6 +30,9 @@ export const CAPTION_FONTS: Record<CaptionFontId, { label: string; css: string; 
   'mplus-rounded': { label: '丸ポップ', css: '"MPLUSRounded"',  weight: 800 },
   'rocknroll':     { label: 'ロック',   css: '"RocknRollOne"',  weight: 400 },
   'mincho':        { label: '明朝',     css: '"ShipporiMincho"',weight: 800 },
+  'hiragino-w6':   { label: 'ヒラギノ角ゴ W6', css: '"HiraginoW6", "Hiragino Sans", "NotoSansJP"', weight: 600 },
+  'hiragino-w8':   { label: 'ヒラギノ角ゴ W8', css: '"HiraginoW8", "Hiragino Sans", "NotoSansJP"', weight: 800 },
+  'toppan-mincho': { label: '凸版文久見出し明朝', css: '"ToppanMidashiMincho", "ShipporiMincho"', weight: 800 },
 };
 
 // Look up a font by id, falling back to the default for anything unknown. Stored designs can
@@ -49,6 +58,49 @@ export const CAPTION_FONT_FILES: ReadonlyArray<[string, string, string]> = [
   ['ShipporiMincho', '/fonts/ShipporiMincho-ExtraBold.ttf', '800'],
 ];
 
+// The owner's fonts (see CAPTION_FONTS). Not bundled: fetched from the backend only when a
+// caption actually uses one (they are 4-7 MB each), so the export page doesn't load them for
+// every caption. Same [cssFamily, url, weight] shape as CAPTION_FONT_FILES.
+const OWNER_FONT_BASE = '/api/v1/editor-assistant/scene-vendor/fonts/';
+export const CAPTION_OWNER_FONT_FILES: Partial<Record<CaptionFontId, [string, string, string]>> = {
+  'hiragino-w6': ['HiraginoW6', `${OWNER_FONT_BASE}HiraginoSans-W6.otf`, '600'],
+  'hiragino-w8': ['HiraginoW8', `${OWNER_FONT_BASE}HiraginoSans-W8.otf`, '800'],
+  'toppan-mincho': ['ToppanMidashiMincho', `${OWNER_FONT_BASE}ToppanBunkyuMidashiMincho-ExtraBold.otf`, '800'],
+};
+
+// Font files the given captions need: every bundled face plus the owner fonts they name.
+export function captionFontFilesFor(designs: ReadonlyArray<CaptionDesign | undefined | null>): Array<[string, string, string]> {
+  const out: Array<[string, string, string]> = [...CAPTION_FONT_FILES];
+  for (const d of designs) {
+    const f = d && typeof d.font === 'string' && Object.prototype.hasOwnProperty.call(CAPTION_OWNER_FONT_FILES, d.font)
+      ? CAPTION_OWNER_FONT_FILES[d.font as CaptionFontId] : undefined;
+    if (f && !out.includes(f)) out.push(f);
+  }
+  return out;
+}
+
+// Load faces via the FontFace API and add them to document.fonts (the export MUST await this
+// before screenshotting). One promise per file, so later payloads reuse earlier loads. A face that
+// fails or takes longer than `timeoutMs` is skipped: the caption then draws in its fallback font
+// instead of vanishing or blocking the export.
+const fontLoads = new Map<string, Promise<void>>();
+export function loadCaptionFontFiles(files: ReadonlyArray<readonly [string, string, string]>, timeoutMs = 7000): Promise<void> {
+  const fontSet = typeof document !== 'undefined' ? (document as unknown as { fonts?: FontFaceSet }).fonts : undefined;
+  if (!fontSet || typeof FontFace === 'undefined') return Promise.resolve();
+  return Promise.all(files.map(([family, url, weight]) => {
+    let p = fontLoads.get(url);
+    if (!p) {
+      p = (async () => {
+        const face = new FontFace(family, `url("${url}")`, { weight: String(weight) });
+        await face.load();
+        fontSet.add(face);
+      })().catch(() => { fontLoads.delete(url); });
+      fontLoads.set(url, p);
+    }
+    return Promise.race([p, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+  })).then(() => fontSet.ready).then(() => undefined, () => undefined);
+}
+
 // @font-face for every bundled file. Emitted as a <style> by CaptionLayer so it works both
 // inside the editor (no global-CSS constraint) and on the standalone /caption-frame route.
 export const CAPTION_FONT_FACE_CSS = `
@@ -59,6 +111,7 @@ export const CAPTION_FONT_FACE_CSS = `
 @font-face{font-family:'MPLUSRounded';font-weight:800;src:url('/fonts/MPLUSRounded1c-ExtraBold.ttf') format('truetype');font-display:block;}
 @font-face{font-family:'RocknRollOne';src:url('/fonts/RocknRollOne-Regular.ttf') format('truetype');font-display:block;}
 @font-face{font-family:'ShipporiMincho';font-weight:800;src:url('/fonts/ShipporiMincho-ExtraBold.ttf') format('truetype');font-display:block;}
+${Object.values(CAPTION_OWNER_FONT_FILES).map((f) => `@font-face{font-family:'${f![0]}';font-weight:${f![2]};src:url('${f![1]}') format('opentype');font-display:swap;}`).join('\n')}
 `;
 
 // Designed caption look. All fields optional; an empty design renders as a clean white
@@ -80,6 +133,9 @@ export type CaptionDesign = {
   // Soft drop shadow on the whole caption block.
   shadow?: { color?: string; blur?: number; dx?: number; dy?: number };
   letterSpacing?: number;     // multiplier of fontSize (0.02 = subtle tracking)
+  // Slant of the whole caption block (box included), in degrees. Negative leans the tops to the
+  // right like italics (-9 = the red emphasis look). Clamped to ±30.
+  skew?: number;
   // M2 — motion. Box-intro animations (pop/fade/slide) need only the caption's own clock;
   // word-level effects (typewriter / karaoke) sync to per-word timings when present.
   animation?: CaptionAnimation;
@@ -125,6 +181,10 @@ export const CAPTION_DESIGN_PRESETS: ReadonlyArray<{ id: string; label: string; 
   { id: 'mincho', label: '明朝・上品', design: { font: 'mincho', color: '#ffffff', outlineColor: '#000000', outlineWidth: 0.6, bg: { color: '#16213e', opacity: 0.52, radius: 0.1, padX: 0.5, padY: 0.2 }, animation: 'slide' } },
   { id: 'cute', label: '丸かわいい', design: { font: 'zen-maru', color: '#ff7aa8', outlineColor: '#ffffff', outlineWidth: 1.6, animation: 'pop' } },
   { id: 'rock', label: 'ロック', design: { font: 'rocknroll', gradient: ['#ffe600', '#ff8a00'], outlineColor: '#000000', outlineWidth: 1.4, animation: 'pop' } },
+  // 2026-11-14 owner's request: refined gothic for normal captions, two strong emphasis looks
+  { id: 'hiragino', label: '上品ゴシック', design: { font: 'hiragino-w6', color: '#ffffff', outlineColor: '#000000', outlineWidth: 1.4, shadow: { color: 'rgba(0,0,0,0.5)', blur: 6, dx: 0, dy: 3 } } },
+  { id: 'red-box-mincho', label: '赤箱・白明朝', design: { font: 'toppan-mincho', color: '#ffffff', outlineWidth: 0, fontSize: 1.15, bg: { color: '#c8101a', opacity: 1, radius: 0, padX: 0.45, padY: 0.16 } } },
+  { id: 'red-slant', label: '赤・斜め極太', design: { font: 'noto-sans', color: '#e3141f', outlineColor: '#ffffff', outlineWidth: 2.6, skew: -9, fontSize: 1.6, maxWidth: 0.94, shadow: { color: 'rgba(0,0,0,0.45)', blur: 10, dx: 0, dy: 5 } } },
 ];
 
 // Vertical placement of the caption block within the frame.
@@ -165,6 +225,8 @@ export function captionBoxStyle(design: CaptionDesign, outH: number): CSSPropert
     style.borderRadius = Math.round(fs * num(design.bg.radius, 0.18));
     style.padding = `${Math.round(fs * num(design.bg.padY, 0.16))}px ${Math.round(fs * num(design.bg.padX, 0.42))}px`;
   }
+  const skew = Math.max(-30, Math.min(30, num(design.skew, 0)));
+  if (skew) style.transform = `skewX(${skew}deg)`;
   if (design.shadow) {
     const s = design.shadow;
     style.filter = `drop-shadow(${num(s.dx, 0)}px ${num(s.dy, Math.round(fs * 0.06))}px ${num(s.blur, Math.round(fs * 0.12))}px ${s.color || 'rgba(0,0,0,0.55)'})`;

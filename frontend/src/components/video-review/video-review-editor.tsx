@@ -4660,6 +4660,8 @@ export function VideoReviewEditor({
                                           fontSize: '0.95rem',
                                           WebkitTextStroke: `${0.5 * (d.outlineWidth ?? 1)}px ${d.outlineColor || '#000'}`,
                                           paintOrder: 'stroke fill',
+                                          ...(d.bg ? { background: d.bg.color || '#000', padding: '1px 3px' } : {}),
+                                          ...(d.skew ? { display: 'inline-block', transform: `skewX(${d.skew}deg)` } : {}),
                                           ...(d.gradient
                                             ? { backgroundImage: `linear-gradient(180deg, ${d.gradient[0]}, ${d.gradient[1]})`, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }
                                             : { color: d.color || '#fff' }),

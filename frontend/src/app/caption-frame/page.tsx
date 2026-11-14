@@ -11,7 +11,7 @@
 import { Suspense, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { CaptionLayer, type RenderCaption } from '@/components/video-review/caption-layer';
-import { CAPTION_FONT_FILES } from '@/components/video-review/caption-design';
+import { captionFontFilesFor, loadCaptionFontFiles } from '@/components/video-review/caption-design';
 
 type Payload = {
   outW: number;
@@ -65,6 +65,10 @@ declare global {
   }
 }
 
+function payloadFontFiles(p: Payload | null) {
+  return captionFontFilesFor((p?.captions || []).map((c) => c.design));
+}
+
 function decodePayload(raw: string | null): Payload | null {
   if (!raw) return null;
   try {
@@ -81,6 +85,7 @@ function Inner() {
   const sp = useSearchParams();
   const initialPayload = decodePayload(sp.get('p'));
   const [payload, setPayload] = useState<Payload | null>(initialPayload);
+  const firstPayload = useRef(initialPayload);
   const [viewport, setViewport] = useState({ w: 1, h: 1 });
   const [ready, setReady] = useState(false);
 
@@ -101,11 +106,12 @@ function Inner() {
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       });
     window.__setCaptionPayload = (next: Payload) =>
-      new Promise<void>((resolve) => {
+      // a new payload may name an owner font the page hasn't loaded yet: load it first
+      loadCaptionFontFiles(payloadFontFiles(next)).then(() => new Promise<void>((resolve) => {
         window.__nativeCaptionPayload = next;
         setPayload(next);
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-      });
+      }));
     if (window.__nativeCaptionPayload) {
       void window.__setCaptionPayload(window.__nativeCaptionPayload);
     }
@@ -130,26 +136,9 @@ function Inner() {
     (async () => {
       // The bundled faces use font-display:block (invisible until loaded), and @font-face in an
       // injected <style> does NOT register in document.fonts in time for the screenshot. So load
-      // every face via the FontFace API and add it to document.fonts explicitly, then await.
-      try {
-        const fontSet = (document as unknown as { fonts?: FontFaceSet }).fonts;
-        if (fontSet && typeof FontFace !== 'undefined') {
-          await Promise.all(
-            CAPTION_FONT_FILES.map(async ([family, url, weight]) => {
-              try {
-                const face = new FontFace(family, `url("${url}")`, { weight: String(weight) });
-                await face.load();
-                fontSet.add(face);
-              } catch {
-                /* a single face failing must not block the rest */
-              }
-            }),
-          );
-          await fontSet.ready;
-        }
-      } catch {
-        /* ignore */
-      }
+      // every face the payload needs via the FontFace API, add it to document.fonts, then await.
+      // A face that fails is skipped (the caption falls back to another font, never blank).
+      await loadCaptionFontFiles(payloadFontFiles(firstPayload.current));
       requestAnimationFrame(() =>
         requestAnimationFrame(() => {
           if (cancelled) return;

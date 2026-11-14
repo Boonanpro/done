@@ -143,7 +143,14 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
   const tokens = useMemo(() => (wordLevel ? tokenize(cap) : null), [cap, wordLevel]);
 
   const local = time - cap.start;
-  const boxStyle: CSSProperties = { ...captionBoxStyle(design, outH), ...introStyle(design, local, outH) };
+  const baseBox = captionBoxStyle(design, outH);
+  const intro = introStyle(design, local, outH);
+  // the intro motion (pop/slide) and the design's slant both live in `transform`: keep both
+  const boxStyle: CSSProperties = {
+    ...baseBox,
+    ...intro,
+    transform: [intro.transform, baseBox.transform].filter(Boolean).join(' ') || undefined,
+  };
   const textStyle = captionTextStyle(design, outH);
   const highlight = design.highlightColor || '#ffe14d';
   const hlScale = num(design.highlightScale, 1.12);
