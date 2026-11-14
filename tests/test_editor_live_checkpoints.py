@@ -157,3 +157,22 @@ def test_human_saved_overlap_does_not_block_next_ai_edit(draft):
     assert result['timeline_updated'], result
     clips = live()['tracks'][0]['clips']
     assert [c['text'] for c in clips] == ['AI next', 'keep'] and clips[1]['timeline_start'] == 2
+
+
+def test_overlap_saved_before_draft_does_not_block_ai_edit(tmp_path, monkeypatch):
+    # 人が同じ段に重ねて保存した後で、新しい下書き（次の会話）を作っても、AIの別の編集は反映される
+    monkeypatch.setattr(td, 'UPLOAD_ROOT', tmp_path)
+    room = tmp_path / 'room'; room.mkdir()
+    seq = {'duration': 6, 'format': '16:9', 'frame_rate': 30, 'tracks': [
+        {'id': 'v', 'type': 'video', 'clips': [
+            {'id': 'a', 'text': 'before', 'timeline_start': 0, 'timeline_end': 3},
+            {'id': 'b', 'text': 'keep', 'timeline_start': 2, 'timeline_end': 6}]}]}
+    (room / 'contents.json').write_text(json.dumps([{'id': 'c', 'timeline': {'sequence': seq}}]))
+    (room / 'assets.json').write_text('[]')
+    d = td.create_draft('room', 'c', 'job'); d['live_updates'] = True; td.save_draft(d)
+    assert d['baseline_problems']
+    monkeypatch.setattr(m, 'ROOM_ID', 'room'); monkeypatch.setattr(m, 'DRAFT_ID', d['draft_id'])
+    monkeypatch.setattr(m, 'JOB_ID', 'job'); monkeypatch.setattr(m, 'CONTENT_ID', 'c')
+    result = tool('set_clip', {'clip_id': 'a', 'text': 'AI'})
+    assert result['timeline_updated'], result
+    assert [c['text'] for c in live()['tracks'][0]['clips']] == ['AI', 'keep']
