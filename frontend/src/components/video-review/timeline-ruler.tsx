@@ -5,15 +5,16 @@ import { memo, useEffect, useState, type RefObject } from 'react';
 /** タイムラインの上の目盛り。押す・引きずると再生位置が動く（他の編集ソフトの時間の物差しと同じ）。
  *  スクロールやズームで描き直すのはこの部品だけ。見えている範囲の目盛りだけを作る。 */
 function label(t: number, step: number, fps: number): string {
-  // 1秒より細かい目盛りは「分:秒:コマ」で書く（Premiere・DaVinci と同じ）
+  // 1秒より細かい目盛りは「時:分:秒:コマ」のタイムコードで書く（Premiere・DaVinci と同じ。00:00:01:15 = 1秒15コマ目）
   const total = Math.round(t * fps);
   const whole = Math.floor(total / fps);
   const frame = total - whole * fps;
   const h = Math.floor(whole / 3600);
   const m = Math.floor((whole % 3600) / 60);
   const ss = String(whole % 60).padStart(2, '0');
-  const base = h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
-  return step < 1 ? `${base}:${String(frame).padStart(2, '0')}` : base;
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  if (step < 1) return `${p2(h)}:${p2(m)}:${ss}:${p2(frame)}`;
+  return h ? `${h}:${p2(m)}:${ss}` : `${m}:${ss}`;
 }
 
 const STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];

@@ -2399,6 +2399,7 @@ export function VideoReviewEditor({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undo, togglePreviewFullscreen, contentDuration, maxTimelineZoom]);
 
+  const markerPointRef = useRef<Point | null>(null);
   const handlePointerDown = useCallback(
     (event: React.PointerEvent) => {
       if (event.target === event.currentTarget) clearSelection();
@@ -2417,11 +2418,12 @@ export function VideoReviewEditor({
       } else if (tool === 'freehand') {
         setDraftPath([point]);
       } else if (tool === 'marker') {
-        // A marker is a point note → always a "ダンに指示" pin (no type choice needed).
-        commitAnnotation({ kind: 'marker', label: 'comment', data: { point } }, 'comment', 1);
+        // A marker is a point note → always a "ダンに指示" pin (no type choice needed). 置くのは指を離した時:
+        // 押した時に置くと、続く mouseup/click が言葉の欄から入力の先を奪い、そのまま打ち始められなかった
+        markerPointRef.current = point;
       }
     },
-    [clearSelection, commitAnnotation, getPoint, tool]
+    [clearSelection, getPoint, tool]
   );
 
   const handlePointerMove = useCallback(
@@ -2437,6 +2439,11 @@ export function VideoReviewEditor({
 
   const handlePointerUp = useCallback(() => {
     setIsPointerDown(false);
+    if (markerPointRef.current) {
+      const point = markerPointRef.current;
+      markerPointRef.current = null;
+      commitAnnotation({ kind: 'marker', label: 'comment', data: { point } }, 'comment', 1);
+    }
     // On release we DON'T commit — we open a type picker at the shape so the user chooses
     // ぼかし / 生成 / ダンに指示. Drawing a shape no longer implies "ぼかし".
     if (draftRect) {

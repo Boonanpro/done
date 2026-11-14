@@ -89,10 +89,19 @@ def _draw_marks(src: Path, dest: Path, ann: dict[str, Any]) -> bool:
     return True
 
 
+def frame_path(room_id: str, ann: dict[str, Any]) -> Path | None:
+    """印を描いた絵を置く場所（ピン・ペン・枠だけ）。"""
+    if str(ann.get('kind') or '') not in ('marker', 'rect', 'freehand'):
+        return None
+    from app.api import production_asset_routes as par
+    safe = ''.join(ch for ch in str(ann.get('id') or uuid.uuid4().hex[:8]) if ch.isalnum() or ch in '-_')[:60]
+    return par._room_dir(room_id) / 'instructions' / f"{safe}.png"
+
+
 def frame_with_marks(room_id: str, content_id: str, ann: dict[str, Any]) -> str | None:
     """その時刻の完成画面（カット・テロップ・重ねた絵を反映）に印を描いた PNG の場所。描けなければ None。"""
-    kind = str(ann.get('kind') or '')
-    if kind not in ('marker', 'rect', 'freehand'):
+    dest = frame_path(room_id, ann)
+    if dest is None:
         return None
     content = _content(room_id, content_id)
     seq = ((content or {}).get('timeline') or {}).get('sequence')
@@ -108,7 +117,6 @@ def frame_with_marks(room_id: str, content_id: str, ann: dict[str, Any]) -> str 
             logger.info('instruction frame not drawn: %s', res.get('error'))
             return None
         raw = Path(res['paths'][0])
-        dest = out_dir / f"{ann.get('id') or uuid.uuid4().hex[:8]}.png"
         ok = _draw_marks(raw, dest, ann)
         raw.unlink(missing_ok=True)
         return str(dest) if ok else None
@@ -137,7 +145,8 @@ def build_task(ann: dict[str, Any], content_title: str, image: str | None) -> st
                      "この区間にぴったり置く（Envato などの素材集・本人の素材フォルダ。AIで作らない）。")
     lines.append(f"- 指示の言葉: 「{note}」" if note else "- 指示の言葉: （無し。印と場所から読み取る）")
     if image:
-        lines.append(f"- 印を描いた完成画面の絵: {image}（Read で開ける。赤い印が本人の印）")
+        lines.append(f"- 印を描いた完成画面の絵: {image}（Read で開ける。赤い印が本人の印。裏で描いているので、"
+                     "まだ無ければ少し待つ。描けなかった時は render_frame でその時刻を見て、上の画面の場所を当てる）")
     lines += [
         "",
         "同じ作品では、本人が送ったほかの指示もそれぞれ並行で動いている（parallel_work の list で見られる）。"
@@ -161,10 +170,15 @@ async def send(user_id: str, asset_room_id: str, content_id: str, ann: dict[str,
     if not content:
         raise ValueError('作品が見つかりません')
     room = await editor_rooms.ensure_room(user_id, asset_room_id, content_id)
-    image = await asyncio.to_thread(frame_with_marks, asset_room_id, content_id, ann)
-    task = build_task(ann, str(content.get('title') or content_id), image)
+    # 長い作品では完成画面を1枚描くのに十数秒かかる。本人を待たせないよう、作業は先に始め、絵は裏で描く
+    # （作業の側が Claude を立ち上げて読みに来るまでに、ほとんどの場合できている）
+    dest = frame_path(asset_room_id, ann)
+    if dest is not None:
+        dest.unlink(missing_ok=True)
+        asyncio.get_running_loop().run_in_executor(None, frame_with_marks, asset_room_id, content_id, dict(ann))
+    task = build_task(ann, str(content.get('title') or content_id), str(dest) if dest else None)
     job = await parallel_job_runner.start(room['room_id'], user_id, task, title=_title(ann))
-    return {'job_id': job['id'], 'room_id': room['room_id'], 'state': job.get('state'), 'image': image}
+    return {'job_id': job['id'], 'room_id': room['room_id'], 'state': job.get('state'), 'image': str(dest) if dest else None}
 
 
 def states(user_id: str, job_ids: list[str]) -> list[dict[str, Any]]:
