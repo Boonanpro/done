@@ -144,3 +144,16 @@ def test_invalid_batch_reference_rolls_back_published_timeline(draft, reference)
     ]})
     assert result['rolled_back'] and live() == before
     assert td.load_draft('room', draft['draft_id'])['sequence'] == before
+
+
+def test_human_saved_overlap_does_not_block_next_ai_edit(draft):
+    # 人が同じ段に2つのクリップを重ねて保存しても、次のAIの編集（別の字幕の変更）は反映される
+    tool('set_clip', {'clip_id': 'a', 'text': 'AI'})
+    contents = td._read_contents_raw('room')
+    contents[0]['timeline']['sequence']['tracks'][0]['clips'][1]['timeline_start'] = 2
+    td._write_contents_raw('room', contents)
+    assert tool('set_clip', {'clip_id': 'a', 'text': 'AI next'})['human_edit_received']
+    result = tool('set_clip', {'clip_id': 'a', 'text': 'AI next'})
+    assert result['timeline_updated'], result
+    clips = live()['tracks'][0]['clips']
+    assert [c['text'] for c in clips] == ['AI next', 'keep'] and clips[1]['timeline_start'] == 2
