@@ -196,7 +196,7 @@ _ATTACH_SUB = {("名詞", "非自立"), ("名詞", "接尾"), ("動詞", "非自
 
 def _width(t: str) -> float:
     """Display width: half-width letters/digits count about half a full-width character."""
-    return sum(0.55 if ord(ch) < 0x2E80 and not ch.isspace() else (0 if ch.isspace() else 1) for ch in t)
+    return sum(0.6 if ord(ch) < 0x2E80 and not ch.isspace() else (0 if ch.isspace() else 1) for ch in t)
 
 
 def parse_markup(text: str) -> list[tuple[str, str]]:
@@ -242,6 +242,10 @@ def _bunsetsu(text: str) -> list[list[Any]]:
                 and not (prev.surface.endswith(_SENT_END) or prev.surface == "、"))
             or (ppos and (ppos[0] == "接頭詞" or ppos[1] == "括弧開"))
             or (pos[0] == "名詞" and ppos and ppos[0] == "名詞" and ppos[1] == "非自立" and pos[1] == "接尾")
+            or (t.surface in {"なんか", "なんて"} and ppos and ppos[0] == "名詞")  # 仕事なんか
+            or (pos[0] == "動詞" and t.base_form in {"する", "できる"} and ppos and ppos[1] == "サ変接続")  # 受注できる
+            or (ppos and prev.surface == "つ" and pos[0] == "名詞" and len(groups[-1][1]) >= 2
+                and groups[-1][1][-2].part_of_speech.startswith("名詞,数"))  # 3つ目
         )
         # A content word after a closed sentence always opens a new phrase.
         if groups and groups[-1][0].endswith(_SENT_END) and pos[0] not in {"記号"}:
@@ -251,6 +255,29 @@ def _bunsetsu(text: str) -> list[list[Any]]:
             groups[-1][1].append(t)
         else:
             groups.append([t.surface, [t]])
+    def predicate(k: int) -> float:
+        """How much phrase k is the predicate of the phrase before it: 1 for a verb/adjective/
+        ない/サ変名詞+する, 0.5 when it only modifies the next noun (経験も|ない自分), else 0."""
+        if k >= len(groups):
+            return 0.0
+        lastk = groups[k][1][-1]
+        nk0 = groups[k + 1][1][0] if k + 1 < len(groups) else None
+        if (nk0 is not None and getattr(lastk, "infl_form", "") in {"基本形", "体言接続"}
+                and nk0.part_of_speech.startswith("名詞") and not nk0.part_of_speech.startswith("名詞,非自立")):
+            rel = 0.8  # やりたい|仕事: the verb modifies the next noun, not only this argument
+        else:
+            rel = 1.0
+        t0 = groups[k][1][0]
+        p0 = t0.part_of_speech.split(",")
+        if p0[0] in {"動詞", "形容詞"} or (p0[0] == "助動詞" and t0.base_form == "ない"):
+            return rel
+        if p0[0] == "名詞" and p0[1] == "サ変接続":
+            nk = groups[k + 1][1][0] if k + 1 < len(groups) else None
+            if any(x.base_form in {"する", "できる"} for x in groups[k][1][1:]):
+                return rel
+            return rel if (nk and nk.base_form in {"する", "できる"}) else 0.0
+        return 0.0
+
     out: list[list[Any]] = []
     for i, (surf, ts) in enumerate(groups):
         last = ts[-1]
@@ -260,7 +287,7 @@ def _bunsetsu(text: str) -> list[list[Any]]:
         np = nxt.part_of_speech.split(",") if nxt else ["*", "*"]
         hard = surf.endswith(_SENT_END)
         nbase = getattr(nxt, "base_form", "") if nxt else ""
-        if not hard and nbase in {"なる", "する"} and (
+        if not hard and nbase in {"なる", "する", "できる"} and (
                 (lp[0] == "形容詞" and form.startswith("連用")) or last.surface in {"ように", "ようには", "と", "に", "く"}
                 or lp[1] in {"副詞化", "形容動詞語幹", "サ変接続"}):
             out.append([surf, 12.0, False])  # 詳しく|なる, ように|なる, と|したら
@@ -269,26 +296,34 @@ def _bunsetsu(text: str) -> list[list[Any]]:
             c = 0.0
         elif surf.endswith(("、", ",")):
             c = 1.0
-        elif lp[0] == "助詞":
+        elif lp[0] == "助詞" or (lp[0] == "フィラー" and last.surface in {"なんか", "なんて"}):
+            if lp[0] == "フィラー":
+                lp = ["助詞", "副助詞"]  # 仕事なんか|ない
             c = {"終助詞": 0.5, "接続助詞": 2.0, "係助詞": 3.5, "格助詞": 4.0, "副助詞": 4.0,
                  "並立助詞": 9.0, "連体化": 9.0, "副詞化": 5.0, "副助詞／並立助詞／終助詞": 4.0}.get(lp[1], 4.0)
             if last.surface in {"の"} and lp[1] == "格助詞":
-                c = 9.0  # 私の|太陽光
+                c = 10.0  # 私の|太陽光, この中の|1つ目
             if last.surface in {"と", "とか"} and np[0] == "名詞" and lp[1] == "並立助詞":
                 c = 9.0
             if last.surface == "より":
                 c = 10.0  # 勉強より|先に
             if last.surface in {"たり", "だり"}:
                 c = 2.5  # 持ったり|アートを買ったり: clauses, not nouns
-            if lp[1] in {"格助詞", "係助詞"} and np[0] == "動詞":
-                c += 1.5  # 大波に|乗って: keep an argument with the verb right after it
+            if lp[1] in {"格助詞", "係助詞", "副助詞"} and last.surface not in {"の", "は"}:
+                pr = predicate(i + 1)
+                c += 3.0 * pr
+                if pr and nxt.base_form in {"ある", "ない", "いる"}:
+                    c += 3.0  # 必要が|ある, 経験も|ない: the pair is one expression
+            if (last.surface == "に" and len(ts) >= 2 and ts[-2].part_of_speech.split(",")[1] in {"数", "接尾"}
+                    and np[0] == "名詞" and np[1] == "数"):
+                c = max(c, 9.0)  # 1ヶ月に|5本  # 大波に|乗って, 必要が|ある, 経験も|ない: keep an argument with its predicate
         elif lp[0] in {"動詞", "形容詞", "助動詞"}:
             if lp[0] == "形容詞" and form.startswith("連用テ") and last.surface.endswith("く"):
                 c = 7.0  # 大きく|資産を増やして: an adverb stays with its verb
             elif form.startswith("連用") or form in {"連用形", "連用タ接続"}:
                 c = 2.0  # 稼ぎ / 改良し / であり: a clause ends here
             elif form == "体言接続" or (form == "基本形" and np[0] == "名詞" and np[1] != "非自立"):
-                c = 8.0  # 自由な|人生, 生み出した|収入
+                c = 9.0  # 自由な|人生, 生み出した|収入
             elif form == "基本形":
                 c = 1.0  # sentence end without punctuation (speech transcripts)
             elif form == "仮定形":
@@ -321,7 +356,7 @@ def _segment(phr: list[list[Any]], maxw: float, times=None, base: int = 0) -> li
     offs = [0]
     for k in nlen:
         offs.append(offs[-1] + k)
-    lo, hi = max(4.0, maxw * 0.45), maxw * 0.85
+    lo, hi = max(4.0, maxw * 0.45), maxw * 0.8
     INF = float("inf")
     best = [INF] * (n + 1)
     back = [0] * (n + 1)
@@ -343,7 +378,7 @@ def _segment(phr: list[list[Any]], maxw: float, times=None, base: int = 0) -> li
             if width < 4.0 and (i > 0 or j < n):
                 cost += (4.0 - width) * 2.0  # 'では、' alone flashes by and says nothing
             elif width > hi:
-                cost += (width - hi) * 0.6
+                cost += (width - hi) * 0.9
             if width > maxw:
                 cost += 30.0  # a single phrase longer than a caption
             if j < n:
