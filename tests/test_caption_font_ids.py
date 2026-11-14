@@ -69,12 +69,12 @@ def test_auto_captions_rejects_unknown_font_before_replacing(tmp_path):
 # The three looks the owner asked for (2026-11-14): refined gothic, red box + white Mincho,
 # red slanted heavy gothic. Each must pass add_caption / set_clip / set_clip_props intact.
 LOOKS = {
-    'plain': {'font': 'hiragino-w6', 'color': '#ffffff', 'outlineColor': '#000000', 'outlineWidth': 1.1,
-              'shadow': {'color': 'rgba(0,0,0,0.45)', 'blur': 6, 'dx': 0, 'dy': 3}},
+    'plain': {'font': 'hiragino-w6', 'color': '#ffffff', 'outlineColor': '#000000', 'outlineWidth': 1.4,
+              'shadow': {'color': 'rgba(0,0,0,0.5)', 'blur': 6, 'dx': 0, 'dy': 3}},
     'red_box': {'font': 'toppan-mincho', 'color': '#ffffff', 'outlineWidth': 0,
                 'bg': {'color': '#d0121b', 'opacity': 1, 'radius': 0, 'padX': 0.4, 'padY': 0.14}},
     'red_slant': {'font': 'noto-sans', 'color': '#e5121f', 'outlineColor': '#ffffff', 'outlineWidth': 2.4,
-                  'skew': -9, 'fontSize': 1.9},
+                  'skew': -9, 'fontSize': 1.6, 'maxWidth': 0.94},
 }
 
 

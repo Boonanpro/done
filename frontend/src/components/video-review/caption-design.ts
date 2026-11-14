@@ -181,6 +181,10 @@ export const CAPTION_DESIGN_PRESETS: ReadonlyArray<{ id: string; label: string; 
   { id: 'mincho', label: '明朝・上品', design: { font: 'mincho', color: '#ffffff', outlineColor: '#000000', outlineWidth: 0.6, bg: { color: '#16213e', opacity: 0.52, radius: 0.1, padX: 0.5, padY: 0.2 }, animation: 'slide' } },
   { id: 'cute', label: '丸かわいい', design: { font: 'zen-maru', color: '#ff7aa8', outlineColor: '#ffffff', outlineWidth: 1.6, animation: 'pop' } },
   { id: 'rock', label: 'ロック', design: { font: 'rocknroll', gradient: ['#ffe600', '#ff8a00'], outlineColor: '#000000', outlineWidth: 1.4, animation: 'pop' } },
+  // 2026-11-14 owner's request: refined gothic for normal captions, two strong emphasis looks
+  { id: 'hiragino', label: '上品ゴシック', design: { font: 'hiragino-w6', color: '#ffffff', outlineColor: '#000000', outlineWidth: 1.4, shadow: { color: 'rgba(0,0,0,0.5)', blur: 6, dx: 0, dy: 3 } } },
+  { id: 'red-box-mincho', label: '赤箱・白明朝', design: { font: 'toppan-mincho', color: '#ffffff', outlineWidth: 0, fontSize: 1.15, bg: { color: '#c8101a', opacity: 1, radius: 0, padX: 0.45, padY: 0.16 } } },
+  { id: 'red-slant', label: '赤・斜め極太', design: { font: 'noto-sans', color: '#e3141f', outlineColor: '#ffffff', outlineWidth: 2.6, skew: -9, fontSize: 1.6, maxWidth: 0.94, shadow: { color: 'rgba(0,0,0,0.45)', blur: 10, dx: 0, dy: 5 } } },
 ];
 
 // Vertical placement of the caption block within the frame.
