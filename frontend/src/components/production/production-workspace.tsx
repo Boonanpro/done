@@ -673,7 +673,7 @@ export function ProductionWorkspace({
         roomId={roomId}
         contentId={selectedContent.id}
         title={selectedContent.title}
-        onExternalEdit={() => void loadAll()}
+        onExternalEdit={() => loadAll()}
         initialPath={mediaUrl || !primaryVideo ? undefined : assetMediaPath(primaryVideo)}
         initialUrl={mediaUrl}
         initialThumbnailUrl={primaryVideo?.thumbnail_url || undefined}

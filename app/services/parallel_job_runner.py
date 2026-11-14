@@ -211,6 +211,9 @@ async def deliver(job_id, text):
     return None
 
 
+_drafts: dict = {}   # 並行作業ごとのタイムラインの下書き（作品の部屋だけ）。作業の終わりに確定する
+
+
 def _kill(job_id):
     proc = _procs.get(job_id)
     if proc and proc.poll() is None:
@@ -288,6 +291,11 @@ async def _launch(job_id, s):
                       'DAN_BROWSER_ROOM': state.browser_room(job_id), 'DAN_BROWSER_HEADLESS': '1', 'DAN_WORK_DIR': work_dir})
     job_mcp = Path(room_mcp).with_name(f'mcp_job_{job_id[:8]}.json')
     job_mcp.write_text(json.dumps(cfg), encoding='utf-8')
+    # 作品の部屋（エディターの「ダンと制作」）の並行作業も、部屋のダンと同じくタイムラインを直せる
+    # （2026-11-14 本人: ピン・ペン・素材の枠の指示は送った時から別々に動き出す。app/services/editor_instructions.py）
+    system_prompt, draft = await cr.attach_timeline_tools(room, str(job_mcp), system_prompt)
+    if draft:
+        _drafts[job_id] = draft
     launch_prompt, content = cr._prepare_cli_launch_payload(system_prompt, content)
     claude_cmd, cli_js = cr._resolve_claude_cli()
     if not claude_cmd:
@@ -452,6 +460,10 @@ async def run(row):
                 if cur['applied_revision'] < cur['revision'] and cur.get('session_id'):
                     continue   # new words arrived as the session closed: continue it
                 break
+            draft = _drafts.pop(job_id, None)
+            if draft:
+                from app.agent import cli_runner as cr
+                await asyncio.to_thread(cr._commit_mentioned_timeline_draft, s['room_id'], draft)
             if not final.strip():
                 raise RuntimeError('作業の返事が空でした')
             state.publish(job_id, 'result', final[:3000], result=final, state='completed', current_tool=None, waiting_for=None)
@@ -468,6 +480,7 @@ async def run(row):
                 logger.exception('parallel job error delivery failed %s', job_id)
             await asyncio.to_thread(mark_status, job_id, 'failed')
     finally:
+        _drafts.pop(job_id, None)
         _kill(job_id)
         work_locks.release_owner(owner)
         if job_mcp:
