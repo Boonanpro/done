@@ -282,10 +282,18 @@ def tool_definitions() -> list[types.Tool]:
               "wavを部屋の素材として登録し asset_id と長さを返す→add_audioで置く。textは表示用の正しい表記で書き、"
               "読み間違いそうな語は readings={'車検証':'しゃけんしょう'} で読みを指定（既定辞書あり）。voice省略=owner。",
               {"text": _STR, "voice": _STR, "readings": {"type": "object"}, "name": _STR}, ["text"]),
-        _tool("auto_captions", "全文字幕: segments=[{t0,t1,text}] に『その範囲で話している正確な台本』を渡すと、"
-              "発話の単語時刻に合わせて24文字以下に分割した字幕クリップを置く（範囲内の既存字幕は置き換え）。"
-              "台本はテロップに出したい表記そのもの。合成音声や既存の計測に単語時刻があればwords=[開始秒,終了秒,文字]の配列で渡すと再文字起こしなしで配置する。時刻はタイムライン基準。文節で区切る。words省略時は音声を文字起こしする。",
+        _tool("auto_captions", "全文字幕: segments=[{t0,t1,text}] に『その範囲で話している正確な台本』（句読点つき）を渡すと、"
+              "発話の単語時刻に合わせた字幕クリップを置く。区切りは自分で決めて | で1枚ずつ渡す（意味のまとまりで、"
+              "1枚だけで読める所で切る。1行 max_chars 字（既定16）以下）。| を省いた所は道具が文節で自動に区切るが、"
+              "手で区切るより質が落ちる。返る warnings（長すぎる札・句の途中の切れ目）は直して置き直す。"
+              "各字幕は声の出だしで出て、短い間ではつながったまま次へ替わる（範囲内の既存字幕は置き換え）。"
+              "台本の中で決め言葉を <key>…</key>、否定の言葉を <neg>…</neg> で囲むと、その言葉は1枚に分かれ、"
+              "key=黄色の極太・neg=赤の極太・どちらも普通の字幕より少し大きく出る（styles={key:{…},neg:{…}} で上書き）。"
+              "| はそこで必ず区切る。max_lines=2 で2行まで。"
+              "台本はテロップに出したい表記そのもの。合成音声や既存の計測に単語時刻があればwords=[開始秒,終了秒,文字]の配列で渡すと再文字起こしなしで配置する。時刻はタイムライン基準。words省略時は音声を文字起こしする。",
               {"segments": {"type": "array", "items": {"type": "object"}}, "style": {"type": "object", "properties": {"font": _CAPTION_STYLE['properties']['font']}},
+               "styles": {"type": "object", "description": "強調の種類ごとの見た目 {key:{font,color,fontSize,…}, neg:{…}}"},
+               "max_chars": _NUM, "max_lines": _NUM,
                "replace": {"type": "boolean"}, "words": {"type":"array","items":{"type":"array"}}}, ["segments"]),
         _tool("watch_render", "指定範囲を『合成後の完成映像として』書き出してGeminiに視聴させる（ぼかし・枠・字幕・重ね全部込み、音声込み）。"
               "watch_videoは素材だけを見るが、こちらは視聴者が見るものそのもの。仕上がり検品に使う。1分の範囲で約1〜2分。",
@@ -604,7 +612,9 @@ async def _dispatch(name: str, a: dict) -> list:
         segs = [s for s in (a.get("segments") or []) if isinstance(s, dict)]
         res = _auto_captions(draft, seq, assets, segs,
                              a.get("style") if isinstance(a.get("style"), dict) else None,
-                             bool(a.get("replace", True)), a.get('words'))
+                             bool(a.get("replace", True)), a.get('words'),
+                             styles=a.get("styles") if isinstance(a.get("styles"), dict) else None,
+                             max_chars=a.get("max_chars"), max_lines=int(a.get("max_lines") or 1))
         return _ok(res)
 
     # ---- mutating commands on the draft ----
@@ -1207,13 +1217,15 @@ def _append_clips(draft: dict, seq: dict, assets: dict, a: dict) -> dict:
             "skipped": skipped[:20], "skipped_count": len(skipped)}
 
 
-def _auto_captions(draft: dict, seq: dict, assets: dict, segments: list, style: dict | None, replace: bool, words=None) -> dict:
+def _auto_captions(draft: dict, seq: dict, assets: dict, segments: list, style: dict | None, replace: bool, words=None,
+                   styles: dict | None = None, max_chars=None, max_lines: int = 1) -> dict:
     from app.services import timeline_captions as cap
 
     if not segments:
         return {"ok": False, "error": "segments=[{t0,t1,text}] が必要"}
     work = _room_dir() / "drafts" / f"cap_{draft['draft_id']}"
-    res = cap.auto_captions(seq, assets, work, segments, style=style, replace=replace, words=words)
+    res = cap.auto_captions(seq, assets, work, segments, style=style, replace=replace, words=words,
+                            styles=styles, max_chars=max_chars, max_lines=max_lines)
     if not res.get("ok"):
         return res
     draft.setdefault("log", []).append({"t": time.time(), "tool": "auto_captions", "args": {"segments": len(segments)}})
@@ -1221,11 +1233,14 @@ def _auto_captions(draft: dict, seq: dict, assets: dict, segments: list, style: 
     notes = []
     st = res.get("style")
     for sp in res.get("specs") or []:
-        n = _ensure_caption_png(sp["text"], st if isinstance(st, dict) else None)
+        sst = sp.get("style") if isinstance(sp.get("style"), dict) else st
+        n = _ensure_caption_png(sp["text"], sst if isinstance(sst, dict) else None)
         if n and n not in notes:
             notes.append(n)
     out = {"ok": True, "captions": res["captions"], "words_heard": res["words"],
-           "placed": [{"start": s["start"], "end": s["end"], "text": s["text"]} for s in res.get("specs") or []]}
+           **({"warnings": res["warnings"]} if res.get("warnings") else {}),
+           "placed": [{"start": s["start"], "end": s["end"], "text": s["text"], **({"kind": s["kind"]} if s.get("kind") not in (None, "normal") else {})}
+                      for s in res.get("specs") or []]}
     if notes:
         out["note"] = notes[0]
     return out
