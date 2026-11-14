@@ -342,14 +342,18 @@ def publish_checkpoint(room_id: str, draft_id: str) -> dict[str, Any]:
         return {'ok': True, 'published': False}
     if sequence_hash(draft['sequence']) == draft['base_hash']:
         return {'ok': True, 'published': False}
+    baseline = set(draft.get('baseline_problems', []))
+    result = commit_draft(room_id, draft_id,
+        lambda seq, room: [x for x in _sequence_problems(room, seq) if x not in baseline],
+        checkpoint=True)
+    return {**result, 'published': result['ok']}
+
+
+def _sequence_problems(room_id: str, seq: dict[str, Any]) -> list[str]:
     from app.services import timeline_commands as tc
     p = _room_dir(room_id) / 'assets.json'
     assets = {str(a['id']): a for a in json.loads(p.read_text(encoding='utf-8'))} if p.exists() else {}
-    baseline = set(draft.get('baseline_problems', []))
-    result = commit_draft(room_id, draft_id,
-        lambda seq, room: [x for x in tc.validate_sequence(seq, assets, asset_dir=str(_room_dir(room))) if x not in baseline],
-        checkpoint=True)
-    return {**result, 'published': result['ok']}
+    return tc.validate_sequence(seq, assets, asset_dir=str(_room_dir(room_id)))
 
 
 def refresh_checkpoint(room_id: str, draft_id: str) -> bool:
@@ -368,6 +372,13 @@ def refresh_checkpoint(room_id: str, draft_id: str) -> bool:
         draft['base_sequence'] = json.loads(json.dumps(live))
         draft['base_hash'] = sequence_hash(live)
         draft['published_sequence'] = json.loads(json.dumps(live))
+        # 人が保存した時点の問題（同じ段に効果音を重ねた等）は人の判断。それを理由に
+        # 次のAIの編集の反映を止めない（止めると手編集と下書きが重なって編集が詰まる）
+        try:
+            draft['baseline_problems'] = sorted(set(draft.get('baseline_problems') or [])
+                                                | set(_sequence_problems(room_id, live)))
+        except Exception:  # noqa: BLE001 — 検証の失敗で人の保存の取り込みを止めない
+            pass
         save_draft(draft)
     return True
 
