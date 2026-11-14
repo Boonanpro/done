@@ -205,6 +205,12 @@ def create_draft(room_id: str, content_id: str, job_id: str = "") -> dict[str, A
             "generated_asset_ids": [],
             "log": [],
         }
+    # 作った時点でタイムラインが抱えている問題（人が同じ段に効果音を重ねた等）は
+    # 人の判断。それを理由にこの下書きのAIの編集の反映を止めない
+    try:
+        draft["baseline_problems"] = sorted(set(_sequence_problems(room_id, draft["sequence"])))
+    except Exception:  # noqa: BLE001 — 検証の失敗で下書きの作成を止めない
+        pass
     p = draft_path(room_id, draft["draft_id"])
     p.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
     return draft
