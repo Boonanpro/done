@@ -26,7 +26,7 @@ description: "Create a new video draft in the Dan editor; specific edits use tim
 | 絵を置く | `add_clip`（任意レーン・speed・position）, `append_clip`, `insert_freeze`, `import_image`, `generate_image` |
 | 枠・ぼかし | `add_region`（style=frame/gaussian/mosaic/marker/spotlight, keys で追従）, `set_region` |
 | 声 | `generate_speech`（本人の複製声。読みは readings で指定）→ `add_audio(role='narration')` |
-| 字幕 | `auto_captions(segments=[{t0,t1,text}])`（正確な台本を渡す。発話時刻に整列） |
+| 字幕 | `auto_captions(segments=[{t0,t1,text}])`（句読点つきの正確な台本を、1枚ずつ `|` で区切って渡す。区切りは1枚だけで読める意味のまとまりで、1行16字以下。決め言葉は `<key>…</key>`、否定は `<neg>…</neg>` で囲むと色と書体が変わる。時刻は道具が声の出だしに合わせる。返る warnings は直して置き直す） |
 | 部分修正 | `split_clip` → `set_clip_props`（差し替え・位置・速度・音量） / `trim_clip` / `move_clip` / `remove_clip` |
 | 目 | `render_frame(ts=[...])`（合成後の静止画）, `watch_render(t0,t1)`（合成後の映像をGeminiが視聴＝検品） |
 | 検証 | `validate_draft`（空になるまで） |
