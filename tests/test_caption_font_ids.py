@@ -64,3 +64,54 @@ def test_auto_captions_rejects_unknown_font_before_replacing(tmp_path):
                           words=[[1.0, 2.5, 'こんにちは']])
     assert not r['ok'] and 'noto-sans' in r['error']
     assert seq == before  # existing caption in the range was not removed
+
+
+# The three looks the owner asked for (2026-11-14): refined gothic, red box + white Mincho,
+# red slanted heavy gothic. Each must pass add_caption / set_clip / set_clip_props intact.
+LOOKS = {
+    'plain': {'font': 'hiragino-w6', 'color': '#ffffff', 'outlineColor': '#000000', 'outlineWidth': 1.1,
+              'shadow': {'color': 'rgba(0,0,0,0.45)', 'blur': 6, 'dx': 0, 'dy': 3}},
+    'red_box': {'font': 'toppan-mincho', 'color': '#ffffff', 'outlineWidth': 0,
+                'bg': {'color': '#d0121b', 'opacity': 1, 'radius': 0, 'padX': 0.4, 'padY': 0.14}},
+    'red_slant': {'font': 'noto-sans', 'color': '#e5121f', 'outlineColor': '#ffffff', 'outlineWidth': 2.4,
+                  'skew': -9, 'fontSize': 1.9},
+}
+
+
+@pytest.mark.parametrize('name', sorted(LOOKS))
+def test_caption_looks_pass_every_entry(name):
+    look = LOOKS[name]
+    seq = _seq()
+    r = tc.add_caption(seq, text='勉強より先に事業を始めてください', timeline_start=5, timeline_end=7, style=look)
+    assert r['ok'], r
+    assert tc._find_clip(seq, r['clip_id'])[2]['style'] == look
+    assert tc.set_clip(seq, clip_id='cap1', style=look)['ok']
+    assert tc._find_clip(seq, 'cap1')[2]['style'] == {**_seq()['tracks'][1]['clips'][0]['style'], **look}
+    seq2 = _seq()
+    assert tc.set_clip_props(seq2, {}, clip_id='cap1', props={'style': look})['ok']
+    assert tc._find_clip(seq2, 'cap1')[2]['style']['font'] == look['font']
+
+
+def test_caption_style_clamps_and_rejects_bad_nested():
+    seq = _seq()
+    assert tc.set_clip(seq, clip_id='cap1', style={'skew': -80})['ok']
+    assert tc._find_clip(seq, 'cap1')[2]['style']['skew'] == -30
+    before = copy.deepcopy(seq)
+    for bad in ({'bg': {'colour': '#000'}}, {'bg': {'opacity': 'x'}}, {'shadow': 'big'}, {'skew': 'x'},
+                {'bg': {'opacity': float('nan')}}):
+        assert not tc.set_clip(seq, clip_id='cap1', style=bad)['ok'], bad
+    assert seq == before
+    # null removes the box / slant
+    assert tc.set_clip(seq, clip_id='cap1', style={'bg': {'color': '#000'}})['ok']
+    assert tc.set_clip(seq, clip_id='cap1', style={'bg': None, 'skew': None})['ok']
+    st = tc._find_clip(seq, 'cap1')[2]['style']
+    assert 'bg' not in st and 'skew' not in st
+
+
+def test_mcp_caption_schema_accepts_the_looks():
+    jsonschema = pytest.importorskip('jsonschema')
+    from app import timeline_mcp_server as srv
+    for look in LOOKS.values():
+        jsonschema.validate(look, srv._CAPTION_STYLE)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({'font': 'Hiragino Sans'}, srv._CAPTION_STYLE)

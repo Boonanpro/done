@@ -132,12 +132,18 @@ _STR = {"type": "string"}
 
 
 _CAPTION_STYLE = {'type':'object','additionalProperties':False,'properties':{
-    'font':{'type':'string','enum':list(tc.CAPTION_FONT_IDS),'description':'字幕フォントのID。noto-sans(標準)/dela-gothic(極太)/zen-maru(角丸)/reggae/mplus-rounded(丸ポップ)/rocknroll/mincho(明朝)。省略でnoto-sans。'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
+    'font':{'type':'string','enum':list(tc.CAPTION_FONT_IDS),'description':'字幕フォントのID。noto-sans(源ノ角ゴシック。標準は極太900)/dela-gothic(極太)/zen-maru(角丸)/reggae/mplus-rounded(丸ポップ)/rocknroll/mincho(しっぽり明朝)/hiragino-w6・hiragino-w8(ヒラギノ角ゴ。普通の字幕を上品に)/toppan-mincho(凸版文久見出し明朝ExtraBold。赤箱に白明朝など)。省略でnoto-sans。'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
     'color':{'type':'string'},'outlineColor':{'type':'string'},'outlineWidth':{'type':'number'},
     'maxWidth':{'type':'number','description':'画面幅に対する比率。'},
     'textAlign':{'type':'string','enum':['left','center','right']},
     'x':{'type':'number','description':'中央からの横移動量。0が中央、正は右。画面幅に対する比率。'},
-    'y':{'type':'number','description':'画面下端から上方向への位置。既定0.08が通常の下中央。0.5は中央付近、0.85は上部。画像の左上基準座標とは異なる。'}
+    'y':{'type':'number','description':'画面下端から上方向への位置。既定0.08が通常の下中央。0.5は中央付近、0.85は上部。画像の左上基準座標とは異なる。'},
+    'bg':{'type':'object','additionalProperties':False,'description':'文字の後ろの箱。外す時はopacity:0。radius/padX/padYは文字の大きさに対する比率。',
+          'properties':{'color':{'type':'string'},'opacity':{'type':'number'},'radius':{'type':'number'},'padX':{'type':'number'},'padY':{'type':'number'}}},
+    'shadow':{'type':'object','additionalProperties':False,'description':'字幕全体の影(px)。外す時はblur:0,dx:0,dy:0。',
+              'properties':{'color':{'type':'string'},'blur':{'type':'number'},'dx':{'type':'number'},'dy':{'type':'number'}}},
+    'skew':{'type':'number','description':'箱ごと斜めにする角度(度)。負で上が右へ傾く(-9で赤の強調の斜め)。±30まで。0でまっすぐ。'},
+    'letterSpacing':{'type':'number','description':'字間。文字の大きさに対する比率(0.02で少し広げる)。'}
 }}
 
 @app.list_tools()
