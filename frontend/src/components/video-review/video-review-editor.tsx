@@ -3145,6 +3145,7 @@ export function VideoReviewEditor({
   // 写しは元のクリップの中身を全部持ち（字幕の文字・書体、場面、音量、切り抜き…）、新しい id と、
   // A/V の組なら組ごとの新しい link_id を付ける。置く段は元の段のまま（Premiere・DaVinci と同じ）。
   // 置いた所で同じ段の別クリップと重なれば、動かした時と同じ上書き（commitMovedSet）で切り詰める。
+  const [hasClipClipboard, setHasClipClipboard] = useState(false);
   const clipClipboardRef = useRef<{ clips: Array<{ clip: SequenceClip; trackId: string; trackType: string; zone: 'visual' | 'audio'; layer: number }>; annotations: ReviewAnnotation[]; origin: number; end: number } | null>(null);
 
   // 選んでいる物（A/V リンクが入っていれば相方も）を、段の情報つきで集める。
@@ -3212,9 +3213,9 @@ export function VideoReviewEditor({
           timeline_start: r(Math.max(0, item.clip.timeline_start + shift)),
           timeline_end: r(Math.max(0, item.clip.timeline_start + shift) + (item.clip.timeline_end - item.clip.timeline_start)),
           layer: item.layer,
-          locked: false,
         };
         if (!item.clip.link_id) delete copy.link_id;
+        if (copy.locked) copy.locked = false;
         let target = tracks.find((t) => t.id === item.trackId);
         if (!target) target = tracks.find((t) => t.type === item.trackType);
         if (!target) { target = { id: `${item.trackType}_${makeId()}`, type: item.trackType, clips: [] }; tracks.push(target); }
@@ -3264,6 +3265,7 @@ export function VideoReviewEditor({
     const got = gatherSelectionForCopy();
     if (!got) return false;
     clipClipboardRef.current = got;
+    setHasClipClipboard(true);
     return true;
   }, [gatherSelectionForCopy]);
 
@@ -3343,8 +3345,19 @@ export function VideoReviewEditor({
       const pEnd = Number(pf.timeline_end ?? partner.timeline_end);
       const lanes = computeClipLanes(snap.tracks || []);
       const pLane = lanes.get(String(partner.id)) || { zone: 'visual' as const, layer: partner.layer ?? 0 };
+      // 引きずったクリップが自分の段で上書きする相手が A/V の組なら、その相方も上書きしてよい
+      // （映像だけ切り詰めて声が残り、相方の声と2つ重なって鳴るのを防ぐ。Alt で引きずる複製で
+      // 元の組に重ねた時も同じ）。
+      const dLane = laneKeyOf(lanes, draggedId, fields.layer ?? undefined);
+      const dStart2 = Number(fields.timeline_start ?? original.timeline_start);
+      const dEnd2 = Number(fields.timeline_end ?? original.timeline_end);
+      const overwrittenLinks = new Set(allOrig
+        .filter((c) => c.id !== draggedId && c.id !== partner.id && c.link_id && laneKeyOf(lanes, c.id) === dLane &&
+          dEnd2 > c.timeline_start + 0.001 && dStart2 < c.timeline_end - 0.001)
+        .map((c) => c.link_id as string));
       const overlapsAt = (L: number) => allOrig.some((c) => {
         const cl = lanes.get(String(c.id));
+        if (L === pLane.layer && c.link_id && overwrittenLinks.has(c.link_id)) return false;
         return c.id !== partner.id && !moved.has(c.id) && cl?.zone === pLane.zone && cl.layer === L &&
           pEnd > c.timeline_start + 0.001 && pStart < c.timeline_end - 0.001;
       });
@@ -3702,7 +3715,10 @@ export function VideoReviewEditor({
       // A right-DRAG is a range-select (marquee) — don't open the menu.
       if (rightDragRef.current) return;
       const hit = laneClipLookup.get(id);
-      if (hit && hit.itemType === 'video' && hit.clip.asset_id) setClipMenu({ x: event.clientX, y: event.clientY, clip: hit.clip });
+      if (!hit) return;
+      // 右クリックしたクリップが選択に入っていなければ、そのクリップだけを選ぶ（メニューはそれに効く）
+      if (!selectedSequenceClipIds.includes(id)) selectSequenceClip(id);
+      setClipMenu({ x: event.clientX, y: event.clientY, clip: hit.clip });
     },
     focusClip: (id) => {
       const hit = laneClipLookup.get(id);
@@ -3970,11 +3986,27 @@ export function VideoReviewEditor({
         <>
           <div className="fixed inset-0 z-50" onClick={() => setClipMenu(null)} onContextMenu={(e) => { e.preventDefault(); setClipMenu(null); }} />
           <div className="fixed z-[51] min-w-[180px] rounded-md border border-border bg-popover py-1 text-sm shadow-lg"
-            style={{ left: Math.min(clipMenu.x, window.innerWidth - 200), top: Math.min(clipMenu.y, window.innerHeight - 80) }}>
-            <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-muted"
-              onClick={() => { const c = clipMenu.clip; setClipMenu(null); insertFreezeRipple(c); }}>
-              ⏸ ここを静止画にする（5秒・以降をずらす）
-            </button>
+            style={{ left: Math.min(clipMenu.x, window.innerWidth - 220), top: Math.min(clipMenu.y, window.innerHeight - 220) }}>
+            {[
+              { label: 'コピー', key: 'Ctrl+C', run: () => { copySelectedClips(); } },
+              { label: '切り取り', key: 'Ctrl+X', run: () => { if (copySelectedClips()) deleteSelected(); } },
+              { label: '複製（すぐ後ろに）', key: 'Ctrl+D', run: () => duplicateSelectedClips() },
+              ...(hasClipClipboard ? [{ label: '再生位置に貼り付け', key: 'Ctrl+V', run: () => pasteClips() }] : []),
+            ].map((item) => (
+              <button key={item.label} type="button" className="flex w-full items-center justify-between gap-4 px-3 py-1.5 text-left hover:bg-muted"
+                onClick={() => { setClipMenu(null); item.run(); }}>
+                <span>{item.label}</span><span className="text-[11px] text-muted-foreground">{item.key}</span>
+              </button>
+            ))}
+            {clipMenu.clip.asset_id && laneClipLookup.get(clipMenu.clip.id)?.itemType === 'video' ? (
+              <>
+                <div className="my-1 border-t border-border" />
+                <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-muted"
+                  onClick={() => { const c = clipMenu.clip; setClipMenu(null); insertFreezeRipple(c); }}>
+                  ⏸ ここを静止画にする（5秒・以降をずらす）
+                </button>
+              </>
+            ) : null}
           </div>
         </>
       ) : null}
