@@ -98,6 +98,61 @@ def project_version(project):
     return next(iter(pins), VERSION)
 
 
+def _npx_cli(node):
+    """npm's npx entry beside node: Windows keeps it next to node.exe, Homebrew under lib/."""
+    candidates = []
+    for base in dict.fromkeys([Path(node).parent, Path(node).resolve().parent]):
+        candidates += [base / 'node_modules/npm/bin/npx-cli.js', base.parent / 'lib/node_modules/npm/bin/npx-cli.js']
+    return next((c for c in candidates if c.is_file()), None)
+
+
+def _npx_caches():
+    caches = [Path.home() / '.npm/_npx']
+    if os.environ.get('npm_config_cache'):
+        caches.insert(0, Path(os.environ['npm_config_cache']) / '_npx')
+    if os.environ.get('LOCALAPPDATA'):
+        caches.append(Path(os.environ['LOCALAPPDATA']) / 'npm-cache/_npx')
+    caches.append(Path.home() / 'AppData/Local/npm-cache/_npx')
+    return list(dict.fromkeys(caches))
+
+
+def hyperframes_command(version):
+    node = shutil.which('node')
+    if not node:
+        raise RuntimeError('Node.js is unavailable')
+    # Use the verified installed CLI directly. npm otherwise rechecks its registry
+    # on every edit, which can stall inside a production worker's environment.
+    for cache in _npx_caches():
+        for package in cache.glob('*/node_modules/hyperframes/package.json'):
+            try:
+                if json.loads(package.read_text(encoding='utf-8')).get('version') == version:
+                    entry = package.parent / 'bin/hyperframes.mjs'
+                    if entry.is_file():
+                        return [node, str(entry)]
+            except (OSError, ValueError):
+                continue
+    npx = _npx_cli(node)
+    if npx:
+        return [node, str(npx), '--yes', 'hyperframes@' + version]
+    npx = shutil.which('npx')
+    if npx:
+        return [npx, '--yes', 'hyperframes@' + version]
+    raise RuntimeError('npm npx is unavailable')
+
+
+def composition_seconds(project):
+    html = (Path(project) / 'index.html').read_text(encoding='utf-8', errors='replace')
+    match = re.search(r'data-composition-id="main"[^>]*?data-duration="([\d.]+)"', html) or re.search(r'data-duration="([\d.]+)"', html)
+    try:
+        return float(match.group(1)) if match else 30.0
+    except ValueError:
+        return 30.0
+
+
+def render_workers():
+    return max(1, min(4, (os.cpu_count() or 2) // 3))
+
+
 def render(room_dir, project_dir, ffmpeg):
     source = Path(project_dir).resolve()
     revision = Path(room_dir) / 'motion-revisions' / uuid.uuid4().hex
@@ -106,33 +161,19 @@ def render(room_dir, project_dir, ffmpeg):
     manifest = {str(p.relative_to(revision)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in revision.rglob('*') if p.is_file()}
     source_hash = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
-    node = shutil.which('node')
-    if not node:
-        raise RuntimeError('Node.js is unavailable')
-    npx = Path(node).parent / 'node_modules/npm/bin/npx-cli.js'
-    if not npx.is_file():
-        raise RuntimeError('npm npx-cli.js is unavailable')
+    command = hyperframes_command(version)
     env = os.environ.copy()
-    # Use the verified installed CLI directly. npm otherwise rechecks its registry
-    # on every edit, which can stall inside a production worker's environment.
-    command = [node, str(npx), '--yes', 'hyperframes@' + version]
-    cache = Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) / 'npm-cache/_npx'
-    for package in cache.glob('*/node_modules/hyperframes/package.json'):
-        try:
-            if json.loads(package.read_text(encoding='utf-8')).get('version') == version:
-                entry = package.parent / 'bin/hyperframes.mjs'
-                if entry.is_file():
-                    command = [node, str(entry)]
-                    break
-        except (OSError, ValueError):
-            continue
     env['PATH'] = str(Path(ffmpeg).parent) + os.pathsep + env.get('PATH', '')
     started = time.monotonic()
-    for stage, args in [('check', ['check']), ('render', ['render', '--workers', '1', '--quality', 'high', '-o', 'renders/video.mp4'])]:
+    seconds = composition_seconds(revision)
+    workers = render_workers()
+    # Rendering time grows with length; a fixed limit killed ordinary 18-second works.
+    timeout = int(180 + seconds * 30)
+    for stage, args in [('check', ['check']), ('render', ['render', '--workers', str(workers), '--quality', 'high', '-o', 'renders/video.mp4'])]:
         log = revision / (stage + '.log')
         with log.open('w', encoding='utf-8') as output:
             result = subprocess.run([*command, *args], cwd=revision,
-                                    env=env, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, timeout=180,
+                                    env=env, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, timeout=timeout,
                                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         if result.returncode:
             raise RuntimeError(f'{stage} failed: {log}\n' + log.read_text(encoding='utf-8')[-5000:])
