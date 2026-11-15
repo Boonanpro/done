@@ -59,7 +59,7 @@ async def main(mode):
                 return {'fixture':fn, 'accepted': fn == 'start_work'}
             R.run_function = fixture
             async def draw(*a):
-                return {'action':'replace','caption':'試験の図','program':'root = Flow([{id: "a", label: "きっぷ", icon: "ticket"}, {id: "b", label: "改札", icon: "gate"}])'}, {}
+                return {'action':'replace','caption':'試験の図','program':'root = Steps(["きっぷを買う", "改札を通る"])'}, {}
             d = S.Dialogue()
             p = P.Prefetch('test-user', record, **({'room_id':'fixture'} if mode != 'baseline' else {}))
             d.prefetch = p

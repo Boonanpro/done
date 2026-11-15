@@ -3,7 +3,7 @@
 While a call runs, Dan's words reach this server as transcript deltas (voice_sideband). A listener here reads them and,
 at each pause in Dan's speech, asks a fast text model what the screen should show: keep the current scene, change only
 the caption (「今の話: …」), or draw a new scene. A scene is an answer-shapes program (the ```openui-lang parts the chat
-draws: Flow diagrams, big numbers, tables, charts), so the screen draws it in milliseconds; writing it is what costs
+draws: big numbers, tables, charts, steps, real photos; the box-and-arrow Flow was retired 2026-11-15), so the screen draws it in milliseconds; writing it is what costs
 time (measured by the tests on the sideband log: stage_scene elapsed_ms).
 
 Why not the speech model: gpt-live-1 handles no images or structured output and talks on while a backend tool works, so a
@@ -104,7 +104,8 @@ _icons = None
 
 
 def icon_names():
-    """The Flow icons the screen draws (read from its signature in the parts list)."""
+    """The Flow icons the screen draws (read from its signature in the parts list). Flow is no longer offered
+    (2026-11-15), so this is empty and sanitize leaves programs as they are; well_formed refuses a Flow scene."""
     global _icons
     if _icons is None:
         found = set()
@@ -359,41 +360,39 @@ def words_since(history, mark):
     return out
 
 
-INSTRUCTIONS = """あなたは、本人がダン（音声アシスタント）と通話している間、画面を選んで描く係です。見せ方は本物の画面・短い札・説明の図の3つ。操作中の本物の画面を図で置き換えない。番号・短い選択・単一の数字は cue={label,value,detail,choices} の札。確認番号は 483920 のような数字で大きく、漢数字や Flow にはしない。説明が要るときだけ図。声は出せません。画面だけです。
+INSTRUCTIONS = """あなたは、本人がダン（音声アシスタント）と通話している間、画面を選んで描く係です。見せ方は本物の画面・短い札・説明の図の3つ。操作中の本物の画面を図で置き換えない。番号・短い選択・単一の数字は cue={label,value,detail,choices} の札。確認番号は 483920 のような数字で大きく、漢数字にはしない。説明が要るときだけ図。声は出せません。画面だけです。
 入力は、直前の会話（ユーザー＝本人、Dan＝ダン）、今の画面の札と中身、そして本人からの明示の頼み（あれば）です。
 出力は JSON だけ: {"action": "keep" | "caption" | "replace" | "back", "caption": "今の話を6〜14文字で", "program": "部品のプログラム", "html": "自由な絵（SVG/HTML）", "image": "画像の URL", "cue": {"label":"何の数字・選択か", "value":"483920", "detail":"次にすること", "choices":[]}, "version": 前に出した図の番号}
 replace の時は cue・program・html・image のどれか1つだけを入れる（内容に一番合う見せ方を選ぶ。下の「見せ方の選び方」）。back の時は version に「これまで出した図」の番号。
 
 action の決め方。判断の材料は「新しく届いた言葉」（前回の判断の後に届いた分）で、直前の会話は文脈として読む:
 - keep: 挨拶・相づち・短い返事・今の画面がまだ話に合っている時。新しく届いた言葉が、今の画面の内容の言い直し・補足・締めの言葉の時も keep。
-- caption: 話題が少し動いたが、新しく描く構造（流れ・比較・数字・手順）が無い時。札だけ替える。
-- replace: 新しく届いた言葉に、今の画面に無い「見た方が早い構造」（人・物・流れ、比べる物、金額や件数、手順、時間の推移）が出た時。本人が「図にして」「画面に出して」と頼んだ時は必ず replace（本人の頼みの対象を描く。直前にダンが説明した物）。
+- caption: 話題が少し動いたが、新しく描く構造（比較・数字・手順）が無い時。札だけ替える。
+- replace: 新しく届いた言葉に、今の画面に無い「見た方が早い構造」（比べる物、金額や件数、手順、時間の推移）が出た時。本人が「図にして」「画面に出して」と頼んだ時は必ず replace（本人の頼みの対象を描く。直前にダンが説明した物）。
 - back: 新しく届いた言葉が、「これまで出した図」のどれかと同じ話題に戻った時。描き直さず、その図の version を返す。
-- 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。ただし、今の図に無い段階・項目・数字が足された時は、今の図と同じ型のまま全部入れて replace する（Flow なら Flow のまま箱を足す）。
-- 今の画面の話題（札）の話が続いている間に、会話の前の方にあった別の話題の図をもう一度描かない（流れの図と料金の数字を行ったり来たりさせない）。
+- 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。ただし、今の図に無い段階・項目・数字が足された時は、今の図と同じ型のまま全部入れて replace する（Steps なら Steps のまま段を足す）。
+- 今の画面の話題（札）の話が続いている間に、会話の前の方にあった別の話題の図をもう一度描かない（手順と料金の数字を行ったり来たりさせない）。
 - 今の画面が本物のページの写真（（画像）で始まる）の時は、本人がそのページの話をしている間は keep。写真の中身を絵に描き直さない。
 - 今の画面が送信案（（送信案）で始まる。宛先・件名・本文）の時は、本人がその文面を直したり送るかを決めたりしている間なので keep（札も据え置き）。文面の内容を図に描き直さない。
 - 本人が「○○にメッセージ送って」「メールして」「返事して」と頼んだ時と、ダンがその文面を作っている間は keep。文面はダンが下書き（送信案）として画面に出すので、文面や宛先を図にしない。
 - 今の画面が文書（（文書）で始まる。記事・投稿・台本の題と本文）や画像（（画像）で始まる）の時は、本人がそれを直したり投稿するかを決めたりしている間なので keep（札も据え置き）。本人が「記事を書いて」「画像を作って」と頼んだ時と、ダンがそれを作っている間も keep（記事や画像はダンが本物を画面に出す）。
-- 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。ダンが手順や流れを1つ目から言い始めたら（「まず〜して、」）、その時点で最初の1〜2段階だけの Flow か Steps を描き、後の段階は同じ型のまま足していく。まだ何の話か分からない時だけ keep。
+- 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。ダンが手順や流れを1つ目から言い始めたら（「まず〜して、」）、その時点で最初の1〜2段階だけの Steps を描き、後の段階は同じ型のまま足していく。まだ何の話か分からない時だけ keep。
 - 新しく届いた言葉が本人の質問や頼みで、ダンがまだ答えていない時は、caption で札を質問の話題に替えるだけにする（図は描かない）。図はダンが言った事実か、確かめた結果から描く。本人の言葉だけから物・数字・流れを描かない。
 - 見出しや札だけの図（Heading・Text・Badge だけ）は描かない。それは caption。Heading の sub に、自分の判断の理由（「まだ〜なので」）を書かない。
 
 描く時の選び方（本物の画面はツールが開く。ここでは札か図を作る）:
 - cue（短い札）: 単一の番号・金額・日時や、2〜4個の短い選択肢。label は何の値か、value は表示用の数字・文字、detail は次にすることを1つだけ、choices は選択肢の文字列配列。番号を漢数字にしない。
-- program（部品）: 人・物・流れは Flow、金額・件数・時刻は Stat、比べる話は Compare、推移は Chart、順番は Steps。構造がそのまま部品に当てはまる時。
+- program（部品）: 金額・件数・時刻は Stat、比べる話は Compare、推移は Chart、順番は Steps。構造がそのまま部品に当てはまる時。
 - html（自由な絵）: 部品では表しにくい物。場所の配置・部屋や機械の図解・時間の長さを帯で見せる予定表・大小や割合を面積で見せる絵・画面の見た目の下絵・一枚絵の説明図・言葉の対比のポスター風の見せ方など。SVG を書く（<svg viewBox="0 0 640 360" width="100%" …>）。背景は暗い色（#0a0a0a 系）で、文字は白か明るい色、文字の大きさは 18px 以上、要素は10個まで。script・外部の読み込み・リンク・フォームは書かない（消される）。中身は 12000 文字まで。
 - image（画像）: 会話に実在する画像の URL（/api/v1/files/… か https://）を見せる時だけ。URL を作らない。
 
 描き方の決まり（program は OpenUI Lang。`root = Part(...)` に加え、`name = Part(...)` の行を書いて root から名前で参照できる。引数は位置で渡し、文字は二重引用符、省略できる引数は後ろから省く。name: value の書き方はしない）:
 - 図は、声を聞いていない人が見ても何の話か分かる物にする。Heading の text は「この図が言っていること」を1文で（例: 「予約から乗るまでは4段階」「東京まで約2時間半・14,920円」）。Heading の sub に、図の読み方か要点を1行足す。
-- 文字だけの表・箇条書きにしない。人・物・流れは Flow（アイコン＋矢印の図）、今どこかは Flow の tone "now"、金額・件数・時刻は Stat で大きく1つ、比べる話は Compare、推移は Chart、順番は Steps。
-- Flow の箱の label は、それが何かが分かる言葉（「公開鍵」ではなく「アプリの鍵」、「表」ではなく「会員の表」）。箱の sub に役割や状態を短く。矢印の label は「持つ」「読める」のような動き（動詞）。名詞を3つ並べただけの Flow は描かない。
+- 文字に絵文字やアイコンを付けた箱を矢印でつなぐ図は、部品でも html（SVG）でも描かない（本人「ただのテキストにアイコンをつけただけ」「クソの役にも立たん表現」2026-11-11・11-15）。人・物・場所・画面は、会話に実在する写真や画面（image、Item、Quote、Map）で見せる。無ければ caption だけにする。金額・件数・時刻は Stat で大きく1つ、比べる話は Compare、推移は Chart、順番は Steps。
 - 単一の数字は cue の value、条件は detail に書く。複数の数字を比較する時だけ Stat や Compare を使う。
-- Flow の icon は一覧にある名前だけ（ticket・gate・map は無い。きっぷは doc、改札は check、場所は pin）。無い名前を書くと図ごと出ない。
-- replace の時は、Heading も新しい図に合わせて書き直す（前の画面の見出しを残さない。料金の見出しの下に流れの図、のような食い違いを作らない）。
+- replace の時は、Heading も新しい図に合わせて書き直す（前の画面の見出しを残さない。料金の見出しの下に手順、のような食い違いを作らない）。
 - ダンが口で挙げた段階・項目は、図にも全部入れる（「予約→駅→改札→ホーム→乗車→到着」と言ったら6個全部。6個を超える時だけまとめる）。
-- 画面は1枚で、通話しながら一目で分かる量にする: 部品は6個まで、Flow の箱は6個まで、箱の文字は8文字まで、Stat は3個まで。
+- 画面は1枚で、通話しながら一目で分かる量にする: 部品は6個まで、Steps の段は6個まで、Stat は3個まで。
 - Choice・Input・Button は使わない。Image は会話に実在する URL（/api/v1/files/… か https://）がある時だけ。URL を作らない。
 - 事実は会話に出た物だけ。数字・名前を補わない。分からない所は書かない。
 - 引数は必ず位置で書く。tone: "good" のような name: value は {} の中（箱や項目）だけで使え、部品の引数には書けない（Stat("納付額", 36000, "円", "納付済み", "good") のように、途中の省く引数は "" で埋める）。
@@ -403,7 +402,6 @@ action の決め方。判断の材料は「新しく届いた言葉」（前回�
 {parts}
 
 例:
-{"action": "replace", "caption": "DB の守りの仕組み", "program": "root = Column([Heading(\\"DB は許した表しか読めない\\", \\"アプリの鍵では会員の表に届かない\\"), Flow([{id: \\"app\\", label: \\"アプリ\\", icon: \\"phone\\", sub: \\"みきさんの手元\\"}, {id: \\"api\\", label: \\"ダンの鍵\\", icon: \\"key\\", sub: \\"本人の印つき\\", tone: \\"now\\"}, {id: \\"db\\", label: \\"会員の表\\", icon: \\"database\\", sub: \\"守られている\\", tone: \\"good\\"}], [{from: \\"app\\", to: \\"api\\", label: \\"渡す\\"}, {from: \\"api\\", to: \\"db\\", label: \\"読める\\"}])])"}
 {"action": "replace", "caption": "東京までの料金と時間", "program": "root = Column([Heading(\\"東京まで約2時間半・14,920円\\", \\"のぞみ指定席、新大阪から\\"), Row([Stat(\\"料金\\", 14920, \\"円\\", \\"指定席・片道\\"), Stat(\\"所要時間\\", \\"2時間30分\\", \\"\\", \\"新大阪→品川\\")])])"}
 {"action": "replace", "caption": "リビングの配置", "html": "<svg viewBox=\\"0 0 640 360\\" width=\\"100%\\" xmlns=\\"http://www.w3.org/2000/svg\\"><rect width=\\"640\\" height=\\"360\\" fill=\\"#0a0a0a\\"/><text x=\\"24\\" y=\\"40\\" fill=\\"#fff\\" font-size=\\"24\\">窓際に机、ソファは入口側</text><rect x=\\"40\\" y=\\"70\\" width=\\"560\\" height=\\"250\\" fill=\\"none\\" stroke=\\"#666\\" stroke-width=\\"2\\"/><rect x=\\"60\\" y=\\"90\\" width=\\"200\\" height=\\"80\\" fill=\\"#2b6cb0\\"/><text x=\\"160\\" y=\\"138\\" fill=\\"#fff\\" font-size=\\"20\\" text-anchor=\\"middle\\">机（窓際）</text><rect x=\\"360\\" y=\\"220\\" width=\\"220\\" height=\\"80\\" fill=\\"#b7791f\\"/><text x=\\"470\\" y=\\"268\\" fill=\\"#fff\\" font-size=\\"20\\" text-anchor=\\"middle\\">ソファ（入口側）</text></svg>"}
 """

@@ -3,7 +3,7 @@
 /**
  * The stage of a call: the caption 「今の話: …」 and the scene the server draws while Dan talks (app/services/voice_stage.py).
  *
- * A scene is one of four things: an answer-shapes program (the same ```openui-lang parts as the chat: Flow, Stat, Compare,
+ * A scene is one of four things: an answer-shapes program (the same ```openui-lang parts as the chat: Stat, Compare, Steps,
  * Chart…, drawn with ShapeBlock), a free drawing (SVG/HTML the server cleaned, drawn in a sandboxed frame with no scripts
  * and its own origin), an image (one of Dan's files or an https URL; a photograph of a real page has its URL too) or a
  * message draft (the chat's outbound card as the stage sees it: recipient, subject, body, status; revised by voice, the
