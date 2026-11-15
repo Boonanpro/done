@@ -173,6 +173,8 @@ def tool_definitions() -> list[types.Tool]:
         _tool('read_project_chat','必要なときだけ、この部屋の通常チャットの履歴を読む。',{'limit':_NUM}),
         _tool('conversation_history','この作品のユーザーとダン両方の発言を役割付きで読む。短い「それで」等が何への回答か確認できる。assistantの提案をuserの指定と混同しない。beforeを渡すと以前の会話を読める。通常チャットは混入しない。',{'limit':_NUM,'before':_NUM}),
         _tool('check_skill', '制作スキルを読む。name省略で利用可能なスキル一覧。', {'name': _STR}),
+        _tool("clip_history", "タイムラインを誰が（みきさんの手／どのダンの作業）・いつ・何を変えたかの記録を新しい順に読む。clip_idで1本に絞る。見覚えのない変更を見つけたら、本人に聞く前にこれで確かめる。",
+              {"clip_id": _STR, "limit": {"type": "integer"}}),
         _tool("timeline_outline", "タイムライン全体の構造（レーン/クリップ/時刻/種類）を読む。作業前に必ず一度読むこと。", {}),
         _tool("list_assets", "部屋のアセット一覧（asset_id/ファイル名/種類/長さ）。配置ツールに渡すasset_idはここで確認する。", {}),
         _tool("timeline_transcript", "動画の発話内容（文字起こし）をタイムライン時刻つきで読む。内容理解はこれを根拠にする。",
@@ -463,7 +465,17 @@ async def _dispatch(name: str, a: dict) -> list:
         return _ok({'skills': [{'name': s.name, 'description': s.description} for s in SkillRegistry.list_all()]})
 
     if name == "timeline_outline":
-        return [types.TextContent(type="text", text=tcx.timeline_outline(seq, assets))]
+        from app.services import timeline_authors
+        authors = timeline_authors.last_by(ROOM_ID, draft['content_id'])
+        text = tcx.timeline_outline(seq, assets, authors)
+        if authors:
+            text += ("\nlast_changed_by = そのクリップを最後に変えた人（みきさん＝本人が画面で手で直した / ダン（…）＝どのダンの作業か）。"
+                     "本人の手の変更は本人の意図なので、誰が動かしたかを本人に聞かず、戻さない。詳しくは clip_history。")
+        return [types.TextContent(type="text", text=text)]
+    if name == "clip_history":
+        from app.services import timeline_authors
+        return _ok(timeline_authors.history_text(ROOM_ID, draft['content_id'], a.get('clip_id') or None,
+                                                 int(a.get('limit') or 20)))
 
     if name == "list_assets":
         rows = []
@@ -605,7 +617,7 @@ async def _dispatch(name: str, a: dict) -> list:
         return _ok(_editor_state(seq, assets))
 
     if name == "clips_at":
-        return _ok({"ok": True, "t": float(a["t"]), "clips": tc.clips_at(seq, assets, t=float(a["t"]))})
+        return _ok({"ok": True, "t": float(a["t"]), "clips": _with_authors(tc.clips_at(seq, assets, t=float(a["t"])))})
 
     if name == "generate_speech":
         return _ok(_generate_speech(draft, str(a.get("text") or ""), str(a.get("voice") or "owner"),
@@ -1138,10 +1150,29 @@ def _editor_state(seq: dict, assets: dict) -> dict:
         out["note"] = f"エディタは別のコンテンツ({data.get('content_id')})を開いている。この作業対象は {CONTENT_ID}"
     try:
         t = float(data.get("playhead") or 0)
-        out["clips_under_playhead"] = tc.clips_at(seq, assets, t=t)
+        out["clips_under_playhead"] = _with_authors(tc.clips_at(seq, assets, t=t))
     except (TypeError, ValueError):
         pass
+    sel = [str(x.get("id")) for x in out.get("selected") or [] if isinstance(x, dict) and x.get("id")]
+    if sel:
+        from app.services import timeline_authors
+        last = timeline_authors.last_by(ROOM_ID, CONTENT_ID, sel)
+        out["selected_last_changed_by"] = {k: timeline_authors.short(v) for k, v in last.items()}
     return out
+
+
+def _with_authors(rows: list) -> list:
+    """Add who last changed each clip (みきさんの手 / どのダン), so Dan does not ask the owner who moved it."""
+    try:
+        from app.services import timeline_authors
+        last = timeline_authors.last_by(ROOM_ID, CONTENT_ID or _load().get('content_id', ''))
+    except Exception:  # noqa: BLE001
+        return rows
+    for r in rows:
+        e = last.get(str(r.get("clip_id")))
+        if e:
+            r["last_changed_by"] = timeline_authors.short(e)
+    return rows
 
 
 def _generate_speech(draft: dict, text: str, voice: str, readings: dict | None, name: str) -> dict:

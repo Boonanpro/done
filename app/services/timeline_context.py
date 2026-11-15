@@ -278,7 +278,8 @@ def render_timeline_frame(sequence: dict[str, Any], asset_dir: str, t: float,
     return res
 
 
-def timeline_outline(sequence: dict[str, Any], assets: dict[str, dict[str, Any]]) -> str:
+def timeline_outline(sequence: dict[str, Any], assets: dict[str, dict[str, Any]],
+                     authors: dict[str, dict[str, Any]] | None = None) -> str:
     """Compact human/LLM-readable structure of the timeline (per lane, per clip).
     Lanes are layers: index 0 = backmost, higher lanes draw in front; audio lanes are
     the only lane-level distinction. Clip kind comes from the clip's own fields."""
@@ -339,5 +340,9 @@ def timeline_outline(sequence: dict[str, Any], assets: dict[str, dict[str, Any]]
                 if c.get("link_id"):
                     what += " linked-av"
             aid_tag = f" asset_id={aid}" if aid else ""
-            lines.append(f"  {c.get('id')}: {ts:.2f}-{te:.2f} {what}{aid_tag}")
+            by = ""
+            if authors and str(c.get("id")) in authors:
+                from app.services.timeline_authors import short
+                by = f" last_changed_by=[{short(authors[str(c.get('id'))])}]"
+            lines.append(f"  {c.get('id')}: {ts:.2f}-{te:.2f} {what}{aid_tag}{by}")
     return "\n".join(lines)

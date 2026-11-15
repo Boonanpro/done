@@ -288,6 +288,12 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
             content['format'] = fmt
         _write_contents_raw(room_id, contents)
         _append_edit_feed(room_id, draft, before_seq)
+        # 誰がどのクリップを動かしたかを残す（2026-11-15 本人「誰が動かしたか分かるようにしないと」）
+        from app.services import timeline_authors
+        log = draft.get("log") or []
+        timeline_authors.record(room_id, draft["content_id"], before_seq, draft["sequence"],
+                                draft.get("actor") or timeline_authors.actor_for_job(draft.get("job_id")),
+                                tool=(log[-1] or {}).get("tool") if log else None)
     if checkpoint:
         draft['base_hash'] = sequence_hash(draft['sequence'])
         draft['published_sequence'] = json.loads(json.dumps(draft['sequence']))

@@ -219,4 +219,19 @@ def context_text(room_id: str, content_id: str | None = None) -> str:
     else:
         lines.append("- エディタは閉じている（最後に開いていたコンテンツを対象にする）")
     lines.append("- 『ここ』『これ』『この字幕』は上の再生位置・選択を指す。mcp__timeline__* で編集し、触るのは指示された箇所だけ。")
+    try:
+        from app.services import timeline_authors
+        cid = str(ctx.get("content_id") or "")
+        sel = [str(s.get("id")) for s in (ctx.get("selected") or []) if isinstance(s, dict) and s.get("id")]
+        if cid and sel:
+            last = timeline_authors.last_by(room_id, cid, sel)
+            if last:
+                lines.append("- 選択中クリップを最後に変えた人: " + "; ".join(
+                    f"{k} {timeline_authors.short(v)}" for k, v in last.items()))
+        mine = timeline_authors.owner_recent_text(room_id, cid) if cid else ""
+        if mine:
+            lines.append("")
+            lines.append(mine)
+    except Exception:  # noqa: BLE001 — the context block must not fail on the authors record
+        pass
     return "\n".join(lines)

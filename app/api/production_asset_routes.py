@@ -6555,6 +6555,19 @@ async def content_edit_feed(
             "updated_at": (content or {}).get("updated_at"), "now": _time.time()}
 
 
+@router.get("/contents/{content_id}/clip-authors")
+async def content_clip_authors(
+    content_id: str,
+    room_id: str = Query(...),
+    clip_ids: str = Query(""),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Who last changed each clip (みきさんの手 / ダン), when and what — for the editor's selected-clip panel."""
+    from app.services import timeline_authors
+    ids = [c for c in clip_ids.split(",") if c] or None
+    return {"clips": timeline_authors.last_by(room_id, content_id, ids)}
+
+
 @router.post("/contents", response_model=ProductionContent)
 async def create_content(
     data: CreateContentRequest,
@@ -6583,6 +6596,7 @@ async def create_content(
 async def update_content(
     content_id: str,
     data: SaveContentRequest,
+    request: Request,
     room_id: str = Query(...),
     current_user: TokenData = Depends(get_current_user),
 ):
@@ -6593,6 +6607,15 @@ async def update_content(
             if data.title is not None and data.title.strip():
                 content["title"] = data.title.strip()
             if data.timeline is not None:
+                # 画面からの保存はみきさんの手（2026-11-15 本人「誰が動かしたか分かるようにしないと」）。
+                # エディターは X-Timeline-Actor: owner を付けて送る。付いていない保存（台本・道具）は「画面の外」。
+                from app.services import timeline_authors
+                before_seq = ((content.get("timeline") or {}) if isinstance(content.get("timeline"), dict) else {}).get("sequence")
+                after_seq = data.timeline.get("sequence") if isinstance(data.timeline, dict) else None
+                if isinstance(after_seq, dict):
+                    actor = (timeline_authors.OWNER if (request.headers.get("x-timeline-actor") or "").lower() == "owner"
+                             else {"kind": "other", "label": "画面の外からの保存"})
+                    timeline_authors.record(room_id, content_id, before_seq, after_seq, actor)
                 content["timeline"] = data.timeline
             if data.asset_ids is not None:
                 content["asset_ids"] = data.asset_ids
