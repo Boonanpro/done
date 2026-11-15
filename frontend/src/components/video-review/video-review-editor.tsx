@@ -941,6 +941,12 @@ export function VideoReviewEditor({
   // the annotation overlay always maps to the full stage rect — no per-frame measuring.
   const videoContentStyle: CSSProperties = { inset: 0 };
   const [playing, setPlaying] = useState(false);
+  // 再生の速さ（2026-11-15 本人「L を押したら、音のピッチを変えずに倍速再生」）。L で 2倍→3倍→4倍、
+  // Space・再生ボタン・止めると等倍に戻る。音の高さはプレビューが保つ。
+  const [playRate, setPlayRate] = useState(1);
+  const playingNowRef = useRef(false);
+  playingNowRef.current = playing;
+  useEffect(() => { if (!playing) setPlayRate(1); }, [playing]);
   // Frame-step rate for ←/→ = the TIMELINE/output frame rate, NOT the source clip's declared fps.
   // Proxies are CFR 30 and the export renders at 30fps, so the timeline is effectively 30fps; one
   // arrow press should advance exactly one displayed/output frame. (Stepping at the source rate —
@@ -2377,7 +2383,21 @@ export function VideoReviewEditor({
       }
       if (event.code === 'Space') {
         event.preventDefault();
+        setPlayRate(1);
         setPlaying((p) => !p);
+        return;
+      }
+      // L: 倍速で再生（押すたびに 2倍→3倍→4倍）。K: 止める（Premiere と同じ）
+      if (!modKey && !event.altKey && (event.key === 'l' || event.key === 'L')) {
+        event.preventDefault();
+        const now = playingNowRef.current;
+        setPlayRate((r) => (now && r >= 2 ? Math.min(4, r + 1) : 2));
+        setPlaying(true);
+        return;
+      }
+      if (!modKey && !event.altKey && (event.key === 'k' || event.key === 'K')) {
+        event.preventDefault();
+        setPlaying(false);
         return;
       }
       // P: プレビューを全画面に／戻す（前のエディターと同じ。Esc でも戻る）
@@ -4319,8 +4339,14 @@ export function VideoReviewEditor({
                       const c = allSequenceClips.find((x) => x.id === clipId);
                       updateSequenceClip(clipId, { style: { ...((c?.style || {}) as Record<string, unknown>), x: nudge.x, y: nudge.y } } as Partial<SequenceClip>);
                     }}
+                    rate={playRate}
                   />
                 )}
+                {playing && playRate !== 1 ? (
+                  <div className="pointer-events-none absolute right-2 top-2 z-30 rounded bg-black/70 px-2 py-0.5 text-sm font-semibold text-white" data-testid="play-rate">
+                    {playRate}倍速
+                  </div>
+                ) : null}
                 {/* Browser only: in the desktop app the NATIVE engine composites the pop-out
                     (same clock = no drift, replaces the wipe). See project_production_native_rewrite_intent.
                     Two hidden videos (color + matte-as-luma, both HW-decoded H.264) are merged on
@@ -5457,8 +5483,8 @@ export function VideoReviewEditor({
                   size="sm"
                   className="h-7 w-7 p-0"
                   data-keep
-                  title={playing ? '一時停止 (Space)' : '再生 (Space)'}
-                  onClick={() => setPlaying((p) => !p)}
+                  title={playing ? '一時停止 (Space・K)' : '再生 (Space)・倍速 (L)'}
+                  onClick={() => { setPlayRate(1); setPlaying((p) => !p); }}
                 >
                   {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                 </Button>

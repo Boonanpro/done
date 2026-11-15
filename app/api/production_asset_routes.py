@@ -5522,13 +5522,52 @@ VIEW_COPY_CRF = 23
 
 
 def _needs_view_copy(asset: dict[str, Any]) -> bool:
+    """2026-11-15: 短い動画も、1280 より大きければ写しを作る。After Effects などで書き出した 1920×1080・
+    15Mbps・鍵のコマが1〜2秒おきの動画を、ダンが写し無しで登録していて、5段重ねた冒頭が再生できない
+    ほど重くなった（本人「まともに再生できんくらい重い」）。ダンが登録した素材（proxy 無し）も対象。"""
     if asset.get("kind") != "video":
         return False
-    proxy = asset.get("proxy_path")
-    if not proxy or not Path(str(proxy)).exists():
+    src = next((asset.get(k) for k in ("proxy_path", "local_path") if asset.get(k) and Path(str(asset.get(k))).is_file()), None)
+    if not src:
         return False
-    duration = float((asset.get("metadata") or {}).get("duration") or 0)
-    return duration >= VIEW_COPY_MIN_SECONDS or Path(str(proxy)).stat().st_size >= VIEW_COPY_MIN_PROXY_BYTES
+    meta = asset.get("metadata") or {}
+    duration = float(meta.get("duration") or 0)
+    long_side = max(int(meta.get("width") or 0), int(meta.get("height") or 0))
+    return (duration >= VIEW_COPY_MIN_SECONDS or long_side > VIEW_COPY_LONG_SIDE
+            or Path(str(src)).stat().st_size >= VIEW_COPY_MIN_PROXY_BYTES)
+
+
+_view_copy_running: set[str] = set()
+_view_copy_lock = threading.Lock()
+
+
+def _ensure_view_copies_bg(room_id: str, assets: list[dict[str, Any]]) -> None:
+    """写しが要るのにまだ無い動画の写しを、裏で1本ずつ作る（どの経路で登録された素材も、一覧を開いた時に拾う）。
+    できると view_url が付き、画面は次の読み直しからそちらで再生する。"""
+    todo = [a["id"] for a in assets if isinstance(a, dict) and a.get("id") and a.get("status") not in ("processing", "proxy_pending")
+            and not (a.get("view_error_at") and time.time() - float(a.get("view_error_at") or 0) < 86400)
+            and not a.get("view_path") and _needs_view_copy(a)]
+    with _view_copy_lock:
+        todo = [aid for aid in todo if aid not in _view_copy_running]
+        _view_copy_running.update(todo)
+    if not todo:
+        return
+
+    def run() -> None:
+        for aid in todo:
+            try:
+                _make_view_copy(room_id, aid)
+            except Exception:
+                logger.exception("view copy failed %s", aid)
+                try:
+                    _update_asset(room_id, aid, {"view_error_at": time.time()})
+                except Exception:
+                    pass
+            finally:
+                with _view_copy_lock:
+                    _view_copy_running.discard(aid)
+
+    threading.Thread(target=run, name=f"view-copy-{room_id[:8]}", daemon=True).start()
 
 
 def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path | None:
@@ -5596,7 +5635,12 @@ async def list_assets(
     room_id: str = Query(...),
     current_user: TokenData = Depends(get_current_user),
 ):
-    return [_coerce_asset_for_response(a) for a in _read_assets(room_id) if isinstance(a, dict)]
+    rows = [a for a in _read_assets(room_id) if isinstance(a, dict)]
+    try:
+        _ensure_view_copies_bg(room_id, rows)
+    except Exception:
+        logger.exception("view copy check failed")
+    return [_coerce_asset_for_response(a) for a in rows]
 
 
 @router.post("/register", response_model=ProductionAsset)
@@ -8610,6 +8654,103 @@ def library_stamp(room_id: str, current_user: TokenData = Depends(get_current_us
         except OSError:
             out[name.split(".")[0]] = 0
     return out
+
+
+# 作品の絵（2026-11-15 本人「ライブラリのサムネと中身が合っていない。中身を映して、変更に合わせて自動で更新して」）。
+# 前は作品に登録された素材の先頭の動画の絵を出していて、タイムラインに無い映像（赤い服の別の撮影）が出ていた。
+# ここでは、その作品のタイムラインの頭（最初に絵が出てから0.5秒の所）を、書き出しと同じ描き方で1コマ描く。
+# 描いた絵は「そのコマに効くクリップの中身」の指紋で覚えておき、そのコマに関わる編集をした時だけ描き直す。
+_cover_locks: dict[str, threading.Lock] = {}
+_cover_locks_guard = threading.Lock()
+
+
+def _cover_times(seq: dict[str, Any]) -> list[float]:
+    starts: list[float] = []
+    bottom: list[tuple[float, float]] = []
+    for i, track in enumerate(seq.get("tracks") or []):
+        if track.get("type") == "audio":
+            continue
+        for clip in track.get("clips") or []:
+            if not clip.get("asset_id"):
+                continue
+            a, z = float(clip.get("timeline_start") or 0), float(clip.get("timeline_end") or 0)
+            if z <= a:
+                continue
+            starts.append(a)
+            if i == 0:
+                bottom.append((a, z))
+    out: list[float] = []
+    if starts:
+        s = min(starts)
+        out.append(s + 0.5)
+    bottom.sort()
+    for a, z in bottom[:3]:
+        out.append(a + min(0.5, (z - a) / 2))
+    out.append(0.0)
+    seen: list[float] = []
+    for t in out:
+        if all(abs(t - x) > 1e-3 for x in seen):
+            seen.append(round(t, 3))
+    return seen
+
+
+def _content_cover(room_id: str, content_id: str) -> Path | None:
+    content = next((c for c in _read_contents(room_id) if c.get("id") == content_id), None)
+    seq = ((content or {}).get("timeline") or {}).get("sequence")
+    if not isinstance(seq, dict) or not seq.get("tracks"):
+        return None
+    from app.services import sequence_window
+
+    fps = _sequence_frame_rate(seq)
+    assets = _assets_by_id(room_id)
+    covers = _room_dir(room_id) / "covers"
+    safe = "".join(ch for ch in content_id if ch.isalnum() or ch in "-_")[:64]
+    with _cover_locks_guard:
+        lock = _cover_locks.setdefault(f"{room_id}/{safe}", threading.Lock())
+    with lock:
+        for t in _cover_times(seq):
+            k = sequence_window.frame_of(t, fps)
+            window = sequence_window.trim_sequence(seq, assets, k, k + 1, fps)
+            used = sorted({str(c.get("asset_id")) for tr in window.get("tracks") or [] for c in tr.get("clips") or [] if c.get("asset_id")})
+            files = [[aid, str((assets.get(aid) or {}).get("local_path") or ""), str((assets.get(aid) or {}).get("updated_at") or "")] for aid in used]
+            key = hashlib.sha1(json.dumps([t, window, files], sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()[:16]
+            dest = covers / f"{safe}_{key}.jpg"
+            if dest.exists():
+                return dest
+            covers.mkdir(parents=True, exist_ok=True)
+            res = sequence_window.render_frames(room_id, seq, [t], covers / "work")
+            if not res.get("ok"):
+                continue
+            raw = Path(res["paths"][0])
+            try:
+                from PIL import Image
+                with Image.open(raw) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((640, 640))
+                    tmp = covers / f"{safe}_{key}.tmp.jpg"
+                    im.save(tmp, "JPEG", quality=82)
+                    tmp.replace(dest)
+            finally:
+                raw.unlink(missing_ok=True)
+            for old in covers.glob(f"{safe}_*.jpg"):
+                if old != dest:
+                    old.unlink(missing_ok=True)
+            return dest
+    return None
+
+
+@router.get("/contents/{content_id}/cover")
+async def content_cover(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    """作品のタイムラインの頭の1コマ（JPEG）。中身が無い・描けない時は 404（画面は印を出す）。"""
+    _room_dir(room_id)  # 400 on malformed room_id
+    try:
+        path = await asyncio.get_running_loop().run_in_executor(None, _content_cover, room_id, content_id)
+    except Exception:
+        logger.exception("content cover failed %s", content_id)
+        path = None
+    if not path:
+        raise HTTPException(status_code=404, detail="no cover")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
 
 
 class EditorRoomRequest(BaseModel):

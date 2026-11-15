@@ -889,8 +889,6 @@ export function ProductionWorkspace({
           ) : (
             <ul className="px-2" aria-label="作品">
               {sortedContents.map((content) => {
-                const cover = assets.find((asset) => content.asset_ids.includes(asset.id) && asset.kind === 'video')
-                  || assets.find((asset) => content.asset_ids.includes(asset.id) && asset.kind === 'image');
                 return (
                   <li key={content.id} className="group relative">
                     <button
@@ -899,7 +897,7 @@ export function ProductionWorkspace({
                       className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left hover:bg-muted"
                     >
                       <span className="flex h-9 w-14 shrink-0 items-center justify-center overflow-hidden rounded bg-muted">
-                        {cover ? <AssetThumb asset={cover} fallback={<Film className="h-4 w-4 text-muted-foreground" />} /> : <Film className="h-4 w-4 text-muted-foreground" />}
+                        <ContentCover roomId={roomId} content={content} fallback={<Film className="h-4 w-4 text-muted-foreground" />} />
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-[13px] font-medium">{content.title}</span>
@@ -990,8 +988,6 @@ export function ProductionWorkspace({
             <span className="text-[11px] text-muted-foreground">タイムラインを開いて、ダンと話しながら作ります</span>
           </button>
           {sortedContents.map((content) => {
-            const cover = assets.find((asset) => content.asset_ids.includes(asset.id) && asset.kind === 'video')
-              || assets.find((asset) => content.asset_ids.includes(asset.id) && asset.kind === 'image');
             return (
               <button
                 key={content.id}
@@ -1000,7 +996,7 @@ export function ProductionWorkspace({
                 className="overflow-hidden rounded-lg border border-border text-left hover:border-primary"
               >
                 <span className="flex aspect-video items-center justify-center overflow-hidden bg-muted">
-                  {cover ? <AssetThumb asset={cover} fallback={<Film className="h-6 w-6 text-muted-foreground" />} /> : <Film className="h-6 w-6 text-muted-foreground" />}
+                  <ContentCover roomId={roomId} content={content} fallback={<Film className="h-6 w-6 text-muted-foreground" />} />
                 </span>
                 <span className="block truncate px-2.5 pt-2 text-[13px] font-medium">{content.title}</span>
                 <span className="block px-2.5 pb-2 text-[11px] text-muted-foreground">
@@ -1063,6 +1059,37 @@ const ASSET_FOLDERS: Array<{ key: string; label: string; icon: typeof Film; test
 function assetPreviewUrl(asset: ProductionAsset): string {
   if (asset.kind === 'video' && (asset.view_url || asset.proxy_url)) return asset.view_url || asset.proxy_url || '';
   return `/api/v1/production-assets/media?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}&variant=original`;
+}
+
+// 作品の絵: その作品のタイムラインの頭の1コマ（サーバーが書き出しと同じ描き方で描く）。
+// 作品が変わる（updated_at が進む）と取り直し、新しい絵が届くまで前の絵を出したままにする。
+// 前は作品に登録された素材の先頭の動画を出していて、タイムラインに無い映像が出ていた（2026-11-15 本人）。
+function ContentCover({ roomId, content, fallback }: { roomId: string; content: ProductionContent; fallback: ReactNode }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+  const madeRef = useRef<string | null>(null);
+  const url = `/api/v1/production-assets/contents/${encodeURIComponent(content.id)}/cover?room_id=${encodeURIComponent(roomId)}&v=${encodeURIComponent(content.updated_at || '')}`;
+  useEffect(() => {
+    let stopped = false;
+    void (async () => {
+      try {
+        const res = await fetch(url, { credentials: 'include' });
+        if (stopped) return;
+        if (!res.ok) { setMissing(true); return; }
+        const blob = await res.blob();
+        if (stopped) return;
+        const made = URL.createObjectURL(blob);
+        if (madeRef.current) URL.revokeObjectURL(madeRef.current);
+        madeRef.current = made;
+        setSrc(made);
+        setMissing(false);
+      } catch { /* 次に作品が変わった時に取り直す */ }
+    })();
+    return () => { stopped = true; };
+  }, [url]);
+  useEffect(() => () => { if (madeRef.current) URL.revokeObjectURL(madeRef.current); }, []);
+  if (src) return <img src={src} alt="" className="h-full w-full object-cover" data-testid="content-cover" />;
+  return <>{missing ? fallback : <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}</>;
 }
 
 // 素材の小さな絵。サムネイルが無い動画は最初の方の1コマを、画像はその画像を（見えた時だけ）読む。
