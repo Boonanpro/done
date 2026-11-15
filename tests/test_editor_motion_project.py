@@ -58,3 +58,30 @@ def test_renderer_honors_project_version_and_rejects_mismatched_checks(tmp_path)
     assert motion.project_version(tmp_path)=='0.8.31'
     package.write_text(json.dumps({'scripts':{'check':'npx hyperframes@0.8.33 check','render':'npx hyperframes@0.8.31 render'}}))
     with pytest.raises(ValueError): motion.project_version(tmp_path)
+
+
+def test_npx_found_under_homebrew_lib_layout(tmp_path):
+    # Homebrew: bin/node and lib/node_modules/npm/bin/npx-cli.js are siblings' children.
+    (tmp_path/'bin').mkdir(); node=tmp_path/'bin/node'; node.write_text('')
+    cli=tmp_path/'lib/node_modules/npm/bin/npx-cli.js'; cli.parent.mkdir(parents=True); cli.write_text('')
+    assert motion._npx_cli(node)==cli
+
+
+def test_npx_found_beside_windows_node(tmp_path):
+    node=tmp_path/'node.exe'; node.write_text('')
+    cli=tmp_path/'node_modules/npm/bin/npx-cli.js'; cli.parent.mkdir(parents=True); cli.write_text('')
+    assert motion._npx_cli(node)==cli
+
+
+def test_installed_cli_preferred_from_mac_npx_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(motion.Path, 'home', lambda: tmp_path)
+    monkeypatch.delenv('LOCALAPPDATA', raising=False); monkeypatch.delenv('npm_config_cache', raising=False)
+    pkg=tmp_path/'.npm/_npx/abc/node_modules/hyperframes'; (pkg/'bin').mkdir(parents=True)
+    (pkg/'package.json').write_text(json.dumps({'version':'0.8.33'})); (pkg/'bin/hyperframes.mjs').write_text('')
+    monkeypatch.setattr(motion.shutil, 'which', lambda name: '/usr/bin/node' if name=='node' else None)
+    assert motion.hyperframes_command('0.8.33')==['/usr/bin/node', str(pkg/'bin/hyperframes.mjs')]
+
+
+def test_composition_length_read_from_main(tmp_path):
+    (tmp_path/'index.html').write_text('<div data-composition-id="main" data-start="0" data-duration="18.33"></div><div data-duration="1.7"></div>')
+    assert motion.composition_seconds(tmp_path)==18.33
