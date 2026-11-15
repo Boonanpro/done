@@ -15,8 +15,8 @@ speak: |
   - 通話中は、成果物の本物の画面、番号や選択肢の大きな札、説明の図が出る。
   - 成果物の操作先を声で指定すると、画面のボタンや欄を光らせて操作する。送信などは読み上げと本人の承認を待つ。
   - 外のブラウザやスマホは操作中の実画面を連続表示する。ブラウザは通話画面の幅に合わせて並び直す。映像を指で押す操作には未対応。
-fingerprint: 0ed3e88087a39889
-described: 9341020829e7f400
+fingerprint: 38a0f032a32e6d31
+described: dc014f51d29a95fd
 last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを画面の幅に合わせる表示修正。操作方法は同じ。"
 ---
 # 通話中の画面
@@ -27,7 +27,7 @@ last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを�
 
 - 本物の成果物。画面上の名前のあるボタン、リンク、入力欄、選択欄を共通の仕組みで操作する。
 - 番号・日時・金額・短い選択肢の札。数字を大きく表示し、次にすることは1つに絞る。
-- 説明の図。操作中の本物の画面を自動の図で置き換えない。
+- 説明の図（大きな数字・比べる表・手順・推移・場所の配置の絵）。操作中の本物の画面を自動の図で置き換えない。文字にアイコンを付けた箱と矢印の図は 2026-11-15 から出さない（部品でも SVG でも描かせず、Flow の場面は届く前に落とす）。
 - 本物の中身の部品（地図とピン・写真の札・ページの切り抜き・出どころ・動画のコマ）。調べ役が答えると同時に出す。ピン・札・コマを押すと通話のダンに「画面で押した」として届く（POST /api/v1/voicelog/stage/<部屋>/touch）。
 - 外の画面。ダンのブラウザ、スマホが実際に見ている画面を表示する。本人の部屋の権限で読み、公開添付にはしない。ブラウザは表示先の幅・高さに合わせてページを並び直し、スクロール中も連続表示する。
 
@@ -62,5 +62,5 @@ last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを�
 - 見張るファイル: `frontend/src/app/artifacts/layout.tsx`, `frontend/src/app/voice-stage/page.tsx`, `frontend/src/components/artifacts/voice-controls-runtime.tsx`, `frontend/src/components/artifacts/voice-controls.ts`, `frontend/src/components/voice/stage-message-editor.tsx`, `frontend/src/components/voice/voice-stage.tsx`
 - ラベル: 「送信案の本文」
 
-<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "7b34687887", "frontend/src/app/voice-stage/page.tsx": "79db203460", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/stage-message-editor.tsx": "fc6b037dcc", "frontend/src/components/voice/voice-stage.tsx": "8701d9c7ec"} -->
+<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "7b34687887", "frontend/src/app/voice-stage/page.tsx": "79db203460", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/stage-message-editor.tsx": "8cf194e1fc", "frontend/src/components/voice/voice-stage.tsx": "644bfca58c"} -->
 <!-- place_map:auto:end -->
