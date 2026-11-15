@@ -12,12 +12,15 @@
 
 import { createFile, type MP4File, type MP4ArrayBuffer } from 'mp4box';
 import { readLocalRange } from './local-media';
+import { stretchChannels } from './time-stretch';
 
 const BLOCK_SEC = 4;                  // 1 回に解読する長さ
 const MAX_BLOCKS = 40;                // 素材ごとに持つ数（約160秒・ステレオ48kHzで約60MB）
 const HEAD_BYTES = 64 * 1024;
 const WHOLE_FILE_LIMIT = 200 * 1024 * 1024; // mp4 でない素材を丸ごと読む上限
 const RANGE_GAP = 96 * 1024;          // 音の断片の間がこれより狭ければ1回の Range にまとめる
+export const STRETCH_BLOCK_SEC = BLOCK_SEC; // 倍速で鳴らす時の区切り（丸ごとの素材もこの長さで区切って縮める）
+const MAX_STRETCHED = 24;
 
 type ASample = { pt: number; dur: number; offset: number; size: number };
 
@@ -320,6 +323,41 @@ export class AssetAudioSource {
     return this.blocks.get(b) || null;
   }
 
+  private stretched = new Map<string, { buffer: AudioBuffer; srcDur: number }>();
+
+  /** 区切り b（STRETCH_BLOCK_SEC ずつ）を rate 倍速に縮めた音（声の高さはそのまま）。srcDur はその区切りの素材の長さ。
+   *  解読がまだなら null。作った物は覚えておく */
+  stretchedBlock(b: number, rate: number): { buffer: AudioBuffer; srcDur: number } | null {
+    const key = `${b}|${rate}`;
+    const have = this.stretched.get(key);
+    if (have) return have;
+    const S = STRETCH_BLOCK_SEC;
+    let src: AudioBuffer | null = null;
+    let from = 0, len = 0;
+    if (this.whole) {
+      src = this.whole;
+      from = Math.round(b * S * src.sampleRate);
+      len = Math.min(src.length, Math.round((b + 1) * S * src.sampleRate)) - from;
+    } else {
+      src = this.blocks.get(b) || null;
+      len = src ? src.length : 0;
+    }
+    if (!src || len <= 0) return null;
+    const chans = Array.from({ length: src.numberOfChannels }, (_, c) => src!.getChannelData(c).subarray(from, from + len));
+    const outCh = stretchChannels(chans, src.sampleRate, rate);
+    const buffer = this.ctx.createBuffer(outCh.length, outCh[0].length, src.sampleRate);
+    outCh.forEach((d, c) => buffer.getChannelData(c).set(d));
+    const got = { buffer, srcDur: len / src.sampleRate };
+    this.stretched.set(key, got);
+    while (this.stretched.size > MAX_STRETCHED) this.stretched.delete(this.stretched.keys().next().value as string);
+    return got;
+  }
+
+  /** 倍速の区切り b の音がもう縮めてあるか */
+  hasStretched(b: number, rate: number): boolean {
+    return this.stretched.has(`${b}|${rate}`);
+  }
+
   /** 鳴らす物が無い（音の無い素材・壊れた素材） */
   get mute(): boolean {
     return this.failed || this.silent;
@@ -335,6 +373,7 @@ export class AssetAudioSource {
   close() {
     this.closed = true;
     this.blocks.clear();
+    this.stretched.clear();
     this.whole = null;
   }
 }

@@ -8,7 +8,7 @@ import type { CaptionDesign } from './caption-design';
 import { FrameSourceManager, webCodecsSupported } from './frame-source';
 import { SceneLayer, isSceneClip, type SceneClip } from './scene-layer';
 import { gradeFilter } from './grade-filter';
-import { AudioSourceManager, audioOnlyUrl, webAudioSupported } from './audio-source';
+import { AudioSourceManager, STRETCH_BLOCK_SEC, audioOnlyUrl, webAudioSupported } from './audio-source';
 import { localMedia, localMediaEnabled, localPlaySrc, type LocalMediaProgress } from './local-media';
 
 // Live timeline compositor. Draws the current edit (base video + overlay/PiP layers +
@@ -45,6 +45,8 @@ type Props = {
   onPick?: (clipId: string | null) => void;
   /** 選んだテロップをプレビューの上で引きずって動かした（x・y は画面の幅・高さに対する割合のずれ） */
   onCaptionMove?: (clipId: string, nudge: { x: number; y: number }) => void;
+  /** 再生の速さ（1 = 等倍。L キーで 2・3…）。音は声の高さを変えずに速くする */
+  rate?: number;
 };
 
 type VisualClip = {
@@ -232,7 +234,10 @@ const BLEND_OPS: Record<string, GlobalCompositeOperation> = {
 // プレビューを描く画素の倍率の上限: 長い辺 1920px まで（書き出しの 1080p と同じ細かさ）
 const MAX_CANVAS_LONG_SIDE = 1920;
 
-export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange, onPick, onCaptionMove }: Props) {
+export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange, onPick, onCaptionMove, rate: rateProp = 1 }: Props) {
+  const rate = Number.isFinite(rateProp) && rateProp > 0 ? rateProp : 1;
+  const rateRef = useRef(rate);
+  rateRef.current = rate;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   // WebCodecs frame decoders, one per asset URL (shared across all clips of that asset). Used
@@ -585,7 +590,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // 鳴らし中の音の部品（クリップ×解読の区切りごと）。null = 鳴らす物が無いと決まった所
   const audioNodesRef = useRef<Map<string, { node: AudioBufferSourceNode; gain: GainNode; t0: number; t1: number } | null>>(new Map());
   // 再生の時刻と Web Audio の時計の対応: ctxT0（Web Audio の時刻）に、タイムラインの t0 が聞こえる
-  const audioAnchorRef = useRef<{ ctxT0: number; t0: number } | null>(null);
+  // rate: その対応を作った時の再生の速さ（ctx の1秒にタイムラインが rate 秒進む）
+  const audioAnchorRef = useRef<{ ctxT0: number; t0: number; rate: number } | null>(null);
   useEffect(() => {
     if (!useWebAudio) return;
     let mgr: AudioSourceManager;
@@ -649,9 +655,28 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   useEffect(() => () => { if (localMediaEnabled()) localMedia().stop(); }, []);
 
   // 止まっている間も、再生位置の先の音を解読しておく（再生を押した瞬間から鳴る）
-  const ensureAudioAhead = useCallback((t: number, ahead: number) => {
+  const ensureAudioAhead = useCallback((t: number, aheadReal: number) => {
     const mgr = audioMgrRef.current;
     if (!mgr) return;
+    const R = rateRef.current;
+    const ahead = aheadReal * R;
+    // 倍速の時は、すぐ鳴る区切りを1つずつ前もって縮めておく（鳴らす瞬間に縮めると、その分だけ画面が引っかかる）
+    let warmed = R === 1;
+    for (const { clip: c } of audibleAudio) {
+      if (warmed) break;
+      if (c.timeline_end <= t) continue;
+      if (c.timeline_start > t + 3 * R) break;
+      const src = mgr.get(srcByAssetId.get(String(c.asset_id || '')) || '');
+      if (!src || src.mute) continue;
+      const ss = Number(c.source_start || 0);
+      const s0 = ss + Math.max(0, t - c.timeline_start);
+      const s1 = Math.min(ss + (c.timeline_end - c.timeline_start), s0 + 3 * R);
+      for (let b = Math.floor(s0 / STRETCH_BLOCK_SEC); b * STRETCH_BLOCK_SEC < s1; b += 1) {
+        if (src.hasStretched(b, R)) continue;
+        if (src.stretchedBlock(b, R)) warmed = true;
+        break;
+      }
+    }
     for (const { clip: c } of audibleAudio) {
       if (c.timeline_end <= t) continue;
       if (c.timeline_start > t + ahead) break;
@@ -675,7 +700,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const anchor = audioAnchorRef.current;
     if (!mgr || !anchor) return false;
     const ctx = mgr.ctx;
-    const LOOK = 0.5;
+    const R = anchor.rate || 1;
+    const LOOK = 0.5 * R; // タイムラインの秒（実時間で0.5秒先まで）
     const stats = previewStats();
     const nodes = audioNodesRef.current;
     let gap = false;
@@ -688,28 +714,39 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const ss = Number(c.source_start || 0);
       const srcEnd = ss + (te - ts);
       const srcNow = ss + Math.max(0, t - ts);
-      void src.ensure(srcNow, Math.min(srcEnd, srcNow + 8));
+      void src.ensure(srcNow, Math.min(srcEnd, srcNow + 8 * R));
       if (src.mute) continue;
-      const BL = src.blockLen();
+      // 倍速の時は、4秒ずつ声の高さを保ったまま縮めた音を鳴らす（buffer の1秒 = 素材の R 秒）
+      const BL = R !== 1 ? STRETCH_BLOCK_SEC : src.blockLen();
       const srcLook = ss + (Math.min(te, t + LOOK) - ts);
       for (let b = Math.floor(srcNow / BL); b * BL < srcLook; b += 1) {
         const key = `${c.id}|${b}`;
         if (nodes.has(key)) continue;
-        const buf = src.blockBuffer(b);
+        let buf: AudioBuffer | null;
+        let srcDur: number;
+        if (R !== 1) {
+          const st = src.stretchedBlock(b, R);
+          buf = st ? st.buffer : null;
+          srcDur = st ? st.srcDur : 0;
+        } else {
+          buf = src.blockBuffer(b);
+          srcDur = buf ? buf.duration : 0;
+        }
         if (!buf) { if (t >= ts && b === Math.floor(srcNow / BL)) gap = true; break; }
         const a = Math.max(b * BL, ss);
-        const z = Math.min((b + 1) * BL, srcEnd, b * BL + buf.duration);
+        const z = Math.min((b + 1) * BL, srcEnd, b * BL + srcDur);
         if (z <= a + 1e-4) { nodes.set(key, null); continue; }
         const tl = ts + (a - ss);
-        let when = anchor.ctxT0 + (tl - anchor.t0);
-        let off = a - b * BL;
-        let dur = z - a;
+        const nominal = anchor.ctxT0 + (tl - anchor.t0) / R;
+        let when = nominal;
+        let off = a - b * BL;   // 素材の秒
+        let dur = z - a;        // 素材の秒
         const earliest = ctx.currentTime + 0.005;
         if (when < earliest) {
-          const late = earliest - when;
+          const late = (earliest - when) * R;
           if (late >= dur) { nodes.set(key, null); continue; }
           if (late > 0.04 && tl > anchor.t0 + 0.05) stats.audioLateStarts += 1;
-          when += late; off += late; dur -= late;
+          when = earliest; off += late; dur -= late;
         }
         const node = ctx.createBufferSource();
         node.buffer = buf;
@@ -717,9 +754,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         g.gain.value = gain;
         node.connect(g);
         g.connect(mgr.master);
-        node.start(when, off, dur);
+        node.start(when, off / R, dur / R);
         node.onended = () => { try { g.disconnect(); } catch { /* noop */ } };
-        nodes.set(key, { node, gain: g, t0: tl + (when - (anchor.ctxT0 + (tl - anchor.t0))), t1: tl + (z - a) });
+        nodes.set(key, { node, gain: g, t0: tl + (when - nominal) * R, t1: tl + (z - a) });
         stats.audioScheduled += 1;
       }
     }
@@ -1081,6 +1118,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       return;
     }
     if (!playClockRef.current) playClockRef.current = { wall: performance.now(), t: currentTime };
+    const R = rateRef.current; // 速さが変わるとこの輪は作り直される（deps の rate）
     // 音を Web Audio で鳴らす時は、その時計を再生の時計にする（聞こえている時刻＝映っている時刻）。
     // ここに来るのは再生を始めた時と、再生中に段の中身が変わった時。どちらも今の時刻から予約し直す。
     const mgr = audioMgrRef.current;
@@ -1091,11 +1129,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     if (mgr && mgr.ctx.state !== 'running') void mgr.ctx.resume().catch(() => {});
     const anchorNow = (t: number) => {
       if (!mgr || mgr.ctx.state !== 'running') return;
-      audioAnchorRef.current = { ctxT0: mgr.ctx.currentTime + 0.04, t0: t };
+      audioAnchorRef.current = { ctxT0: mgr.ctx.currentTime + 0.04, t0: t, rate: R };
     };
     {
       const c = playClockRef.current;
-      anchorNow(c.t + (performance.now() - c.wall) / 1000);
+      anchorNow(c.t + (R * (performance.now() - c.wall)) / 1000);
     }
     const heardTime = (): number | null => {
       const an = audioAnchorRef.current;
@@ -1104,10 +1142,21 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       let now = ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0);
       const ot = typeof ctx.getOutputTimestamp === 'function' ? ctx.getOutputTimestamp() : null;
       if (ot && ot.contextTime && ot.performanceTime) now = ot.contextTime + (performance.now() - ot.performanceTime) / 1000;
-      return an.t0 + Math.max(0, now - an.ctxT0);
+      return an.t0 + an.rate * Math.max(0, now - an.ctxT0);
     };
     let lastWall = performance.now();
     let lastAheadWall = 0;
+    // 上の段が画面を全部ふさいでいる間、その下の段の映像は再生しない（2026-11-15 本人「まともに再生できん
+    // くらい重い」: X固定ポストの冒頭は1920×1080の動画が5段重なり、見えない4本まで同時に解読していた）。
+    // ふさいでいる段が HIDE_MARGIN 秒以内に終わる時は、その下を前もって走らせておく（終わった瞬間に絵が出るように）。
+    const HIDE_MARGIN = 1.0;
+    const visibleFrom = (active: VisualClip[], t: number): number => {
+      if (!fixLayers) return 0;
+      for (let i = active.length - 1; i >= 0; i -= 1) {
+        if (coversFrame(active[i], imageSrcByAssetId) && active[i].clip.timeline_end - t > HIDE_MARGIN) return i;
+      }
+      return 0;
+    };
     const PREROLL = 1.5; // pre-seek a clip about to start so its first frame is ready at the cut
     const LEAD = 0.4;    // 映像の要素を境目より前から走らせておく長さ
     // 映像と音がそろって流れ出せるまで、再生ヘッド・音・映像を全部止めて待つ（2026-11-13 本人
@@ -1136,7 +1185,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       badSince = 0;
       stopAudioNodes();
       audioAnchorRef.current = null;
-      for (const [, v] of videosRef.current) { if (!v.paused) v.pause(); if (v.playbackRate !== 1) v.playbackRate = 1; }
+      for (const [, v] of videosRef.current) { if (!v.paused) v.pause(); if (v.playbackRate !== R) v.playbackRate = R; }
       prevActiveVideoRef.current = new Set();
       prevActiveAudioRef.current = new Set();
       const c = playClockRef.current;
@@ -1146,7 +1195,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const prepStep = (clock: { wall: number; t: number }, nowWall: number) => {
       const t = clock.t;
       clock.wall = nowWall; // 準備中は時計を進めない（字幕・場面の層も止まったまま）
-      const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
+      const allActive = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
+      const active = allActive.slice(visibleFrom(allActive, t));
       for (const vc of active) {
         const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
         const fs = url ? framesRef.current.get(url) : null;
@@ -1178,9 +1228,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       for (const vc of active) {
         if (isFrozen(vc.clip)) continue;
         const v = videosRef.current.get(String(vc.clip.id));
-        if (v) { if (v.playbackRate !== 1) v.playbackRate = 1; void v.play().catch(() => {}); }
+        if (v) { if (v.playbackRate !== R) v.playbackRate = R; void v.play().catch(() => {}); }
       }
-      if (mgr && mgr.ctx.state === 'running') audioAnchorRef.current = { ctxT0: mgr.ctx.currentTime + 0.05, t0: t };
+      if (mgr && mgr.ctx.state === 'running') audioAnchorRef.current = { ctxT0: mgr.ctx.currentTime + 0.05, t0: t, rate: R };
       clock.t = t;
       clock.wall = performance.now() + 50; // 音の時計が無い時も、音と同じく0.05秒後から進める
       phase = 'run';
@@ -1204,9 +1254,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         rafRef.current = requestAnimationFrame(step);
         return;
       }
-      if (webAudio && !audioAnchorRef.current && mgr && mgr.ctx.state === 'running') anchorNow(clock.t + Math.max(0, nowWall - clock.wall) / 1000);
+      if (webAudio && !audioAnchorRef.current && mgr && mgr.ctx.state === 'running') anchorNow(clock.t + (R * Math.max(0, nowWall - clock.wall)) / 1000);
       const heard = heardTime();
-      let t = heard != null ? heard : clock.t + Math.max(0, nowWall - clock.wall) / 1000;
+      let t = heard != null ? heard : clock.t + (R * Math.max(0, nowWall - clock.wall)) / 1000;
       if (t >= sequenceDuration) {
         for (const [, v] of videosRef.current) v.pause();
         for (const [, a] of audiosRef.current) a.pause();
@@ -1218,7 +1268,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
 
       // VIDEO: align + play each active clip's muted element (frozen clips draw from WebCodecs,
       // so just make sure their single frame is decoded).
-      const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
+      const allActive = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
+      const active = allActive.slice(visibleFrom(allActive, t));
       const activeVids = new Set<string>();
       for (const vc of active) {
         const id = String(vc.clip.id);
@@ -1248,17 +1299,18 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           // 再生中の要素を頭出しすると、その間（0.2〜0.3秒）止まって、かえってずれが広がる（頭出し→止まる→
           // また頭出し、を繰り返していた）。大きく外れた時だけ頭出しし、ふだんは速さを段で変えて追いつかせる。
           // 毎コマ細かく速さを変えると、ブラウザが再生を引っかける。
-          const want = signed < -0.06 ? 1.25 : signed < -0.02 ? 1.06 : signed > 0.06 ? 0.8 : signed > 0.02 ? 0.94 : drift < 0.008 ? 1 : v.playbackRate;
-          if ((!prevActiveVideoRef.current.has(id) && (v.paused ? drift > 0.04 : drift > 0.25)) || drift > 0.7) {
+          const want = R * (signed < -0.06 ? 1.25 : signed < -0.02 ? 1.06 : signed > 0.06 ? 0.8 : signed > 0.02 ? 0.94 : drift < 0.008 ? 1 : v.playbackRate / R);
+          if ((!prevActiveVideoRef.current.has(id) && (v.paused ? drift > 0.04 : drift > 0.25 * R)) || drift > 0.7 * R) {
             try { v.currentTime = expected; } catch { /* not ready */ }
-            if (v.playbackRate !== 1) v.playbackRate = 1;
+            if (v.playbackRate !== R) v.playbackRate = R;
           } else if (v.playbackRate !== want) {
             v.playbackRate = want;
           }
-        } else if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.15) {
+        } else if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.15 * R) {
           try { v.currentTime = expected; } catch { /* not ready */ }
+          if (v.playbackRate !== R) v.playbackRate = R;
         }
-        if (v.paused) void v.play().catch(() => {});
+        if (v.paused) { if (heard == null && v.playbackRate !== R) v.playbackRate = R; void v.play().catch(() => {}); }
       }
       for (const [id, v] of videosRef.current) {
         if (activeVids.has(id) || v.paused) continue;
@@ -1303,7 +1355,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           const parkAt = startSrc - lead;
           if (until <= lead && lead > 0.05) {
             try { v.currentTime = startSrc - until; } catch { /* not ready */ }
-            if (v.playbackRate !== 1) v.playbackRate = 1;
+            if (v.playbackRate !== R) v.playbackRate = R;
             void v.play().catch(() => {});
           } else if (Math.abs(v.currentTime - parkAt) > 0.1) {
             try { v.currentTime = parkAt; } catch { /* not ready */ }
@@ -1333,6 +1385,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const aDrift = Math.abs(a.currentTime - expected);
         if ((!prevActiveAudioRef.current.has(id) && aDrift > 0.04) || aDrift > 0.3) a.currentTime = expected;
         a.muted = false;
+        a.preservesPitch = true;
+        if (a.playbackRate !== R) a.playbackRate = R;
         a.volume = c.volume == null ? 1 : Math.max(0, Math.min(1, Number(c.volume) || 0));
         if (a.paused) void a.play().catch(() => {});
         if (a.paused || a.seeking || a.readyState < 3 || Math.abs(a.currentTime - expected) > 0.25) elementGap = true;
@@ -1373,7 +1427,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     };
     // currentTime intentionally excluded: snapshotted into playClockRef at start
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded, srcByAssetId, scheduleAudio, stopAudioNodes, ensureAudioAhead, visualReadyAt, audioReadyAt]);
+  }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded, srcByAssetId, scheduleAudio, stopAudioNodes, ensureAudioAhead, visualReadyAt, audioReadyAt, fixLayers, imageSrcByAssetId, rate]);
 
   // 再生中に利用者が位置を動かした（目盛りを押した・クリップをダブルクリックした・矢印キー）:
   // 再生の時計をその位置に付け替え、映像と音の要素を新しい位置へ合わせ直す。止めずに続ける。
@@ -1395,7 +1449,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       return;
     }
     const mgr = audioMgrRef.current;
-    audioAnchorRef.current = mgr && mgr.ctx.state === 'running' ? { ctxT0: mgr.ctx.currentTime + 0.04, t0: currentTimeRef.current } : null;
+    audioAnchorRef.current = mgr && mgr.ctx.state === 'running' ? { ctxT0: mgr.ctx.currentTime + 0.04, t0: currentTimeRef.current, rate: rateRef.current } : null;
   }, [seekRev, stopAudioNodes]);
 
   // Selection box for the active selected clip. PiP/overlay uses its `position` window; a base
