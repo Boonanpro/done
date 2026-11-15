@@ -527,7 +527,8 @@ export function ProductionWorkspace({
       {
         method: 'PATCH',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        // みきさんの手の保存として記録する（クリップごとの「最後に動かした人」）
+        headers: { 'Content-Type': 'application/json', 'X-Timeline-Actor': 'owner' },
         body: JSON.stringify({ timeline: merged }),
       }
     );

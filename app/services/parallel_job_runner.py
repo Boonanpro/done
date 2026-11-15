@@ -293,7 +293,10 @@ async def _launch(job_id, s):
     job_mcp.write_text(json.dumps(cfg), encoding='utf-8')
     # 作品の部屋（エディターの「ダンと制作」）の並行作業も、部屋のダンと同じくタイムラインを直せる
     # （2026-11-14 本人: ピン・ペン・素材の枠の指示は送った時から別々に動き出す。app/services/editor_instructions.py）
-    system_prompt, draft = await cr.attach_timeline_tools(room, str(job_mcp), system_prompt)
+    system_prompt, draft = await cr.attach_timeline_tools(
+        room, str(job_mcp), system_prompt,
+        actor={'kind': 'dan', 'label': f"ダン（並行作業「{s.get('title') or job_id[:8]}」）",
+               'job_id': job_id, 'job_title': s.get('title') or ''})
     if draft:
         _drafts[job_id] = draft
     launch_prompt, content = cr._prepare_cli_launch_payload(system_prompt, content)

@@ -1072,6 +1072,31 @@ export function VideoReviewEditor({
     }
     return null;
   }, [editSequence, selectedSequenceClipId]);
+  // 選んだクリップを最後に動かした人（みきさんの手／どのダンの作業）・いつ・何を（2026-11-15 本人
+  // 「誰が動かしたかどうか分からないなら分かるようにしないと」）。保存は少し遅れて届くので、変わるたびに少し待って読み直す。
+  const [clipAuthor, setClipAuthor] = useState<{ id: string; label: string; t: number; what: string[]; kind: string } | null>(null);
+  useEffect(() => {
+    if (!roomId || !contentId || !selectedSequenceClipId) { setClipAuthor(null); return; }
+    let stopped = false;
+    const id = selectedSequenceClipId;
+    const load = async () => {
+      try {
+        const res = await fetch(
+          `/api/v1/production-assets/contents/${encodeURIComponent(contentId)}/clip-authors?room_id=${encodeURIComponent(roomId)}&clip_ids=${encodeURIComponent(id)}`,
+          { credentials: 'include' },
+        );
+        if (!res.ok || stopped) return;
+        const data = (await res.json()) as { clips?: Record<string, { label?: string; t?: number; what?: string[]; kind?: string }> };
+        const e = data.clips?.[id];
+        setClipAuthor(e ? { id, label: String(e.label || ''), t: Number(e.t || 0), what: e.what || [], kind: String(e.kind || '') } : { id, label: '', t: 0, what: [], kind: '' });
+      } catch {
+        // 表示だけ。読めなければ出さない
+      }
+    };
+    const first = window.setTimeout(load, 150);
+    const again = window.setTimeout(load, 2500);
+    return () => { stopped = true; window.clearTimeout(first); window.clearTimeout(again); };
+  }, [roomId, contentId, selectedSequenceClipId, editSequence]);
   // Clips that should appear selected: the explicitly selected ones, PLUS their A/V-linked
   // partners (so clicking audio also highlights its video and vice versa) when link is on.
   const highlightedClipIds = useMemo(() => {
@@ -4811,6 +4836,15 @@ export function VideoReviewEditor({
                       </Button>
                     </div>
                   </div>
+                  {clipAuthor && clipAuthor.id === selectedSequenceClip.id ? (
+                    <div className="text-[11px] text-muted-foreground" data-testid="clip-last-changed">
+                      {clipAuthor.label
+                        ? <>最後に動かした人: <span className={clipAuthor.kind === 'owner' ? 'font-medium text-foreground' : 'font-medium text-violet-700'}>{clipAuthor.label}</span>
+                            {' '}{new Date(clipAuthor.t * 1000).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                            {clipAuthor.what.length ? `（${clipAuthor.what.join('・')}）` : ''}</>
+                        : '最後に動かした人: 記録なし（記録を始める前の変更）'}
+                    </div>
+                  ) : null}
                   <Input
                     value={selectedSequenceClip.label || ''}
                     onChange={(e) => updateSelectedSequenceClip({ label: e.target.value })}

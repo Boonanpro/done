@@ -1914,7 +1914,8 @@ def _cleanup_mcp_config(room_id: str):
 
 
 async def attach_timeline_tools(room_id: str, mcp_config_path: str, system_prompt: str,
-                                timeline_refs: Optional[List[Dict[str, Any]]] = None):
+                                timeline_refs: Optional[List[Dict[str, Any]]] = None,
+                                actor: Optional[Dict[str, Any]] = None):
     """Give this turn (or a parallel job of the room) the timeline MCP on a live-updating draft of the room's work.
 
     Used by the room's own turns and by parallel jobs started in a work room (エディターのピン・ペンの指示,
@@ -1950,6 +1951,9 @@ async def attach_timeline_tools(room_id: str, mcp_config_path: str, system_promp
                 # 道具1回ごとに本番へ出し、開いているエディターに手の動きで見せる（2026-11-12 本人
                 # 「喋りながら動画が出来ていく」）。本人の手の編集とぶつかったら上書きせず止まる（CAS）。
                 timeline_draft["live_updates"] = True
+                # 誰の手の編集か（クリップごとの「最後に動かした人」に出る。app/services/timeline_authors.py）
+                timeline_draft["actor"] = actor or {"kind": "dan", "label": "ダン（会話）",
+                                                    "job_id": timeline_draft["job_id"]}
                 _timeline_draft.save_draft(timeline_draft)
                 cfg = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
                 cfg.setdefault("mcpServers", {})["timeline"] = {
