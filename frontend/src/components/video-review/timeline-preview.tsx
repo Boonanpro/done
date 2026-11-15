@@ -1150,10 +1150,21 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     // くらい重い」: X固定ポストの冒頭は1920×1080の動画が5段重なり、見えない4本まで同時に解読していた）。
     // ふさいでいる段が HIDE_MARGIN 秒以内に終わる時は、その下を前もって走らせておく（終わった瞬間に絵が出るように）。
     const HIDE_MARGIN = 1.0;
+    // ふさいでいるのがいつまで続くか: 同じ高さ以上の、画面をふさぐ次のクリップが切れ目なく続く分も足す
+    // （冒頭の段7のように場面ごとに切ったクリップが並んでいる時、切れ目ごとに下の段を走らせない）
+    const coveredUntil = (vc: VisualClip): number => {
+      let end = vc.clip.timeline_end;
+      for (let guard = 0; guard < 50; guard += 1) {
+        const next = visualClips.find((o) => o.layer >= vc.layer && o.clip.timeline_start <= end + 0.02 && o.clip.timeline_end > end + 0.02 && coversFrame(o, imageSrcByAssetId));
+        if (!next) break;
+        end = next.clip.timeline_end;
+      }
+      return end;
+    };
     const visibleFrom = (active: VisualClip[], t: number): number => {
       if (!fixLayers) return 0;
       for (let i = active.length - 1; i >= 0; i -= 1) {
-        if (coversFrame(active[i], imageSrcByAssetId) && active[i].clip.timeline_end - t > HIDE_MARGIN) return i;
+        if (coversFrame(active[i], imageSrcByAssetId) && coveredUntil(active[i]) - t > HIDE_MARGIN * R) return i;
       }
       return 0;
     };
@@ -1316,7 +1327,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (activeVids.has(id) || v.paused) continue;
         // 境目の前から走らせている要素は止めない
         const vc = visualClips.find((x) => String(x.clip.id) === id);
-        if (vc && vc.clip.timeline_start > t && vc.clip.timeline_start - t <= LEAD + 0.1) continue;
+        if (vc && vc.clip.timeline_start > t && vc.clip.timeline_start - t <= LEAD * R + 0.1) continue;
         v.pause();
       }
 
@@ -1344,13 +1355,20 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       for (const vc of visualClips) {
         const id = String(vc.clip.id);
         if (activeVids.has(id) || isFrozen(vc.clip)) continue;
-        if (!(vc.clip.timeline_start > t && vc.clip.timeline_start <= t + PREROLL)) continue;
+        if (!(vc.clip.timeline_start > t && vc.clip.timeline_start <= t + PREROLL * R)) continue;
+        // 始まった時に上の段にふさがれているクリップは、前もって走らせない
+        if (fixLayers) {
+          const at = vc.clip.timeline_start + 0.001;
+          const there = visualClips.filter((o) => at >= o.clip.timeline_start && at < o.clip.timeline_end);
+          if (there.indexOf(vc) < visibleFrom(there, at)) continue;
+        }
         const startSrc = Number(vc.clip.source_start || 0);
         const v = videosRef.current.get(id);
         // 走り出し: 要素は再生を押してから実際に進み出すまで0.2〜0.3秒かかる。境目の LEAD 秒前に、
         // 境目より LEAD 秒手前から走らせておき、境目では元から同じ所を進んでいるようにする。
         const until = vc.clip.timeline_start - t;
-        const lead = Math.min(LEAD, startSrc);
+        // 倍速の時は、その分だけタイムラインの手前から走らせる（走り出しにかかる実時間は同じ）
+        const lead = Math.min(LEAD * R, startSrc);
         if (v && v.paused) {
           const parkAt = startSrc - lead;
           if (until <= lead && lead > 0.05) {
