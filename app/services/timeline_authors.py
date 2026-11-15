@@ -235,6 +235,7 @@ def owner_recent_text(room_id: str, content_id: str, hours: float = 6.0, limit: 
     """Lines for the room's prompt: clips the owner moved by hand recently, so Dan does not ask who did it."""
     data = read(room_id, content_id)
     since = time.time() - hours * 3600
+    still_owner = {cid for cid, e in data["clips"].items() if e.get("kind") == "owner"}
     rows = []
     for e in reversed(data["log"]):
         if _f(e.get("t")) < since:
@@ -242,6 +243,9 @@ def owner_recent_text(room_id: str, content_id: str, hours: float = 6.0, limit: 
         if e.get("kind") != "owner":
             continue
         for c in (e.get("changes") or [])[:6]:
+            if c.get("clip_id") not in still_owner:  # a Dan changed it again since
+                continue
+            still_owner.discard(c.get("clip_id"))
             rows.append(f"{_clock(_f(e.get('t')))} {c.get('clip_id')}（段{c.get('lane')}）{'・'.join(c.get('what') or [])}")
         if len(rows) >= limit:
             break

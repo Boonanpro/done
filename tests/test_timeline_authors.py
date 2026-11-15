@@ -38,7 +38,10 @@ def test_record_owner_then_dan(tmp_path, monkeypatch):
     assert last["c1"]["label"].startswith("ダン（並行作業")
     hist = ta.history_text(room, content, "c1")
     assert [h["who"] for h in hist["history"]] == ["ダン（並行作業「冒頭の直し」）", "みきさん"]
-    assert "みきさん" in ta.owner_recent_text(room, content)
+    # c1 was moved again by a Dan, so it is no longer "the owner's shape"
+    assert ta.owner_recent_text(room, content) == ""
+    ta.record(room, content, _seq(start=3, src=2.82), _seq(start=6, src=2.82), ta.OWNER)
+    assert "c1" in ta.owner_recent_text(room, content)
 
 
 def test_commit_draft_records_dan(tmp_path, monkeypatch):
