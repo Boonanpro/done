@@ -1849,10 +1849,10 @@ def _image_key_frames(clip: dict[str, Any], img_path: Any, its: float, ite: floa
     kdir.mkdir(parents=True, exist_ok=True)
     src = Image.open(str(img_path)).convert("RGBA")
     pos = clip.get("position") if isinstance(clip.get("position"), dict) else {}
-    bx0 = float(pos.get("x") or 0.05) * out_w
-    by0 = float(pos.get("y") or 0.05) * out_h
-    bw0 = float(pos.get("width") or 0.3) * out_w
-    bh0 = float(pos.get("height") or 0.15) * out_h
+    bx0 = _box_num(pos, "x", 0.05) * out_w
+    by0 = _box_num(pos, "y", 0.05) * out_h
+    bw0 = _box_num(pos, "width", 0.3) * out_w
+    bh0 = _box_num(pos, "height", 0.15) * out_h
     for n, k in enumerate(frames):
         b = _key_box_at(keys, k / fps - its)
         bx, by, bw, bh = bx0 + b["x"] * bw0, by0 + b["y"] * bh0, bw0 * b["w"], bh0 * b["h"]
@@ -2469,10 +2469,10 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             # position box (aspect preserved, centered), alpha kept — preview parity.
             img_path = _asset_source_path(asset)
             pos = clip.get("position") if isinstance(clip.get("position"), dict) else {}
-            iow = max(2, round(float(pos.get("width") or 0.3) * output_width))
-            ioh = max(2, round(float(pos.get("height") or 0.15) * output_height))
-            ipx = round(float(pos.get("x") or 0.05) * output_width)
-            ipy = round(float(pos.get("y") or 0.05) * output_height)
+            iow = max(2, round(_box_num(pos, "width", 0.3) * output_width))
+            ioh = max(2, round(_box_num(pos, "height", 0.15) * output_height))
+            ipx = round(_box_num(pos, "x", 0.05) * output_width)
+            ipy = round(_box_num(pos, "y", 0.05) * output_height)
             its = max(0.0, float(clip.get("timeline_start") or 0))
             ite = max(its + 0.05, float(clip.get("timeline_end") or (its + 3.0)))
             # Motion keys (pop-in etc.): the moving frames are drawn as a full-canvas PNG
@@ -6027,6 +6027,18 @@ POPOUT_BAKE_PAD_S = 3.0
 _POPOUT_BAKING: dict[str, bool] = {}  # f"{room_id}/{key}" -> in-flight (this process)
 
 
+def _box_num(box: dict[str, Any], key: str, default: float) -> float:
+    """A position-box number; the default only when the key is missing/empty — 0 stays 0
+    (``float(box.get("x") or 0.05)`` turned x=0 into 5% and shifted full-frame images)."""
+    v = box.get(key)
+    if v is None or v == "":
+        return float(default)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _popout_cache_dir(room_id: str) -> Path:
     d = ASSET_ROOT / room_id / "popout-cache"
     d.mkdir(parents=True, exist_ok=True)
@@ -6035,10 +6047,10 @@ def _popout_cache_dir(room_id: str) -> Path:
 
 def _popout_box_px(box: dict[str, Any] | None, W: int, H: int) -> tuple[int, int, int, int]:
     b = box if isinstance(box, dict) else {}
-    ow = max(2, round(float(b.get("width") or 0.46) * W))
-    oh = max(2, round(float(b.get("height") or 0.145) * H))
-    px = round(float(b.get("x") or 0.27) * W)
-    py = round(float(b.get("y") or 0.835) * H)
+    ow = max(2, round(_box_num(b, "width", 0.46) * W))
+    oh = max(2, round(_box_num(b, "height", 0.145) * H))
+    px = round(_box_num(b, "x", 0.27) * W)
+    py = round(_box_num(b, "y", 0.835) * H)
     return px, py, ow, oh
 
 
