@@ -8,7 +8,7 @@ import pytest
 from app.services import voice_stage as S
 from app.services.voice_sideband import Dialogue
 
-FLOW = 'root = Column([Heading("支払いの流れ"), Flow([{id: "a", label: "本人", icon: "person"}, {id: "b", label: "Stripe", icon: "card", tone: "now"}, {id: "c", label: "口座", icon: "bank"}])])'
+FLOW = 'root = Column([Heading("支払いの流れ"), Steps(["本人が払う", "Stripe が受ける", "口座に入る"])])'
 
 
 @pytest.fixture
@@ -21,9 +21,9 @@ def room(tmp_path, monkeypatch):
 
 def test_part_lines_come_from_the_screen_definitions_without_chat_only_parts():
     names = S.part_names()
-    assert {'Flow', 'Stat', 'Compare', 'Chart', 'Steps', 'Card', 'Heading'} <= names
-    assert not names & {'Choice', 'Input', 'Button'}
-    assert 'Flow(' in S.instructions() and 'Choice(' not in S.instructions()
+    assert {'Stat', 'Compare', 'Chart', 'Steps', 'Card', 'Heading'} <= names
+    assert not names & {'Choice', 'Input', 'Button', 'Flow'}   # Flow (boxes and arrows) retired 2026-11-15
+    assert 'Steps(' in S.instructions() and 'Choice(' not in S.instructions() and 'Flow(' not in S.instructions()
 
 
 def test_well_formed_accepts_what_the_screen_can_draw_and_refuses_the_rest():
@@ -36,7 +36,8 @@ def test_well_formed_accepts_what_the_screen_can_draw_and_refuses_the_rest():
     assert S.well_formed('root = Stat("合計)", 1135)')                   # a bracket inside a string is text
     assert not S.well_formed('x' * 7000)
     assert not S.well_formed('root = Stat("Done 側", 59, "表", tone: "good")')   # a named argument (deepseek, 2026-10-25)
-    assert S.well_formed('root = Flow([{id: "a", label: "A", tone: "now"}, {id: "b", label: "B"}], [{from: "a", to: "b", label: "x: y"}])')
+    assert S.well_formed('root = Compare(["a", "b"], [["x: y", "z"]])')
+    assert not S.well_formed('root = Flow([{id: "a", label: "A", tone: "now"}, {id: "b", label: "B"}])')   # retired 2026-11-15
 
 
 async def _answer(answers):
@@ -161,13 +162,10 @@ def test_close_marks_the_file_inactive_and_the_summary_is_one_message_with_the_s
     assert S.Stage(room, 's', Dialogue(), lambda *a, **k: None, ask=None).summary() == ''
 
 
-def test_stray_icons_become_known_ones_or_go(monkeypatch):
-    # the screen refuses a whole scene for one unknown icon (2026-10-25: "ticket"/"gate" left the stage blank)
-    assert 'icon: "doc"' in S.sanitize('root = Flow([{id: "a", label: "きっぷ", icon: "ticket", sub: "s"}])')
-    assert 'icon: "check"' in S.sanitize('root = Flow([{id: "a", label: "改札", icon: "gate"}])')
-    assert S.sanitize('root = Flow([{id: "a", label: "x", icon: "zzz", sub: "s"}, {id: "b", icon: "qqq"}])') == 'root = Flow([{id: "a", label: "x", sub: "s"}, {id: "b"}])'
-    assert S.sanitize('root = Flow([{id: "a", icon: "train"}])') == 'root = Flow([{id: "a", icon: "train"}])'   # known: untouched
-    assert S.well_formed(S.sanitize('root = Flow([{id: "a", label: "x", icon: "zzz"}])'))
+def test_programs_pass_sanitize_unchanged_now_that_flow_is_gone():
+    # icons only existed on Flow; with Flow retired (2026-11-15) sanitize leaves every program as it is
+    assert S.icon_names() == set()
+    assert S.sanitize('root = Stat("合計", 1135, "円")') == 'root = Stat("合計", 1135, "円")'
 
 
 @pytest.mark.asyncio
@@ -385,7 +383,7 @@ async def test_resolve_page_finds_the_owners_artifact_by_words(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_flip_right_after_a_scene_only_moves_the_caption_but_growth_passes(room, monkeypatch):
     monkeypatch.setattr(S, 'FLIP_HOLD_S', 5.0)
-    grown = FLOW.replace('{id: "c", label: "口座", icon: "bank"}', '{id: "c", label: "口座", icon: "bank"}, {id: "d", label: "明細", icon: "doc"}')
+    grown = FLOW.replace('"口座に入る"', '"口座に入る", "明細が届く"')
     stage, _, log = make_stage(room, [{'action': 'replace', 'caption': '支払いの流れ', 'program': FLOW},
                                       {'action': 'replace', 'caption': '手数料', 'program': 'root = Stat("手数料", 360, "円")'},
                                       {'action': 'replace', 'caption': '支払いの流れ（4段階）', 'program': grown}])
@@ -402,7 +400,7 @@ async def test_a_flip_right_after_a_scene_only_moves_the_caption_but_growth_pass
     assert await stage.decide() == 'caption'                   # the question itself: the caption moves first
     assert await stage.decide() == 'replace'                   # then Dan's answer: the owner asked, so it is a real change of topic, not a flip
     assert S.read_state(room)['program'] == 'root = Stat("手数料", 360, "円")'
-    assert S.family('program', FLOW) == S.family('program', grown) == ('program', 'Flow')
+    assert S.family('program', FLOW) == S.family('program', grown) == ('program', 'Steps')
     assert S.family('program', 'root = Stat("x", 1)') != S.family('program', FLOW) and S.family('html', '<svg/>') == ('html',)
 
 

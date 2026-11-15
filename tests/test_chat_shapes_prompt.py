@@ -17,8 +17,10 @@ def test_section_is_generated_file_content() -> None:
     section = chat_shapes_section()
     assert section.startswith("## Answer shapes")
     for name in ("Compare", "Choice", "Input", "Steps", "Chart", "Card", "Row", "Column", "Heading", "Text", "Image", "Stat",
-                 "Facts", "Badge", "Button", "Divider", "Flow"):
+                 "Facts", "Badge", "Button", "Divider"):
         assert f"- {name}(" in section
+    # 2026-11-15: the box-and-arrow Flow is no longer offered (the screen still draws old messages that used it)
+    assert "- Flow(" not in section and "Never draw words with icons and arrows" in section
     assert "```openui-lang" in section
     # 2026-10-17 (fix6): the comparison sentence the owner accepted and the "show the real thing" paragraph made it
     # 3.3KB (was 2.3KB); the cap moved from 2500 to 3400 with them. 2026-10-23: the eleven small parts to compose a

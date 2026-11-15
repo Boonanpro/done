@@ -434,6 +434,17 @@ export const SHAPE_SPECS = [
 export const SHAPE_NAMES: readonly string[] = SHAPE_SPECS.map((s) => s.name);
 
 /**
+ * ダンにはもう勧めない部品。画面は前のメッセージに出た分を今までどおり描くが、ダンへの指示の一覧には載せず、
+ * 新しい返事に書くと返事の点検（scripts/hook_reply_check.py）が止めて書き直させる。
+ * Flow（文字にアイコンを付けた箱と矢印の図）: 本人「ただのテキストにアイコンをつけただけ」（2026-11-11）、
+ * 「このクソの役にも立たん表現を止めろって言ったよな」（2026-11-15）。
+ */
+export const RETIRED_SHAPES: ReadonlySet<string> = new Set(['Flow']);
+
+/** ダンへの指示に並べる部品（SHAPE_SPECS から RETIRED_SHAPES を除いた物） */
+export const OFFERED_SHAPE_SPECS = SHAPE_SPECS.filter((s) => !RETIRED_SHAPES.has(s.name));
+
+/**
  * 完成した部品の検証（閉じが届いた後に1回）。通らない時は理由を返し、画面はその部品を元のコードに戻す。
  * 途中（生成中）の部品にはかけない（lang-core の段階表示を妨げない）。
  */

@@ -270,7 +270,7 @@ async def test_merged_stage_survives_call_end_and_decision_extraction_failure(mo
     for _ in range(7): previous._apply('古い画面', 'root = Stat("前の通話", 1)')
     previous.close()
     async def draw(*a):
-        return {'action':'replace', 'caption':'決まった仕様', 'program':'root = Flow([{id: "a", label: "きっぷ", icon: "ticket"}, {id: "b", label: "改札", icon: "gate"}])'}, {}
+        return {'action':'replace', 'caption':'決まった仕様', 'program':'root = Steps(["きっぷを買う", "改札を通る"])'}, {}
     monkeypatch.setattr(V, 'ask_model', draw)
     monkeypatch.setattr(V, 'enabled', lambda: True)
     monkeypatch.setattr(P, 'enabled', lambda: False)

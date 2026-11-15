@@ -94,6 +94,23 @@ def local_delivery_links(reply: str) -> list[str]:
     return list(dict.fromkeys(bad))
 
 
+# ダンにもう勧めない部品（frontend/src/lib/chat-shapes/schema.ts の RETIRED_SHAPES と同じ）。前のメッセージの図は画面が
+# 今までどおり描くので、新しい返事に書かれた時だけここで止める。本人「ただのテキストにアイコンをつけただけ」（11/11）、
+# 「このクソの役にも立たん表現を止めろって言ったよな」（11/15）。
+RETIRED_SHAPES = ("Flow",)
+_SHAPE_FENCE = re.compile(r"(?ms)^ {0,3}(`{3,}|~{3,})[ \t]*(openui-lang|openui)[ \t]*\n(.*?)^ {0,3}\1[ \t]*$")
+
+
+def retired_shape_blocks(reply: str) -> list[str]:
+    """返事の部品のうち、もう勧めない部品を使っている物（部品の名前）。"""
+    found = []
+    for m in _SHAPE_FENCE.finditer(reply or ""):
+        for name in RETIRED_SHAPES:
+            if re.search(rf"\b{name}\s*\(", m.group(3)) and name not in found:
+                found.append(name)
+    return found
+
+
 def check(reply: str, ask: str = "") -> list[dict]:
     if re.sub(r"[\s*`~]", "", reply or "") == QUIET:   # 「**WATCH_NO_CHANGE**」なども画面には出ない印
         return []
@@ -101,6 +118,9 @@ def check(reply: str, ask: str = "") -> list[dict]:
     hits = [{"id": "local-delivery-link", "name": "本人の画面で開けない保存場所へのリンク",
              "at": target, "fix": "成果物は公開して本文まで開けるURLへ直す。ファイルはattach_imageで添付する。リンクを消すだけで納品済みにしない。"}
             for target in local_delivery_links(reply)]
+    for code in retired_shape_blocks(reply):
+        hits.append({"id": "retired-shape", "name": "箱と矢印の図（Flow）", "at": code,
+                     "fix": "文字にアイコンを付けた箱と矢印は使わない。実例のページの切り抜き・実物の写真や画面・場面の絵で見せ、無ければ文章で書く。"})
     if len(body) > 60 and english_ratio(body) > 0.5:
         hits.append({"id": "english", "name": "英語の返事", "at": body.strip()[:50].replace("\n", " "),
                      "fix": "日本語で書き直す。英語のエラー文は貼らず、何が止まったかと次にどうするかを日本語1文ずつで書く。"})
