@@ -5516,12 +5516,15 @@ def _probe_video(path: Path) -> dict[str, Any]:
 
 _ALPHA_PIX_PREFIXES = ("yuva", "rgba", "bgra", "argb", "abgr", "gbrap", "ya8", "ya16", "rgba64", "bgra64")
 _ALPHA_CACHE: dict[tuple[str, float], bool] = {}
+_ALPHA_CONTAINERS = {".mov", ".mkv", ".webm", ".avi", ".mxf"}
 
 
 def _video_has_alpha(path: Path) -> bool:
     """Does this video carry transparency (ProRes 4444 with alpha, PNG/QuickTime Animation in a .mov…)?
     2026-11-16: 透明な映像（背景が透けた文字・図）を別のクリップとして重ねるため。プレビューの写しと
     書き出しが透明を残す。"""
+    if path.suffix.lower() not in _ALPHA_CONTAINERS:
+        return False  # H.264 .mp4 etc. never carry alpha: no probe (the asset list asks for every video)
     try:
         key = (str(path), path.stat().st_mtime)
     except OSError:
@@ -5703,7 +5706,8 @@ def _ensure_view_copies_bg(room_id: str, assets: list[dict[str, Any]]) -> None:
     できると view_url が付き、画面は次の読み直しからそちらで再生する。"""
     todo = [a["id"] for a in assets if isinstance(a, dict) and a.get("id") and a.get("status") not in ("processing", "proxy_pending")
             and not (a.get("view_error_at") and time.time() - float(a.get("view_error_at") or 0) < 86400)
-            and not a.get("view_path") and _needs_view_copy(a)]
+            and (not a.get("view_path") or (a.get("view_alpha") != "stacked" and _asset_has_alpha(a)))
+            and _needs_view_copy(a)]
     with _view_copy_lock:
         todo = [aid for aid in todo if aid not in _view_copy_running]
         _view_copy_running.update(todo)
