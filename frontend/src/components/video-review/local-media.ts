@@ -13,7 +13,8 @@
 
 const META_KEY = 'dan-local-media-v1';
 const DIR_NAME = 'dan-media';
-const CHUNK = 16 * 1024 * 1024;          // 1回に取りに行く大きさ
+const CHUNK = 8 * 1024 * 1024;           // 1回に取りに行く大きさ（頭出しに譲る時に捨てる量も、これより大きくならない）
+const QUIET_MS = 1500;                    // 頭出しで Mac から読んだ後、取り込みを休む長さ
 const MAX_FILE = 6 * 1024 * 1024 * 1024; // これより大きい写しは取り込まない
 const MAX_BUDGET = 40 * 1024 * 1024 * 1024;
 
@@ -160,16 +161,25 @@ class LocalMediaStore {
         if (!this.stillWanted(url, run)) { await w.abort(); return null; }
         const hi = Math.min(size, lo + CHUNK) - 1;
         let buf: ArrayBuffer | null = null;
-        for (let attempt = 0; attempt < 3 && !buf; attempt++) {
+        for (let attempt = 0; attempt < 3 && !buf;) {
+          await this.waitQuiet(url, run);
+          if (!this.stillWanted(url, run)) { await w.abort(); return null; }
+          const ctl = new AbortController();
+          this.chunkAbort = ctl;
           try {
-            const res = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` }, cache: 'no-store' });
+            const res = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` }, cache: 'no-store', signal: ctl.signal });
             if (res.status !== 206) throw new Error(`status ${res.status}`);
             buf = await res.arrayBuffer();
             if (buf.byteLength !== hi - lo + 1) throw new Error('short read');
           } catch (e) {
             buf = null;
-            if (attempt === 2) throw e;
-            await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+            // 頭出しに譲るために止めた: 失敗に数えず、静かになってから同じ所を写し直す
+            if (ctl.signal.aborted) continue;
+            attempt++;
+            if (attempt === 3) throw e;
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+          } finally {
+            if (this.chunkAbort === ctl) this.chunkAbort = null;
           }
         }
         await w.write(buf!);
@@ -191,6 +201,26 @@ class LocalMediaStore {
   private failedUrls = new Set<string>();
   private copied = new Map<string, number>();   // この画面で写した物の大きさ（進みの表示用）
   private working = false;
+  /** 再生位置の近くで使う素材（ここにある物を先に写す） */
+  private front: string[] = [];
+  /** この時刻までは取り込みを休んで、頭出しの読み込みに回線を譲る */
+  private quietUntil = 0;
+  private chunkAbort: AbortController | null = null;
+
+  /** 頭出し・再生で Mac から読みに行った: しばらく取り込みを休み、写している途中の1回分も止める（後で同じ所から写し直す） */
+  yieldToForeground(ms = QUIET_MS) {
+    this.quietUntil = Math.max(this.quietUntil, Date.now() + ms);
+    if (this.chunkAbort) { this.chunkAbort.abort(); this.chunkAbort = null; }
+  }
+
+  /** 再生位置の近くで使う素材を先に写す（urls は要る順）。一覧に無い物は無視する */
+  prioritize(urls: string[]) { this.front = urls.filter(Boolean); }
+
+  private async waitQuiet(url: string, run: number) {
+    while (Date.now() < this.quietUntil && this.stillWanted(url, run)) {
+      await new Promise((r) => setTimeout(r, Math.min(500, this.quietUntil - Date.now() + 20)));
+    }
+  }
 
   private stillWanted(url: string, run: number) { return run === this.runId && this.wantedSet.has(url); }
 
@@ -245,11 +275,12 @@ class LocalMediaStore {
         }
         if (run !== this.runId) break;
         // 2) 要る順で、まだの物を1つ写す
-        const url = this.wanted.find((u) => {
-          if (this.files.has(u) || this.failedUrls.has(u)) return false;
+        const copyable = (u: string) => {
+          if (!this.wantedSet.has(u) || this.files.has(u) || this.failedUrls.has(u)) return false;
           const info = this.probed.get(u);
           return !!info && info.size > 0 && info.size <= MAX_FILE;
-        });
+        };
+        const url = this.front.find(copyable) || this.wanted.find(copyable);
         if (!url) break;
         const info = this.probed.get(url)!;
         const key = hashKey(url);
@@ -313,4 +344,9 @@ export async function readLocalRange(url: string, lo: number, hi: number) {
 /** <video> に渡す住所 */
 export function localPlaySrc(url: string): string {
   return store ? store.playSrc(url) : url;
+}
+
+/** 写しが無くて Mac まで読みに行く時に呼ぶ: 取り込みが回線を取り合わないよう、しばらく休ませる */
+export function yieldLocalMedia(ms?: number) {
+  store?.yieldToForeground(ms);
 }

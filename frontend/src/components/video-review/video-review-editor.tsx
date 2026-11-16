@@ -354,7 +354,19 @@ function canonicalize(value: unknown): unknown {
   if (typeof value === 'number') return Math.round(value * 1000) / 1000;
   return value;
 }
+// 同じ値の比べ直しは、物（オブジェクト）ごとに1回だけ数える。作品の中身はどこでも書き換えずに新しい物を作るので、
+// 同じ物なら同じ印になる。2,000クリップを超える作品では1回の計算が数十ミリ秒かかり、ダンが1回保存するたびに
+// 同じ中身を5〜6回数え直して、そのぶん画面が止まっていた（2026-11-16）。
+const seqSigCache = new WeakMap<object, string>();
+const EMPTY_ASSETS: SequenceAsset[] = [];
 function seqSig(seq: unknown): string {
+  if (seq && typeof seq === 'object') {
+    const hit = seqSigCache.get(seq);
+    if (hit !== undefined) return hit;
+    const sig = JSON.stringify(canonicalize(seq));
+    seqSigCache.set(seq, sig);
+    return sig;
+  }
   return JSON.stringify(canonicalize(seq ?? null));
 }
 
@@ -526,8 +538,9 @@ function parseFps(value: unknown): number | null {
 
 
 const DAN_HANDS_CSS = `
-.dan-replay [data-clip-id] { transition: left .45s cubic-bezier(.2,.8,.2,1), width .45s cubic-bezier(.2,.8,.2,1); }
-.dan-touch { box-shadow: 0 0 0 2px #38bdf8, 0 0 14px 3px rgba(56,189,248,.65); z-index: 5; }
+/* 動かすのはダンが触っているクリップだけ。全部のクリップに効く印を段の外枠に付け外しすると、
+   2,000個を超えるクリップの見た目を毎回計算し直して画面が止まっていた（2026-11-16）。 */
+.dan-touch { box-shadow: 0 0 0 2px #38bdf8, 0 0 14px 3px rgba(56,189,248,.65); z-index: 5; transition: left .45s cubic-bezier(.2,.8,.2,1), width .45s cubic-bezier(.2,.8,.2,1); }
 @keyframes dan-appear { from { transform: scaleX(0); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
 .dan-appear { animation: dan-appear .45s cubic-bezier(.2,.8,.2,1); transform-origin: left center; }
 @keyframes dan-vanish { to { transform: scaleY(.15); opacity: 0; } }
@@ -961,9 +974,15 @@ export function VideoReviewEditor({
   // e.g. 59.94 — meant ~2-3 presses per visible frame and let keyframes land between frames.)
   const fps = 30; // 30 = timeline/output rate (see above)
 
+  // 親は読み直すたび（ジョブの確かめで2秒ごとなど）に新しい配列を渡してくる。中身が同じなら前の対応表を使い続け、
+  // タイムラインの全部のクリップを描き直さない。
+  const sequenceAssetsStableRef = useRef<{ sig: string; list: typeof sequenceAssets }>({ sig: '', list: sequenceAssets });
+  const sequenceAssetsSig = JSON.stringify(sequenceAssets || []);
+  if (sequenceAssetsStableRef.current.sig !== sequenceAssetsSig) sequenceAssetsStableRef.current = { sig: sequenceAssetsSig, list: sequenceAssets };
+  const stableSequenceAssets = sequenceAssetsStableRef.current.list;
   const sequenceAssetMap = useMemo(
-    () => new Map((sequenceAssets || []).map((asset) => [asset.id, asset])),
-    [sequenceAssets]
+    () => new Map((stableSequenceAssets || []).map((asset) => [asset.id, asset])),
+    [stableSequenceAssets]
   );
 
   const sequenceVideoClips = useMemo(
@@ -2677,6 +2696,11 @@ export function VideoReviewEditor({
   }, [seekTimeline, timeAtVisibleX]);
   useEffect(() => {
     if (!isTimelineScrubbing) return;
+    // つかんでいる間の手の形は、根の1か所だけで変える。段ごとに印を付け外しすると、
+    // 2,000個を超えるクリップの見た目を毎回計算し直して、押すたびに0.1秒以上止まっていた。
+    const rootEl = document.documentElement;
+    const prevCursor = rootEl.style.cursor;
+    rootEl.style.cursor = 'grabbing';
     let lastT = -1;
     const moveScrub = (event: PointerEvent) => {
       scrubPointerXRef.current = event.clientX;
@@ -2715,6 +2739,7 @@ export function VideoReviewEditor({
     window.addEventListener('pointerup', stopScrub);
     window.addEventListener('pointercancel', stopScrub);
     return () => {
+      rootEl.style.cursor = prevCursor;
       cancelAnimationFrame(raf);
       window.removeEventListener('pointermove', moveScrub);
       window.removeEventListener('pointerup', stopScrub);
@@ -4026,7 +4051,7 @@ export function VideoReviewEditor({
                             key={lane.key}
                             className={`relative w-full overflow-hidden rounded border ${
                               lane.zone === 'audio' ? 'border-border/60 bg-background' : 'border-white/10 bg-neutral-900'
-                            } ${isTimelineScrubbing ? 'cursor-grabbing' : 'cursor-default'}`}
+                            }`}
                             style={{ height: lane.height, marginTop: laneIndex === 0 ? 0 : zoneChanged ? 14 : 4 }}
                             onPointerDown={(event) => {
                               if (event.target === event.currentTarget) laneFns.current.handleTimelinePointerDown(event);
@@ -4201,7 +4226,7 @@ export function VideoReviewEditor({
                           </div>
                         );
                       })
-  ), [timelineLanes, pendingAnnotation, isTimelineScrubbing, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch, viewWin, trackPx, instrJobs]);
+  ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch, viewWin, trackPx, instrJobs]);
 
   return (
     <div
@@ -4355,7 +4380,7 @@ export function VideoReviewEditor({
                 ) : (
                   <TimelinePreview
                     sequence={editSequence}
-                    assets={sequenceAssets || []}
+                    assets={stableSequenceAssets || EMPTY_ASSETS}
                     blurRegionsAt={blurRegionsAt}
                     currentTime={currentTime}
                     seekRev={seekRev}
@@ -5585,7 +5610,7 @@ export function VideoReviewEditor({
                   </button>
                 </div>
               ) : null}
-              <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2 ${danReplay ? 'dan-replay' : ''}`}>
+              <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2`}>
                 <div className="flex gap-x-2 text-[11px]">
                   {/* 段の名前は横に動かしても左に残す（2026-11-13 拡大して右へ動かすと「映像3」などが消えていた） */}
                   <div ref={laneLabelColRef} className="relative z-30 flex w-[82px] shrink-0 flex-col bg-background will-change-transform">
