@@ -464,7 +464,7 @@ const AiShapedText = memo(function AiShapedText({ text, onImageClick, muted = fa
     <>
       {segments.map((s, i) => (s.kind === 'markdown'
         ? <AiMarkdown key={`md-${i}`} text={s.text} onImageClick={onImageClick} muted={muted} shownMedia={shownMedia} />
-        : <ShapeBlock key={`shape-${s.index}`} code={s.code} complete={s.complete} live={live} messageId={live ? null : (messageId || null)} part={keys[s.index] || `i${s.index}`} renderFallback={renderFallback} />))}
+        : <ShapeBlock key={`shape-${s.index}`} code={s.code} complete={s.complete} live={live} messageId={live ? null : (messageId || null)} part={keys[s.index] || `i${s.index}`} renderFallback={renderFallback} onImageClick={onImageClick} />))}
     </>
   );
 });

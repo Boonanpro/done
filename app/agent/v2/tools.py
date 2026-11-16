@@ -417,6 +417,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.web_search import TOOL as WEB_SEARCH_TOOL
     from app.services.places import TOOL as PLACES_TOOL
     from app.services.page_clip import TOOL as PAGE_CLIP_TOOL
+    from app.services.draw_picture import TOOL as DRAW_PICTURE_TOOL
     from app.services.phone_control import TOOL as PHONE_TOOL
     from app.services.confirm_cards import TOOL as CONFIRM_CARD_TOOL
     from app.services.work_progress import TOOL as PROGRESS_TOOL
@@ -435,6 +436,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         WEB_SEARCH_TOOL,
         PLACES_TOOL,
         PAGE_CLIP_TOOL,
+        DRAW_PICTURE_TOOL,
         VIDEO_TOOL,
         PHONE_TOOL,
         CONFIRM_CARD_TOOL,
@@ -546,7 +548,7 @@ BROWSER_TOOL['input_schema']['properties']['ready'] = {
 BROWSER_TOOL['description'] += ' 確認済みの複数段階はbrowser_plan(expected_url,steps)でまとめられる。'
 
 # 読む・探す・文字で押す: evaluate にJSを書く往復を定型の操作に置き換える（app/services/browser_reading.py）。
-BROWSER_TOOL['input_schema']['properties']['action']['enum'] += ['find', 'read', 'follow']
+BROWSER_TOOL['input_schema']['properties']['action']['enum'] += ['find', 'read', 'follow', 'mark']
 BROWSER_TOOL['input_schema']['properties'].update({
     'label': {'type': 'string', 'maxLength': 300, 'description': 'click: refの代わりに、押したい要素の表示文字。完全一致（無ければ部分一致）する見えているクリック対象が1つだけなら押す。複数/0件なら押さずに候補のrefを返す'},
     'role': {'type': 'string', 'description': 'click(label)の絞り込み（link, button, tab など。任意）'},
@@ -566,6 +568,11 @@ BROWSER_TOOL['input_schema']['properties'].update({
              'description': 'save_image / upload_file: ファイルの絶対パス（文字列）。'
                             'follow: 続けて押したい物の表示文字を順に並べる（例: ["口座情報", "入出金明細"]）。多少の表記ゆれは吸収される'},
     'goal': {'type': 'string', 'maxLength': 300, 'description': 'follow: 道筋が分からない時に、行き先を言葉で渡す（例: 9月の入出金明細を表示する）'},
+    'marks': {'type': 'array', 'minItems': 1, 'maxItems': 6, 'items': {'type': 'object', 'additionalProperties': False, 'properties': {
+                  'ref': {'type': 'string', 'description': '要素一覧か find で得た ref'},
+                  'query': {'type': 'string', 'maxLength': 120, 'description': 'ref の代わりに、その物の表示文字'},
+                  'label': {'type': 'string', 'maxLength': 40, 'description': '矢印の先に出す短い言葉（例: ここを押す）。省くと番号'}}},
+              'description': 'mark: 赤い丸と矢印を付ける物'},
     'max_steps': {'type': 'integer', 'minimum': 1, 'maximum': 10, 'description': 'follow(goal): 押す回数の上限（既定6）'},
 })
 BROWSER_TOOL['input_schema']['properties']['selector']['description'] += '／read: 読む範囲のCSSセレクタ（任意。未指定は本文全体）'
@@ -576,6 +583,8 @@ BROWSER_TOOL['description'] += (
     ' follow: メニューをたどる・次へ進む等、押す物が2つ以上続く時は1回で任せられる。path=表示文字の並び、または goal=行き先の説明。'
     '1手ずつの往復が消える。入力・認証・支払い・送信・迷った時はそこで止まって、どこまで押したかと現在の画面を返す。'
     '返った画面が目的どおりかは自分で確認する。'
+    ' mark(marks): 今の画面を撮り、指定した物に赤い丸と矢印（label の言葉つき）を付けた画像を /api/v1/files/… で返す。'
+    '画面のどこを見る・押すかを本人に見せる時に使う（ページそのものは変えない）。'
 )
 
 # ============================================
@@ -1376,6 +1385,8 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
         return ("_places", "read")
     if tool_name == "page_clip":
         return ("_page_clip", "read")
+    if tool_name == "draw_picture":
+        return ("_draw_picture", "create")
     if tool_name == "video":
         return ("_video", "read")
     if tool_name == "phone":
@@ -1475,7 +1486,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_page_clip", "_video", "_phone", "_confirm_card", "_progress", "_summon"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_page_clip", "_draw_picture", "_video", "_phone", "_confirm_card", "_progress", "_summon"}:
             return
 
         error_type = result.get("error_type")
@@ -2625,6 +2636,9 @@ async def execute_tool(
     if skill_name == "_page_clip":
         from app.services.page_clip import tool as page_clip_tool
         return await page_clip_tool(params)
+    if skill_name == "_draw_picture":
+        from app.services.draw_picture import tool as draw_picture_tool
+        return await draw_picture_tool(params)
 
     if skill_name == "_video":
         from app.services.video_analyzer import tool as video_tool
@@ -3025,6 +3039,14 @@ def format_tool_result(
     manual = result.get("manual")
     if manual:
         lines.append(manual)
+        return FormattedToolResult(text="\n".join(lines), images=images)
+
+    # 結果が値の組だけの道具（ファイルの URL・場所の一覧）は、その値をそのまま渡す。2026-11-16 まで page_clip と places は
+    # 「完了」とだけ返り、切り抜いた画像の URL や店の一覧がダンに届いていなかった
+    if skill_name in ("_page_clip", "_draw_picture", "_places") and not result.get("output") and not result.get("content"):
+        import json
+        lines.append(json.dumps({k: v for k, v in result.items() if k not in ("screenshot_base64", "success")},
+                                ensure_ascii=False, default=str))
         return FormattedToolResult(text="\n".join(lines), images=images)
 
     # bash / read_file / write_file / edit_file: output を直接返す
@@ -3735,6 +3757,10 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
         if action in {"find", "read"}:
             from app.services import browser_reading
             return await (browser_reading.find if action == "find" else browser_reading.read)(page, params)
+
+        if action == "mark":
+            from app.services import browser_mark
+            return await browser_mark.mark(page, params)
 
         if action == "fill_form":
             result = await page.fill_form(params.get("fields"), params.get("expected_url"))
