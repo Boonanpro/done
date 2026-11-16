@@ -98,7 +98,8 @@ def size_of(p: Path) -> int:
             return p.stat().st_size
         total = 0
         for r, ds, fs in os.walk(p):
-            ds[:] = [d for d in ds if not os.path.islink(os.path.join(r, d))]
+            # 別の場所を開いている所（~/.dan/mnt/nas の NAS など）は Mac の容量ではないので数えない
+            ds[:] = [d for d in ds if not os.path.islink(os.path.join(r, d)) and not os.path.ismount(os.path.join(r, d))]
             for f in fs:
                 try:
                     total += os.lstat(os.path.join(r, f)).st_size
@@ -663,6 +664,11 @@ def snapshot_sizes():
                 continue
             if base == Path.home() and c in (WS, LIVE):
                 continue
+            out[str(c)] = size_of(c)
+    # Library は丸ごとは測らないが、アプリの控え（After Effects のディスクキャッシュ等）が膨らむのはここなので中を測る
+    caches = Path.home() / 'Library/Caches'
+    for c in (caches.iterdir() if caches.is_dir() else ()):
+        if not c.is_symlink():
             out[str(c)] = size_of(c)
     out['_free'] = free_gb() * GB
     (d / f'{datetime.now(JST):%Y-%m-%d}.json').write_text(json.dumps(out, ensure_ascii=False), encoding='utf-8')
