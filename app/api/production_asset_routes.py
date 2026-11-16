@@ -58,6 +58,9 @@ class ProductionAsset(BaseModel):
     # 長い録画だけの、画面で見るための小さい写し（書き出しには使わない）。_make_view_copy 参照。
     view_path: str | None = None
     view_url: str | None = None
+    # 透明な映像（元の動画に透明度がある）。見るための写しは「上に色・下に透明度」(stacked)
+    has_alpha: bool | None = None
+    view_alpha: str | None = None
     thumbnail_path: str | None = None
     thumbnail_url: str | None = None
     filename: str | None = None
@@ -726,7 +729,9 @@ def _render_caption_overlays(
 
 
 def _asset_source_path(asset: dict[str, Any]) -> Path:
-    source_value = asset.get("proxy_path") or asset.get("local_path")
+    # a transparent video's proxy has no alpha: the export reads the original
+    source_value = (asset.get("local_path") if asset.get("local_path") and _asset_has_alpha(asset) else None) \
+        or asset.get("proxy_path") or asset.get("local_path")
     if not source_value:
         raise RuntimeError(f"Video asset has no local path: {asset.get('id')}")
     path = Path(source_value).resolve()
@@ -2789,6 +2794,9 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
         # even pixel by a 4:2:0 overlay, moving the picture a pixel: place it in 4:4:4 then.
         _odd = (_mx % 2 or _my % 2) and not shape_filt
         _ov_fmt = "yuv444p" if _odd else "yuv420p"
+        if _asset_has_alpha(asset):
+            # a transparent video (text / diagram over nothing): keep its alpha to the overlay
+            _ov_fmt = "yuva444p" if _odd else "yuva420p"
         _ov_mode, _ov_back = (":format=yuv444", ",format=yuv420p") if _odd else ("", "")
         filters.append(
             _movie_input(source_path, source_start) + ","
@@ -5506,6 +5514,42 @@ def _probe_video(path: Path) -> dict[str, Any]:
     }
 
 
+_ALPHA_PIX_PREFIXES = ("yuva", "rgba", "bgra", "argb", "abgr", "gbrap", "ya8", "ya16", "rgba64", "bgra64")
+_ALPHA_CACHE: dict[tuple[str, float], bool] = {}
+
+
+def _video_has_alpha(path: Path) -> bool:
+    """Does this video carry transparency (ProRes 4444 with alpha, PNG/QuickTime Animation in a .mov…)?
+    2026-11-16: 透明な映像（背景が透けた文字・図）を別のクリップとして重ねるため。プレビューの写しと
+    書き出しが透明を残す。"""
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        return False
+    if key in _ALPHA_CACHE:
+        return _ALPHA_CACHE[key]
+    try:
+        r = subprocess.run([_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "stream=pix_fmt", "-of", "default=nw=1:nk=1", str(path)],
+                           capture_output=True, text=True, timeout=30, check=False)
+        pix = (r.stdout or "").strip().splitlines()[0].strip() if (r.stdout or "").strip() else ""
+    except Exception:  # noqa: BLE001
+        pix = ""
+    has = pix.startswith(_ALPHA_PIX_PREFIXES)
+    _ALPHA_CACHE[key] = has
+    return has
+
+
+def _asset_has_alpha(asset: dict[str, Any]) -> bool:
+    """The ORIGINAL file of a video asset is transparent (the proxy / watching copy never are)."""
+    if not isinstance(asset, dict) or asset.get("kind") != "video":
+        return False
+    if isinstance(asset.get("has_alpha"), bool):
+        return bool(asset["has_alpha"])
+    local = asset.get("local_path")
+    return bool(local) and Path(str(local)).is_file() and _video_has_alpha(Path(str(local)))
+
+
 def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
     src = Path(source_path)
     out_dir = _room_dir(room_id)
@@ -5641,6 +5685,8 @@ def _needs_view_copy(asset: dict[str, Any]) -> bool:
     src = next((asset.get(k) for k in ("proxy_path", "local_path") if asset.get(k) and Path(str(asset.get(k))).is_file()), None)
     if not src:
         return False
+    if _asset_has_alpha(asset):
+        return True  # the browser can't decode the transparent original: always a stacked copy
     meta = asset.get("metadata") or {}
     duration = float(meta.get("duration") or 0)
     long_side = max(int(meta.get("width") or 0), int(meta.get("height") or 0))
@@ -5690,15 +5736,28 @@ def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path
     asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
     if not asset or not (force or _needs_view_copy(asset)):
         return None
-    src = Path(str(asset.get("proxy_path") or asset.get("local_path")))
+    alpha = _asset_has_alpha(asset)
+    # a transparent video: from the ORIGINAL (a proxy would have lost the alpha)
+    src = Path(str(asset.get("local_path") if alpha else (asset.get("proxy_path") or asset.get("local_path"))))
     out_dir = _room_dir(room_id)
     view = out_dir / f"{asset_id}_view.mp4"
     tmp = out_dir / f"{asset_id}_view.tmp.mp4"
     fps = float((asset.get("metadata") or {}).get("proxy_fps") or _room_frame_rate(room_id))
     cfr = ["-fps_mode", "cfr"] if _ffmpeg_major(_ffmpeg()) >= 6 else ["-vsync", "cfr"]
+    scale = f"scale=w={VIEW_COPY_LONG_SIDE}:h={VIEW_COPY_LONG_SIDE}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps:g}"
+    if alpha:
+        # STACKED: colour on the top half, the alpha as grey on the bottom half (H.264 has no alpha).
+        # The preview joins the halves back (frontend alpha-unpack.ts). Colour where fully
+        # transparent is set to black so the scaled edges don't bleed a stray colour.
+        video_args = ["-filter_complex",
+                      f"[0:v]{scale},format=rgba,split[c][a];[a]alphaextract,format=gray[al];"
+                      f"[c]premultiply=inplace=1,format=yuv420p[cp];[al]format=yuv420p[ap];[cp][ap]vstack,format=yuv420p[v]",
+                      "-map", "[v]", "-map", "0:a?"]
+    else:
+        video_args = ["-vf", scale]
     cmd = [
         _ffmpeg(), "-y", "-i", str(src),
-        "-vf", f"scale=w={VIEW_COPY_LONG_SIDE}:h={VIEW_COPY_LONG_SIDE}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps:g}",
+        *video_args,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIEW_COPY_CRF),
         "-g", str(max(1, round(fps * 0.5))), "-bf", "0", *cfr,
         "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(tmp),
@@ -5711,6 +5770,8 @@ def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path
         raise RuntimeError("view copy encode failed")
     tmp.replace(view)
     _update_asset(room_id, asset_id, {
+        "has_alpha": alpha,
+        "view_alpha": "stacked" if alpha else None,
         "view_path": str(view),
         "view_url": f"/api/v1/production-assets/media?room_id={room_id}&asset_id={asset_id}&variant=view&v={int(view.stat().st_mtime)}",
     })
@@ -5919,6 +5980,13 @@ def _first_file(asset: dict[str, Any], keys: tuple[str, ...]) -> Path | None:
     return None
 
 
+def _picture_keys(asset: dict[str, Any]) -> tuple[str, ...]:
+    """Files to cut a still from: a stacked watching copy (colour over alpha) is not a picture."""
+    if asset.get("view_alpha") == "stacked":
+        return ("local_path", "proxy_path")
+    return ("view_path", "proxy_path", "local_path")
+
+
 def _is_image_asset(asset: dict[str, Any], src: Path) -> bool:
     return str(asset.get("kind") or "") == "image" or src.suffix.lower() in _IMAGE_EXT
 
@@ -5926,7 +5994,7 @@ def _is_image_asset(asset: dict[str, Any], src: Path) -> bool:
 async def _thumb_at(room_id: str, asset: dict[str, Any], t: float | None) -> Path | None:
     global _THUMB_SEM
     asset_id = str(asset.get("id") or "")
-    src = _first_file(asset, ("view_path", "proxy_path", "local_path"))
+    src = _first_file(asset, _picture_keys(asset))
     if not asset_id or not src:
         return None
     image = _is_image_asset(asset, src)
@@ -6014,7 +6082,7 @@ async def _filmstrip(room_id: str, asset: dict[str, Any], minute: int) -> Path |
     プレビューの映像の読み込みを止めていた（2026-11-13 試し）。1分ごとにまとめて1回にする。"""
     global _THUMB_SEM
     asset_id = str(asset.get("id") or "")
-    src = _first_file(asset, ("view_path", "proxy_path", "local_path"))
+    src = _first_file(asset, _picture_keys(asset))
     if not asset_id or not src or _is_image_asset(asset, src):
         return None
     out_dir = _room_dir(room_id) / "thumbs"

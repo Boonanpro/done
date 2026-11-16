@@ -8,6 +8,7 @@ import type { CaptionDesign } from './caption-design';
 import { FrameSourceManager, webCodecsSupported } from './frame-source';
 import { SceneLayer, isSceneClip, type SceneClip } from './scene-layer';
 import { gradeFilter } from './grade-filter';
+import { ALPHA_ASSET_IDS, alphaSolidAt, unpackStacked } from './alpha-unpack';
 import { AudioSourceManager, STRETCH_BLOCK_SEC, audioOnlyUrl, webAudioSupported } from './audio-source';
 import { localMedia, localMediaEnabled, localPlaySrc, type LocalMediaProgress } from './local-media';
 import { isOneForm, motionAt, pictureRect, visibleRect, cropOf, type Motion } from './placement';
@@ -165,9 +166,18 @@ function clipSourceTime(clip: SequenceClip, t: number): number {
 // この段の映像が画面を全部ふさぐか（ふさぐなら、それより下の段は見えない）。
 // 絵（画像）は透けている所があるかもしれないので、ふさがない扱い。迷う物はふさがない扱いにする
 // （その時は下の段もそろうまで待つだけで、間違った絵は出ない）。
+// A transparent video's watching copy is stacked (colour over alpha): join it back into one
+// picture with real transparency before it is placed (alpha-unpack.ts).
+function joinAlpha(clip: SequenceClip, got: { src: CanvasImageSource; vw: number; vh: number }): { src: CanvasImageSource; vw: number; vh: number } {
+  const id = String(clip.asset_id || '');
+  if (!ALPHA_ASSET_IDS.has(id)) return got;
+  return unpackStacked(id, got.src, got.vw, got.vh) || { ...got, vh: got.vh / 2 };
+}
+
 function coversFrame(vc: VisualClip, imageAssets: Map<string, string>): boolean {
   const c = vc.clip;
   if (imageAssets.has(String(c.asset_id || ''))) return false;
+  if (ALPHA_ASSET_IDS.has(String(c.asset_id || ''))) return false; // 透明な映像は下の段を隠さない
   if (c.opacity != null && Number(c.opacity) < 0.999) return false;
   const shape = (c as { shape?: string }).shape;
   if (shape === 'circle' || shape === 'rounded') return false;
@@ -326,7 +336,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // asset_id -> decode source URL (the proxy). Memoised so frame lookups are cheap per draw.
   const srcByAssetId = useMemo(() => {
     const m = new Map<string, string>();
-    for (const a of videoAssets) { const s = assetSrc(a); if (s) m.set(a.id, s); }
+    for (const a of videoAssets) {
+      const s = assetSrc(a);
+      if (s) m.set(a.id, s);
+      if (a.alpha === 'stacked') ALPHA_ASSET_IDS.add(a.id); else ALPHA_ASSET_IDS.delete(a.id);
+    }
     return m;
   }, [videoAssets]);
 
@@ -840,7 +854,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           // 再生中でも、頭出し中や時刻が離れた要素の絵は使わない（古い絵のまま時計だけ進むのを防ぐ）
           const near = Math.abs(vel.currentTime - expected) < (playingRef.current ? 0.15 : 0.12);
           if (!supported || (near && !(playingRef.current && vel.seeking && gateRef.current))) {
-            return { src: vel, vw: vel.videoWidth, vh: vel.videoHeight };
+            return joinAlpha(clip, { src: vel, vw: vel.videoWidth, vh: vel.videoHeight });
           }
         }
       }
@@ -854,7 +868,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const hi = frozen ? ss : Number(clip.source_end ?? ss);
       const frame = fs.peek(clipSourceTime(clip, t), lo, hi);
       if (!frame) return null;
-      return { src: frame, vw: frame.width || fs.width, vh: frame.height || fs.height };
+      return joinAlpha(clip, { src: frame, vw: frame.width || fs.width, vh: frame.height || fs.height });
     },
     [srcByAssetId, imageSrcByAssetId, imageFor, supported],
   );
@@ -1732,6 +1746,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           const imageUrl = imageSrcByAssetId.get(String(vc.clip.asset_id || ''));
           const img = imageUrl ? imageFor(imageUrl) : null;
           if (img && !opaqueAt(img, ((X - P.x) / P.w) * img.naturalWidth, ((Y - P.y) / P.h) * img.naturalHeight)) continue;
+          // 透明な映像も、透けている所を押したら下の物を選ぶ
+          const aid = String(vc.clip.asset_id || '');
+          if (!img && ALPHA_ASSET_IDS.has(aid) && !alphaSolidAt(aid, (X - P.x) / P.w, (Y - P.y) / P.h)) continue;
         } else {
           const p = vc.position;
           if (p && !(fx >= p.x && fx <= p.x + p.width && fy >= p.y && fy <= p.y + p.height)) continue;
