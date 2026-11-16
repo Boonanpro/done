@@ -6,7 +6,10 @@
 
 指示1つ = 作品の部屋（エディターの右の「ダンと制作」、app/services/editor_rooms.py）の並行作業1つ
 （app/services/parallel_job_runner.py）。並行作業は部屋の会話を引き継いで始まり、終わると部屋のダンが起こされて
-本人に1通だけ返事を書く。指示の画面上の印（ピンの点・ペンの線・枠）は、その時刻の完成画面に描いた絵にして渡す。
+本人に1通だけ返事を書いていた。2026-11-17 本人「コメントした修正をやった後、サイドバーのチャットでも報告が来るのはいらない。
+どういう指示で直したかは履歴・記憶として重ねて把握しておいてほしいが、チャットで言う必要はない」→ quiet で始める。結果は
+指示の欄（instructions/status）に出て、部屋のダンには次の番の冒頭（chat_routes._quiet_job_reports）と room_work_text で届く。
+同じ指示を書き直して送った時は、前の回の指示と結果を作業に渡す（足りなかった分を直す）。指示の画面上の印（ピンの点・ペンの線・枠）は、その時刻の完成画面に描いた絵にして渡す。
 
 効果音の一覧（sfx_library / use_sfx）も同じ所に置く: 本人「よく使う効果音を一覧にして、自分で手動で貼れるように」。
 """
@@ -14,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import time
 import uuid
@@ -125,7 +129,7 @@ def frame_with_marks(room_id: str, content_id: str, ann: dict[str, Any]) -> str 
         return None
 
 
-def build_task(ann: dict[str, Any], content_title: str, image: str | None) -> str:
+def build_task(ann: dict[str, Any], content_title: str, image: str | None, previous: dict[str, Any] | None = None) -> str:
     kind = str(ann.get('kind') or '')
     data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
     start = float(ann.get('start') or 0)
@@ -151,8 +155,16 @@ def build_task(ann: dict[str, Any], content_title: str, image: str | None) -> st
         "",
         "同じ作品では、本人が送ったほかの指示もそれぞれ並行で動いている（parallel_work の list で見られる）。"
         "同じクリップを触る作業があれば、相手の結果を壊さないように直す。指示の範囲の外は触らない。",
-        "直したら render_frame・probe_audio で実物を確かめる。最後の返事は、本人に見せる言葉で1〜2文（何をどこに入れたか）。",
+        "直したら render_frame・probe_audio で実物を確かめる。最後の返事は、本人に見せる言葉で1〜2文（何をどこに入れたか）。"
+        "返事はエディターのこの指示の欄にだけ出て、チャットには出ない（本人がそう望んだ）。",
     ]
+    if previous:
+        lines[1:1] = [
+            "- この指示は、前に同じ場所へ送った指示の書き直し。前の回の直しでは本人が満足していない。前の回の結果を土台に、"
+            "足りない所を直す（前の回を消してやり直すのではない）。",
+            f"- 前の回の指示: 「{previous.get('note') or '（読めなかった）'}」",
+            f"- 前の回の結果: {previous.get('result') or '（記録なし）'}",
+        ]
     return '\n'.join(lines)
 
 
@@ -160,6 +172,24 @@ def _title(ann: dict[str, Any]) -> str:
     note = str(ann.get('note') or '').strip().replace('\n', ' ')
     head = {'marker': 'ピン', 'freehand': 'ペン', 'rect': '枠', 'note': '素材の枠'}.get(str(ann.get('kind') or ''), '指示')
     return f"{head} {_fmt(float(ann.get('start') or 0))} {note}"[:40]
+
+
+_NOTE_RE = re.compile(r"- 指示の言葉: 「(.*?)」\n", re.S)
+
+
+def _previous(user_id: str, ann: dict[str, Any]) -> dict[str, Any] | None:
+    """書き直して送った指示なら、前の回の指示の言葉と結果（画面は送る時に前の job_id を data に持ったまま送ってくる）。"""
+    data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
+    jid = str(data.get('job_id') or '')
+    if not jid:
+        return None
+    from app.services import command_job_state as state
+    s = state.read(jid)
+    if not s or s.get('user_id') != user_id:
+        return None
+    m = _NOTE_RE.search(str(s.get('task') or ''))
+    return {'note': m.group(1).strip() if m else '',
+            'result': str(s.get('result') or s.get('error') or '').strip()[:1500]}
 
 
 async def send(user_id: str, asset_room_id: str, content_id: str, ann: dict[str, Any]) -> dict[str, Any]:
@@ -176,8 +206,8 @@ async def send(user_id: str, asset_room_id: str, content_id: str, ann: dict[str,
     if dest is not None:
         dest.unlink(missing_ok=True)
         asyncio.get_running_loop().run_in_executor(None, frame_with_marks, asset_room_id, content_id, dict(ann))
-    task = build_task(ann, str(content.get('title') or content_id), str(dest) if dest else None)
-    job = await parallel_job_runner.start(room['room_id'], user_id, task, title=_title(ann))
+    task = build_task(ann, str(content.get('title') or content_id), str(dest) if dest else None, _previous(user_id, ann))
+    job = await parallel_job_runner.start(room['room_id'], user_id, task, title=_title(ann), quiet=True)
     return {'job_id': job['id'], 'room_id': room['room_id'], 'state': job.get('state'), 'image': str(dest) if dest else None}
 
 
@@ -283,14 +313,16 @@ def use_sfx(room_id: str, source_room_id: str, source_asset_id: str) -> dict[str
     return row
 
 
-def room_work_text(room_id: str, hours: float = 3.0) -> str:
-    """作品の部屋で、本人がタイムラインから送った指示の作業（並行作業）の今の一覧。部屋のダンと各作業の前置きに入れる。
-    本人「エディターの中のダンは全体の履歴や今何をやっているかを把握している」。"""
+def room_work_text(room_id: str, hours: float | None = None, limit: int = 30) -> str:
+    """作品の部屋で、本人がタイムラインから送った指示の作業（並行作業）の一覧。部屋のダンと各作業の前置きに入れる。
+    本人「エディターの中のダンは全体の履歴や今何をやっているかを把握している」。部屋は作品ごとなので、既定では
+    時間で切らず、この作品で受けた指示と結果の新しい limit 件を履歴として渡す（11/17 結果をチャットに出さなくなったので、
+    これと次の番の冒頭が、部屋のダンが指示の履歴を知る道）。"""
     from datetime import datetime, timedelta, timezone
     from app.services import command_job_state as state
     if not room_id or not state.ROOT.exists():
         return ''
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat() if hours else ''
     rows = []
     for p in state.ROOT.glob('*.json'):
         s = state.read(p.stem)
@@ -304,11 +336,11 @@ def room_work_text(room_id: str, hours: float = 3.0) -> str:
         return ''
     rows.sort(key=lambda s: s.get('created_at') or '')
     label = {'completed': '済み', 'failed': '止まった', 'cancelled': '取り消し'}
-    lines = ['## この作品で並行して動いている作業（本人がタイムラインから送った指示など）',
+    lines = ['## この作品で本人がタイムラインから送った指示と、その作業（古い順。結果は指示の欄に出し、チャットには出していない）',
              'それぞれ別のダンが部屋の会話を引き継いで動かしている。同じクリップを直す時は相手の結果を壊さない。'
              '「今何してる？」には、この一覧と parallel_work の list で答える。']
-    for s in rows[-20:]:
+    for s in rows[-limit:]:
         st = '動いている' if s.get('state') not in state.TERMINAL else label.get(s.get('state'), s.get('state'))
-        res = str(s.get('result') or s.get('error') or '').strip().replace('\n', ' ')[:160]
+        res = str(s.get('result') or s.get('error') or '').strip().replace('\n', ' ')[:240]
         lines.append(f"- [{st}] {s.get('title') or ''}（id {str(s['id'])[:8]}）" + (f" → {res}" if res and st != '動いている' else ''))
     return '\n'.join(lines)

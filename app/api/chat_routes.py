@@ -359,7 +359,7 @@ def _quiet_job_reports(room_id: str, since) -> list:
             continue
         text = (s.get("result") or s.get("error") or "").strip()
         if text:
-            found.append((at, f"運用室での作業（チャットには出していない）・{s.get('title') or ''}: {text[:1200]}"))
+            found.append((at, f"チャットに出していない作業（運用室・エディターの指示など）・{s.get('title') or ''}: {text[:1200]}"))
     return [line for _, line in sorted(found)]
 
 
