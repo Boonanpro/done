@@ -30,6 +30,8 @@ def trim_sequence(sequence: dict[str, Any], assets: dict[str, dict[str, Any]],
     """Visual lanes of frames [k0, k1), moved so frame k0 is time 0. Audio lanes are emptied
     (sound is mixed from the original sequence). A clip owns frame k when the frame's centre
     is inside it — the export's rule — so the cut keeps every frame's picture."""
+    from app.services.clip_placement import render_sequence
+    sequence = render_sequence(sequence, assets)  # the one form → the box form the export draws
     from app.api import production_asset_routes as par
     from app.services.timeline_commands import _rebase_keys
 

@@ -328,6 +328,10 @@ def timeline_outline(sequence: dict[str, Any], assets: dict[str, dict[str, Any]]
                         what += " cropped"
                     if c.get("transform_keys"):
                         what += f" moves({len(c.get('transform_keys'))}keys)"
+                    from app.services.clip_placement import describe as _place_desc
+                    _pd = _place_desc(c)
+                    if _pd:
+                        what += " " + _pd
                     if c.get("fit") and c.get("fit") != "cover":
                         what += f" fit={c.get('fit')}"
                     if c.get("video_enabled") is False:

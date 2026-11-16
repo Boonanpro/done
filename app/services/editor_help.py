@@ -15,7 +15,7 @@ def read(topic='workflow'):
         from app.services.editor_methods import read as methods
         return methods()
     topics={
-        'motion':{'media':'画像・動画の移動と拡大はset_clip_propsのtransform_keys [{t,x,y,w,h}]。tはクリップ先頭からの秒、x/y/w/hはキャンバスに対する正規化値。例: [{t:0,x:0.1,y:0.1,w:0.8,h:0.8},{t:2,x:0,y:0,w:1,h:1}]。静的なpositionは{x,y,width,height}でキー名が異なる。',
+        'motion':{'media':'画像・動画の大きさと位置はエディターの欄と同じ1組の数字: set_clip_propsのtransform {scale,x,y}（scale 1=100%、x/yは絵の中心の画面中央からのずれ）。動きはmotion_keys [{t,scale,x,y,ease}]（tはクリップ先頭からの秒、easeは次のキーまでの動き方 linear/ease_out/ease_in/ease_in_out/hold）。動きの始めと終わりだけキーを打ち、1コマごとに書かない。例: [{t:0,scale:1,x:0,y:0,ease:"ease_out"},{t:2,scale:1.2,x:0,y:-0.05}]。position {x,y,width,height}で置いても保存時にtransformへ直る。素材は先に切らずに元の長さで入れ、使う区間はsource_startで指定する。画像は透明な余白ごと画面サイズで作らない（取り込み時に絵だけになり、元の位置に置かれる）。',
             'captions':'文字もtransform_keysで連続移動・拡大できる。本文とstyleはset_clipで編集し、動きはそのまま保持できる。文字のキーはデザイン全体の平面に作用し、標準はx=0,y=0,w=1,h=1。x/yは右/下への移動量、w/hは拡大倍率。style.yは下端からの位置で、キーのyとは向きが異なる。',
             'authoring':'animate_clip(clip_id,poses:[{t,x,y,w,h},...],easing:cubic_out)で少数の通過点から滑らかな動きを作れる。文字・素材・領域に対応。文字を何十個もの短いクリップに分ける必要はない。linearとcubic_in_outも選べる。既存の動きを変更する時はtimeline_stateで先に読む。',
             'layers':'add_caption/add_region/add_clipのlaneで上下を指定できる。lane="front"で実行時点の最前面へ新しい映像レーン。背景→図形→文字の順で重ねる場合、別の空きレーンに自動配置すると順序が変わることがあるので明示する。',

@@ -1410,11 +1410,25 @@ def _ensure_native_caption_cache(room_id: str, sequence: dict[str, Any], canvas:
     return [it["key"] for it in missing if not _ready(it["key"])]
 
 
+def _box_form_instruction(room_id: str, instruction: dict[str, Any]) -> dict[str, Any]:
+    """The instruction with its timeline's picture clips in the box form every exporter draws
+    (clip_placement: the stored one form — サイズ・左右・上下・キーフレーム — turned back into
+    the box that covers the picture). Idempotent: box-form clips pass through."""
+    timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else None
+    sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
+    if not isinstance(sequence, dict):
+        return instruction
+    from app.services.clip_placement import render_sequence
+    fmt = str(sequence.get("format") or timeline.get("format") or "9:16")
+    return {**instruction, "timeline": {**timeline, "sequence": render_sequence(sequence, _assets_by_id(room_id), fmt)}}
+
+
 def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
     """Preview-parity export through the native GPU compositor. Returns None only when
     the native path is NOT APPLICABLE (no exe / non-9:16 / no sequence) so the caller
     falls back to the FFmpeg re-creation; a real export failure raises instead — the
     FFmpeg path does not match the preview and must not silently replace it."""
+    instruction = _box_form_instruction(room_id, instruction)
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
     if not isinstance(sequence, dict):
@@ -1823,6 +1837,31 @@ def _moving_video_layer(src: str, idx: int | str, keys: list[dict[str, float]],
     return lines, f"mva{idx}"
 
 
+def _opacity_filter(clip: dict[str, Any], *, alpha: bool = True) -> str:
+    """不透明度: an overlay's alpha scaled (alpha=True), or a bottom-lane picture darkened toward
+    the black under it (alpha=False) — the preview's ctx.globalAlpha. '' at full opacity."""
+    try:
+        op = max(0.0, min(1.0, float(clip.get("opacity")))) if clip.get("opacity") is not None else 1.0
+    except (TypeError, ValueError):
+        op = 1.0
+    if op >= 0.999:
+        return ""
+    if alpha:
+        return f",format=rgba,colorchannelmixer=aa={op:.4f}"
+    return f",format=gbrp,colorchannelmixer=rr={op:.4f}:gg={op:.4f}:bb={op:.4f}"
+
+
+def _image_crop(clip: dict[str, Any]) -> tuple[float, float, float, float]:
+    """left, top, right, bottom of a picture clip's crop mask (fractions of the picture)."""
+    c = clip.get("crop") if isinstance(clip.get("crop"), dict) else {}
+    def f(k: str) -> float:
+        try:
+            return max(0.0, min(0.9, float(c.get(k) or 0)))
+        except (TypeError, ValueError):
+            return 0.0
+    return f("left"), f("top"), f("right"), f("bottom")
+
+
 def _image_key_frames(clip: dict[str, Any], img_path: Any, its: float, ite: float, fps: float,
                       out_w: int, out_h: int, kdir: Path):
     """Full-canvas PNGs for the frames of an image clip whose box is still moving.
@@ -1847,6 +1886,7 @@ def _image_key_frames(clip: dict[str, Any], img_path: Any, its: float, ite: floa
         return (kdir, k_first, 0, last) if len(keys) == 1 else None
     from PIL import Image
     kdir.mkdir(parents=True, exist_ok=True)
+    cl, ct, cr, cb = _image_crop(clip)
     src = Image.open(str(img_path)).convert("RGBA")
     pos = clip.get("position") if isinstance(clip.get("position"), dict) else {}
     bx0 = _box_num(pos, "x", 0.05) * out_w
@@ -1859,8 +1899,13 @@ def _image_key_frames(clip: dict[str, Any], img_path: Any, its: float, ite: floa
         r = min(bw / src.width, bh / src.height)  # contain, centred — the still path's fit
         nw, nh = max(1, round(src.width * r)), max(1, round(src.height * r))
         im = src if (nw, nh) == src.size else src.resize((nw, nh), Image.BILINEAR)
+        ox, oy = round(bx + (bw - nw) / 2), round(by + (bh - nh) / 2)
+        if cl + ct + cr + cb > 1e-4:  # crop = a mask on the placed picture
+            x0, y0 = round(nw * cl), round(nh * ct)
+            im = im.crop((x0, y0, max(x0 + 1, round(nw * (1 - cr))), max(y0 + 1, round(nh * (1 - cb)))))
+            ox, oy = ox + x0, oy + y0
         canvas = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 0))
-        canvas.paste(im, (round(bx + (bw - nw) / 2), round(by + (bh - nh) / 2)))  # empty canvas: a plain copy
+        canvas.paste(im, (ox, oy))  # empty canvas: a plain copy
         canvas.save(kdir / f"{n:05d}.png", compress_level=1)
     return kdir, k_first, len(frames), last
 
@@ -2126,6 +2171,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
     """One FFmpeg filtergraph over the given timeline -> out_path. Returns
     (rendered_base_clips, width, height), or None when there is nothing to draw.
     still: out_path is a PNG of the first frame (video_only)."""
+    instruction = _box_form_instruction(room_id, instruction)
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
     if not isinstance(sequence, dict):
@@ -2167,12 +2213,59 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             img_path = _asset_source_path(asset)
             nfr = _clip_frame_count(clip, timeline_fps)
             out_dur = nfr / timeline_fps
-            filters.append(
-                f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur:.6f},"
-                f"setpts=PTS-STARTPTS,fps={fps_filter},"
-                f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
-                f"crop={output_width}:{output_height},setsar=1{_grade_filter(clip)},format=yuv420p{norm_tail(nfr)}[v{rendered_count}]"
-            )
+            _ibox = clip.get("position") if isinstance(clip.get("position"), dict) else None
+            _icl, _ict, _icr, _icb = _image_crop(clip)
+            _ikeys = _clip_box_keys(clip)
+            _imd = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+            _isw, _ish = float(_imd.get("width") or 0), float(_imd.get("height") or 0)
+            if _ikeys and _keys_move(_ikeys) and _isw > 0 and _ish > 0:
+                # a MOVING still on the bottom lane (push-in on a picture): the same per-frame
+                # placement as a moving video, over black
+                _ts_clip = float(clip.get("timeline_start") or 0)
+                _bx0, _by0, _bw0, _bh0 = _pos_box(_ibox)
+                layer_lines, layer = _moving_video_layer(
+                    f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur + 2 / timeline_fps:.6f},"
+                    f"setpts=PTS-STARTPTS,fps={fps_filter},format=rgba{_grade_filter(clip)}",
+                    rendered_count, _ikeys,
+                    (_bx0 * output_width, _by0 * output_height, _bw0 * output_width, _bh0 * output_height),
+                    _isw, _ish, output_width, output_height, fps_filter, out_dur,
+                    _frame_index(_ts_clip, timeline_fps) / timeline_fps - _ts_clip,
+                    crop=(_icl, _ict, _icr, _icb))
+                filters.extend(layer_lines)
+                filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur + 1 / timeline_fps:.6f}[bg{rendered_count}]")
+                filters.append(
+                    f"[bg{rendered_count}][{layer}]overlay=0:0:eof_action=repeat{_opacity_filter(clip, alpha=False)},format=yuv420p{norm_tail(nfr)}[v{rendered_count}]"
+                )
+            elif (_ibox is None or _is_full_box(_ibox)) and _icl + _ict + _icr + _icb <= 1e-4:
+                filters.append(
+                    f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur:.6f},"
+                    f"setpts=PTS-STARTPTS,fps={fps_filter},"
+                    f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                    f"crop={output_width}:{output_height},setsar=1{_grade_filter(clip)}{_opacity_filter(clip, alpha=False)},format=yuv420p{norm_tail(nfr)}[v{rendered_count}]"
+                )
+            else:
+                # a placed still on the bottom lane (scaled / moved / cropped): the picture covers
+                # its box, the crop mask and the canvas window it, black around — the preview's drawSource
+                _bx, _by, _bw, _bh = _pos_box(_ibox)
+                _cw, _ch = max(2, round(_bw * output_width)), max(2, round(_bh * output_height))
+                _ox, _oy = round(_bx * output_width), round(_by * output_height)
+                _kx0 = max(round(_cw * _icl), -_ox, 0)
+                _kx1 = min(_cw - round(_cw * _icr), output_width - _ox, _cw)
+                _ky0 = max(round(_ch * _ict), -_oy, 0)
+                _ky1 = min(_ch - round(_ch * _icb), output_height - _oy, _ch)
+                filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur + 1 / timeline_fps:.6f}[bg{rendered_count}]")
+                if _kx1 - _kx0 < 2 or _ky1 - _ky0 < 2:
+                    filters.append(f"[bg{rendered_count}]format=yuv420p{norm_tail(nfr)}[v{rendered_count}]")
+                else:
+                    filters.append(
+                        f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur:.6f},"
+                        f"setpts=PTS-STARTPTS,fps={fps_filter},format=rgba,"
+                        f"scale={_cw}:{_ch}:force_original_aspect_ratio=increase,crop={_cw}:{_ch},"
+                        f"crop={_kx1 - _kx0}:{_ky1 - _ky0}:{_kx0}:{_ky0}:exact=1,setsar=1{_grade_filter(clip)}{_opacity_filter(clip)}[src{rendered_count}]"
+                    )
+                    filters.append(
+                        f"[bg{rendered_count}][src{rendered_count}]overlay={_ox + _kx0}:{_oy + _ky0}:eof_action=repeat,format=yuv420p{norm_tail(nfr)}[v{rendered_count}]"
+                    )
             if has_audio_track:
                 concat_parts.append(f"[v{rendered_count}]")
             else:
@@ -2243,7 +2336,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             filters.extend(layer_lines)
             filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur + 1 / timeline_fps:.6f}[bg{rendered_count}]")
             filters.append(
-                f"[bg{rendered_count}][{layer}]overlay=0:0:eof_action=repeat,format=yuv420p{base_shape}{norm_tail(nfr)}[v{rendered_count}]"
+                f"[bg{rendered_count}][{layer}]overlay=0:0:eof_action=repeat{_opacity_filter(clip, alpha=False)},format=yuv420p{base_shape}{norm_tail(nfr)}[v{rendered_count}]"
             )
         elif identity or sw <= 0 or sh <= 0:
             # IDENTITY (or unknown source dims): exact current cover-crop string (byte-identical).
@@ -2256,7 +2349,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             filters.append(
                 _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.4f}:end={source_end:.4f},"
-                f"{setpts}{grade},format=yuv420p{base_shape}{norm_tail(nfr)}"
+                f"{setpts}{grade}{_opacity_filter(clip, alpha=False)},format=yuv420p{base_shape}{norm_tail(nfr)}"
                 f"[v{rendered_count}]"
             )
         else:
@@ -2300,7 +2393,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
                     f"[src{rendered_count}]"
                 )
                 filters.append(
-                    f"[bg{rendered_count}][src{rendered_count}]overlay={ox + kx0}:{oy + ky0}:eof_action=repeat:format=yuv444,format=yuv420p{base_shape}{norm_tail(nfr)}[v{rendered_count}]"
+                    f"[bg{rendered_count}][src{rendered_count}]overlay={ox + kx0}:{oy + ky0}:eof_action=repeat:format=yuv444{_opacity_filter(clip, alpha=False)},format=yuv420p{base_shape}{norm_tail(nfr)}[v{rendered_count}]"
                 )
         if not has_audio_track:
             if _meta_has_audio(metadata, source_path) and not clip.get("muted") and not is_freeze:
@@ -2486,7 +2579,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
                 kdir, k_first, k_count, last = moving
                 filters.append(
                     _movie_input(str(kdir / "%05d.png"), 0.0, fmt="image2")
-                    + f",format=rgba{_grade_filter(clip)},settb=AVTB,setpts=(N+{k_first}-0.5)/({fps_filter}*TB)[kimg{oi}]"
+                    + f",format=rgba{_grade_filter(clip)}{_opacity_filter(clip)},settb=AVTB,setpts=(N+{k_first}-0.5)/({fps_filter}*TB)[kimg{oi}]"
                 )
                 filters.append(
                     f"[{video_out}][kimg{oi}]overlay=0:0:enable='gte(t\\,{(k_first - 0.5) / timeline_fps:.5f})"
@@ -2503,13 +2596,22 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             # One picture per output frame on the exact frame grid (half a frame early, like
             # every overlay here); the gate decides the first and last frame.
             k_a, k_b = _frame_index(its, timeline_fps), _frame_index(ite, timeline_fps)
+            # crop = a mask on the placed picture (fractions of it), like the preview's drawSource
+            _icl, _ict, _icr, _icb = _image_crop(clip)
+            _icrop, _ix, _iy = "", f"{ipx}+({iow}-w)/2", f"{ipy}+({ioh}-h)/2"
+            if _icl + _ict + _icr + _icb > 1e-4:
+                _fw, _fh = 1.0 / (1 - _icl - _icr), 1.0 / (1 - _ict - _icb)
+                _icrop = (f",crop=w='max(2\\,iw*{1 - _icl - _icr:.5f})':h='max(2\\,ih*{1 - _ict - _icb:.5f})'"
+                          f":x='iw*{_icl:.5f}':y='ih*{_ict:.5f}'")
+                _ix = f"{ipx}+({iow}-w*{_fw:.5f})/2+w*{_fw * _icl:.5f}"
+                _iy = f"{ipy}+({ioh}-h*{_fh:.5f})/2+h*{_fh * _ict:.5f}"
             filters.append(
                 f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=end_frame={max(1, k_b - k_a)},"
                 f"settb=AVTB,setpts=(N+{k_a}-0.5)/({fps_filter}*TB),format=rgba,"
-                f"scale=w={iow}:h={ioh}:force_original_aspect_ratio=decrease{_grade_filter(clip)}[img{oi}]"
+                f"scale=w={iow}:h={ioh}:force_original_aspect_ratio=decrease{_icrop}{_grade_filter(clip)}{_opacity_filter(clip)}[img{oi}]"
             )
             filters.append(
-                f"[{video_out}][img{oi}]overlay=x={ipx}+({iow}-w)/2:y={ipy}+({ioh}-h)/2"
+                f"[{video_out}][img{oi}]overlay=x={_ix}:y={_iy}"
                 f":enable='gte(t\\,{(k_a - 0.5) / timeline_fps:.5f})*lt(t\\,{(k_b - 0.5) / timeline_fps:.5f})':eof_action=repeat[vimg{oi}]"
             )
             video_out = f"vimg{oi}"
@@ -2627,7 +2729,8 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
         else:
             ov_pre = "setpts=PTS-STARTPTS," + (f"tpad=stop_mode=clone:stop_duration={ov_pad:.3f}," if ov_pad > 0.02 else "")
         # Wipe shape: clip the PiP to a circle / rounded frame via a transparent alpha mask.
-        shape_filt = _shape_cut_filter(clip.get("shape"), ow, oh, alpha=True)
+        # the cut sits on what shows: the box after the crop mask (the preview's rule)
+        shape_filt = _shape_cut_filter(clip.get("shape"), _mask[2] if _mask else ow, _mask[3] if _mask else oh, alpha=True)
         # COVER by default: keep the source's aspect ratio (fill the box, crop the overflow) instead
         # of stretching it to the box's width AND height independently — the latter squished a 9:16
         # wipe into a 0.4×0.3 box (the "潰れ" bug). fit=="stretch" opts back into free-deform.
@@ -2670,7 +2773,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
                 crop=(_cl, _ct, _cr, _cb) if _mask else (0.0, 0.0, 0.0, 0.0),
                 stretch=str(clip.get("fit") or "cover") == "stretch")
             filters.extend(layer_lines)
-            filters.append(f"[{layer}]setpts=PTS{t0:+.5f}/TB[ovm{oi}]")
+            filters.append(f"[{layer}]setpts=PTS{t0:+.5f}/TB{_opacity_filter(clip)}[ovm{oi}]")
             filters.append(
                 f"[{video_out}][ovm{oi}]overlay=0:0:enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})'[vov{oi}]"
             )
@@ -2686,8 +2789,9 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             f"trim=start={source_start:.4f}:end={source_end:.4f},"
             f"{ov_pre}"
             f"{_scale},setsar=1,setpts=PTS-STARTPTS+{ov_offset:.5f}/TB{_grade_filter(clip)},format={_ov_fmt}"
-            f"{shape_filt}"
             f"{_maskcrop}"
+            f"{shape_filt}"
+            f"{_opacity_filter(clip) if not _BLEND_MODES.get(str(clip.get('blend') or '')) else ''}"
             f"[ov{oi}]"
         )
         _bm = _BLEND_MODES.get(str(clip.get("blend") or ""))
@@ -2848,6 +2952,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     # and the skill rule) and spent hours on the legacy filtergraph producing a
     # preview-mismatched video. The legacy renderer below survives ONLY as the
     # fallback for non-9:16 timelines or machines without the native exe.
+    instruction = _box_form_instruction(room_id, instruction)
     native = _native_export_job(room_id, job_id, content_id, instruction, job_dir)
     if native:
         return native
@@ -6628,6 +6733,10 @@ async def update_content(
                     actor = (timeline_authors.OWNER if (request.headers.get("x-timeline-actor") or "").lower() == "owner"
                              else {"kind": "other", "label": "画面の外からの保存"})
                     timeline_authors.record(room_id, content_id, before_seq, after_seq, actor)
+                    # picture clips are stored in one form (サイズ・左右・上下・キーフレーム): an old
+                    # tab writing boxes is converted here, this work only (other works' drafts keep their hash)
+                    from app.services.clip_placement import normalize_contents
+                    normalize_contents([{"timeline": data.timeline, "format": content.get("format")}], lambda: _read_assets(room_id))
                 content["timeline"] = data.timeline
             if data.asset_ids is not None:
                 content["asset_ids"] = data.asset_ids
@@ -8238,7 +8347,12 @@ async def track_blur_region(
         raise HTTPException(status_code=404, detail="Content not found")
     timeline = content.get("timeline") if isinstance(content.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
-    out_w, out_h = _output_size(str((sequence or {}).get("format") or timeline.get("format") or content.get("format") or "9:16"))
+    _fmt = str((sequence or {}).get("format") or timeline.get("format") or content.get("format") or "9:16")
+    out_w, out_h = _output_size(_fmt)
+    if isinstance(sequence, dict):
+        # where each picture actually sits (the one form → its box), like the export
+        from app.services.clip_placement import render_sequence
+        sequence = render_sequence(sequence, _assets_by_id(payload.room_id), _fmt)
 
     box_cx = payload.x + payload.width / 2.0
     box_cy = payload.y + payload.height / 2.0

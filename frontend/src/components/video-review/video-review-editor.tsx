@@ -42,6 +42,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { isSceneClip } from './scene-layer';
 import { BlendSelect, SceneClipPanel } from './scene-clip-panel';
 import { TimelinePreview } from './timeline-preview';
+import { MotionPanel } from './motion-panel';
+import { isOneForm, motionAt, setKeyAt, sortedKeys, type MotionKey } from './placement';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
 
@@ -98,6 +100,10 @@ export type SequenceClip = {
   // today's cover look. scale<1 reveals the full source frame (no pixels cropped).
   transform?: { scale: number; x: number; y: number } | null;
   transform_keys?: RenderCaption['transform_keys'];
+  /** キーフレーム（クリップの頭からの秒）。あれば transform の代わりにサイズ・左右・上下を動かす */
+  motion_keys?: MotionKey[] | null;
+  /** 100% の大きさ: cover＝画面いっぱい（既定）/ contain＝画面に収まる */
+  fit?: 'cover' | 'contain' | 'stretch' | string | null;
   opacity?: number;
   // Trim the source frame's edges (0-1 fraction of the source). Applied before placement.
   crop?: { top: number; bottom: number; left: number; right: number } | null;
@@ -233,6 +239,8 @@ export type SequenceAsset = {
   label?: string | null;
   fps?: number | string | null;
   kind?: string | null;
+  /** 素材そのものの大きさ・長さ（端を伸ばせる所まで＝素材の長さ） */
+  metadata?: { width?: number | null; height?: number | null; duration?: number | null } | null;
 };
 
 // A drawn region is given a TYPE after you draw it (popover on the shape) — not pre-selected.
@@ -1663,7 +1671,10 @@ export function VideoReviewEditor({
       const tIdx = tracks.findIndex((tr) => (tr.clips || []).some((c) => c.id === clicked.id));
       const freeze: SequenceClip = {
         id: makeId(), asset_id: clicked.asset_id, track: clicked.track, layer: clicked.layer,
-        composition: clicked.composition, position: clicked.position ?? null, transform: clicked.transform ?? null,
+        composition: clicked.composition, position: clicked.position ?? null,
+        // a still keeps the size/place the picture had at that moment (keyframes included)
+        transform: sortedKeys(clicked).length ? motionAt(clicked, t - clicked.timeline_start) : clicked.transform ?? null,
+        fit: clicked.fit ?? null, opacity: clicked.opacity,
         crop: clicked.crop ?? null, shape: clicked.shape ?? null,
         timeline_start: r(t), timeline_end: r(t + F), source_start: srcT, source_end: srcT, // freeze
         role: 'freeze', label: '静止画',
@@ -3692,8 +3703,15 @@ export function VideoReviewEditor({
       if (!clip) return;
       if (altDupRef.current && Math.abs(event.clientX - sequenceClipDrag.startClientX) + Math.abs(event.clientY - sequenceClipDrag.startClientY) >= 3) altDupRef.current.moved = true;
       if (altDupRef.current && !altDupRef.current.moved) return;
-      const isVideoClip = clip.track === 'video' || Number.isFinite(clip.source_end);
-      const sourceDuration = clip.source_duration || Math.max(Number(clip.source_end || 0), sequenceClipDrag.originalSourceEnd);
+      // 端を引っ張ると中身（素材の時刻）も一緒に動く。伸ばせるのは素材のある所まで（Premiere と同じ）。
+      // 絵（画像）と止め絵には素材の時刻が無いので、長さだけ変わる。
+      const dragAsset = sequenceAssetMap.get(String(clip.asset_id || ''));
+      const isImage = dragAsset?.kind === 'image' || (clip as { kind?: string }).kind === 'image';
+      const isStill = isImage || sequenceClipDrag.originalSourceEnd <= sequenceClipDrag.originalSourceStart + 1e-6;
+      const isVideoClip = !!clip.asset_id && !isStill;
+      const dragSpeed = Number((clip as { speed?: number }).speed) > 0 ? Number((clip as { speed?: number }).speed) : 1;
+      const sourceDuration = Number(dragAsset?.metadata?.duration) || clip.source_duration
+        || Math.max(Number(clip.source_end || 0), sequenceClipDrag.originalSourceEnd);
       // Magnet: snap a time to the nearest neighbour edge / playhead / ends within ~8px. Returns the
       // time unchanged when snapping is off or nothing is close (so free movement still works).
       const exclude = new Set(dragSelectionRef.current.length > 1 ? dragSelectionRef.current : [sequenceClipDrag.id]);
@@ -3709,20 +3727,35 @@ export function VideoReviewEditor({
       // splits any same-lane neighbour it now overlaps (DaVinci/Premiere overwrite).
       if (sequenceClipDrag.mode === 'start') {
         const snappedStart = snap(sequenceClipDrag.originalTimelineStart + delta);
-        const nextTimelineStart = clamp(snappedStart, 0, sequenceClipDrag.originalTimelineEnd - 0.1);
+        // 左へは素材の頭まで（それより前を伸ばすと、中身が付いてこず再生がずれていた）
+        const minStart = isVideoClip ? sequenceClipDrag.originalTimelineStart - sequenceClipDrag.originalSourceStart / dragSpeed : 0;
+        const nextTimelineStart = clamp(snappedStart, Math.max(0, minStart), sequenceClipDrag.originalTimelineEnd - 0.1);
         const effDelta = nextTimelineStart - sequenceClipDrag.originalTimelineStart;
-        const fields: Partial<SequenceClip> = { timeline_start: Number(nextTimelineStart.toFixed(2)) };
+        const fields: Partial<SequenceClip> = { timeline_start: Number(nextTimelineStart.toFixed(3)) };
         if (isVideoClip) {
-          fields.source_start = Number(clamp(sequenceClipDrag.originalSourceStart + effDelta, 0, sequenceClipDrag.originalSourceEnd - 0.1).toFixed(2));
+          fields.source_start = Number(clamp(sequenceClipDrag.originalSourceStart + effDelta * dragSpeed, 0, sequenceClipDrag.originalSourceEnd - 0.1).toFixed(3));
+        }
+        // キーフレームはクリップの頭からの秒: 頭を動かしても、動きは画面の同じ時刻に残す
+        const ksStart = sortedKeys(clip);
+        if (ksStart.length && Math.abs(effDelta) > 1e-6) {
+          const snapClip = (dragSnapshotRef.current?.tracks || []).flatMap((t) => t.clips || []).find((c) => c.id === sequenceClipDrag.id);
+          const base = sortedKeys(snapClip || clip);
+          fields.motion_keys = base.map((k) => ({ ...k, t: Number((k.t - effDelta).toFixed(4)) }));
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
       } else if (sequenceClipDrag.mode === 'end') {
         const snappedEnd = snap(sequenceClipDrag.originalTimelineEnd + delta);
-        const nextTimelineEnd = clamp(snappedEnd, sequenceClipDrag.originalTimelineStart + 0.1, timelineDuration);
+        // 右へは素材の終わりまで
+        const maxEnd = isVideoClip
+          ? sequenceClipDrag.originalTimelineEnd + Math.max(0, sourceDuration - sequenceClipDrag.originalSourceEnd) / dragSpeed
+          : Infinity;
+        const nextTimelineEnd = clamp(snappedEnd, sequenceClipDrag.originalTimelineStart + 0.1, Math.min(maxEnd, Math.max(timelineDuration, sequenceClipDrag.originalTimelineEnd)));
         const effDelta = nextTimelineEnd - sequenceClipDrag.originalTimelineEnd;
-        const fields: Partial<SequenceClip> = { timeline_end: Number(nextTimelineEnd.toFixed(2)) };
+        const fields: Partial<SequenceClip> = { timeline_end: Number(nextTimelineEnd.toFixed(3)) };
         if (isVideoClip) {
-          fields.source_end = Number(clamp(sequenceClipDrag.originalSourceEnd + effDelta, sequenceClipDrag.originalSourceStart + 0.1, sourceDuration).toFixed(2));
+          fields.source_end = Number(clamp(sequenceClipDrag.originalSourceEnd + effDelta * dragSpeed, sequenceClipDrag.originalSourceStart + 0.1, sourceDuration).toFixed(3));
+        } else if (isImage) {
+          fields.source_end = Number((sequenceClipDrag.originalSourceStart + (nextTimelineEnd - sequenceClipDrag.originalTimelineStart)).toFixed(3));
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
       } else if (dragSelectionRef.current.length > 1) {
@@ -4333,7 +4366,13 @@ export function VideoReviewEditor({
                     className="h-full w-full"
                     selectedClipId={selectedSequenceClipId}
                     onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
-                    onTransformChange={(clipId, transform) => updateSequenceClip(clipId, { transform })}
+                    onTransformChange={(clipId, transform) => {
+                      // 動き（キーフレーム）がある時は、再生位置のキーを動かす（無ければ足す）
+                      const c = allSequenceClips.find((x) => x.id === clipId);
+                      const ks = c ? sortedKeys(c) : [];
+                      if (c && ks.length) updateSequenceClip(clipId, { motion_keys: setKeyAt(ks, currentTime - c.timeline_start, transform, Number((editSequence as { frame_rate?: number } | null)?.frame_rate) || 30) });
+                      else updateSequenceClip(clipId, { transform });
+                    }}
                     onPick={(clipId) => { if (clipId) selectSequenceClip(clipId); else clearSelection(); }}
                     onCaptionMove={(clipId, nudge) => {
                       const c = allSequenceClips.find((x) => x.id === clipId);
@@ -4910,8 +4949,17 @@ export function VideoReviewEditor({
                       />
                     </div>
                   ) : null}
-                  {selectedSequenceClip.asset_id && (selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') ? (
-                    // Unified サイズ/左右/上下 for EVERY video/overlay clip (no clip-specific
+                  {selectedSequenceClip.asset_id && clipLanes.get(String(selectedSequenceClip.id))?.zone !== 'audio' && isOneForm(selectedSequenceClip)
+                    && !(selectedSequenceClip.effects || []).some((e) => e.type === 'popout') ? (
+                    <MotionPanel
+                      clip={selectedSequenceClip}
+                      time={currentTime}
+                      fps={Number((editSequence as { frame_rate?: number } | null)?.frame_rate) || 30}
+                      onChange={updateSelectedSequenceClip}
+                      onSeek={(t) => seekTimeline(t)}
+                    />
+                  ) : selectedSequenceClip.asset_id && (selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') ? (
+                    // (old form, until the server converts it) Unified サイズ/左右/上下 for EVERY video/overlay clip (no clip-specific
                     // panel). A PiP/wipe (position box) and a base clip (transform) both expose
                     // the same three controls; we map them to whichever field the clip uses.
                     (() => {
@@ -4996,7 +5044,7 @@ export function VideoReviewEditor({
                       );
                     })()
                   ) : null}
-                  {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
+                  {selectedSequenceClip.asset_id && clipLanes.get(String(selectedSequenceClip.id))?.zone !== 'audio' ? (
                     (() => {
                       // Live crop uses dragCrop (local, cheap) while dragging; falls back to the saved
                       // value. onChange only touches local state + throttled native — NOT editSequence

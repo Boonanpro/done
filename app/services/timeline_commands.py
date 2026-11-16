@@ -342,6 +342,8 @@ def trim_clip(seq: dict[str, Any], assets: dict, *, clip_id: str, edge: str, new
             c["timeline_start"] = round(nt, 3)
             if has_src:
                 c["source_start"] = round(ss + d, 3)
+            if isinstance(c.get("motion_keys"), list) and c["motion_keys"]:
+                c["motion_keys"] = _shift_motion(c["motion_keys"], d)  # the move stays where it was on screen
         else:
             nt = max(_f(new_time), ts + MIN_CLIP)
             if has_src:
@@ -409,6 +411,7 @@ def add_overlay(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_st
     }
     if is_image:
         clip["kind"] = "image"
+    _to_one_form(seq, assets, clip)
     lane.setdefault("clips", []).append(clip)
     _sorted(lane)
     _recompute_duration(seq)
@@ -752,16 +755,42 @@ def set_region(seq: dict[str, Any], *, clip_id: str, x: float | None = None, y: 
 
 
 _PROP_KEYS = {"position", "fit", "opacity", "volume", "speed", "keep_duration", "crop", "transform_keys",
+              "transform", "motion_keys", "shape",
               "video_enabled", "role", "asset_id", "source_start", "grade", "muted"}
+
+
+def _to_one_form(seq: dict[str, Any], assets: dict, clip: dict[str, Any]) -> None:
+    """A picture clip written by box (position / box transform_keys) is stored as サイズ・左右・上下
+    (+ keyframes) right away, so what Dan reads back is what the editor's fields show."""
+    from app.services import clip_placement as cp
+    a = _asset(assets, str(clip.get("asset_id")))
+    if cp.is_canonical(clip) or not cp.is_placed_media(clip, None, a):
+        return
+    dims = cp.asset_dims(a)
+    if not dims:
+        return
+    W, H = cp.canvas_px(seq.get("format"))
+    fields = cp.to_canonical(clip, dims[0], dims[1], W, H)
+    if fields is not None:
+        cp.apply_canonical(clip, fields)
 
 
 def set_clip_props(seq: dict[str, Any], assets: dict, *, clip_id: str, props: dict[str, Any]) -> dict[str, Any]:
     """Generic, whitelisted property edit for media/image clips.
 
-    position {x,y,width,height}   display box (normalized; may exceed 0-1 to crop-zoom)
-    fit cover|contain|stretch     how the picture fills the box
-    crop {left,top,right,bottom}  trims the DISPLAY box edges (fractions of the box)
-    transform_keys [{t,x,y,w,h}]  animated box (clip-relative t): pans / push-ins
+    Pictures are STORED as one set of numbers (what the editor's サイズ/左右/上下 fields show):
+    transform {scale,x,y}         size (1 = 100%) + offset of the picture centre from the canvas
+                                  centre (canvas fractions). 100% = the source covering the canvas
+                                  (fit cover) or fitting inside it (fit contain)
+    motion_keys [{t,scale,x,y,ease}]  keyframes, clip-relative t; ease (from this key to the
+                                  next) linear|ease_out|ease_in|ease_in_out|hold. Use few keys
+                                  (start/end of each move) — never one per frame
+    crop {left,top,right,bottom}  mask: fractions of the PICTURE trimmed away
+    shape rect|circle|rounded     cut inscribed in what shows
+    position {x,y,width,height}   convenience: place by the box the picture should cover;
+                                  converted to transform (+crop) on write
+    transform_keys [{t,x,y,w,h}]  convenience: moving box; converted to motion_keys on write
+    fit cover|contain|stretch     what 100% means
     opacity 0-1 / volume 0-2 / speed 0.25-4 (preserves source, changes duration)
     keep_duration bool           with speed: explicitly trim/extend source instead
     video_enabled bool            keep audio, hide picture
@@ -859,6 +888,10 @@ def set_clip_props(seq: dict[str, Any], assets: dict, *, clip_id: str, props: di
             clip["position"] = {"x": round(_f(pz.get("x")), 4), "y": round(_f(pz.get("y")), 4),
                                 "width": round(max(0.01, _f(pz.get("width"), 1.0)), 4),
                                 "height": round(max(0.01, _f(pz.get("height"), 1.0)), 4)}
+            if "transform" not in props and "motion_keys" not in props:
+                # "cover this box" replaces the size/place it had
+                clip.pop("transform", None)
+                clip.pop("motion_keys", None)
         else:
             return {"ok": False, "error": "position must be {x,y,width,height} or null"}
         changed["position"] = clip.get("position")
@@ -895,6 +928,38 @@ def set_clip_props(seq: dict[str, Any], assets: dict, *, clip_id: str, props: di
             out.sort(key=lambda k: k["t"])
             clip["transform_keys"] = out
         changed["transform_keys"] = clip.get("transform_keys")
+    if "transform" in props:
+        tfv = props["transform"]
+        if tfv is None:
+            clip.pop("transform", None)
+        elif isinstance(tfv, dict) and _f(tfv.get("scale"), 1.0) > 0:
+            clip["transform"] = {"scale": round(_f(tfv.get("scale"), 1.0), 4), "x": round(_f(tfv.get("x")), 4),
+                                 "y": round(_f(tfv.get("y")), 4)}
+        else:
+            return {"ok": False, "error": "transform must be {scale>0,x,y} or null"}
+        changed["transform"] = clip.get("transform")
+    if "motion_keys" in props:
+        from app.services.clip_placement import clean_keys
+        mk = props["motion_keys"]
+        if mk is None or mk == []:
+            clip.pop("motion_keys", None)
+        else:
+            keys = clean_keys(mk)
+            if not isinstance(mk, list) or len(keys) != len(mk):
+                return {"ok": False, "error": "motion_keys: list of {t, scale>0, x, y, ease?}"}
+            if len(keys) > 60:
+                return {"ok": False, "error": "motion_keys: use a few keys (start/end of each move) with ease, not one per frame"}
+            clip["motion_keys"] = keys
+            clip.pop("transform", None)
+        changed["motion_keys"] = clip.get("motion_keys")
+    if "shape" in props:
+        if props["shape"] not in (None, "rect", "circle", "rounded"):
+            return {"ok": False, "error": "shape must be rect|circle|rounded"}
+        if props["shape"] in (None, "rect"):
+            clip.pop("shape", None)
+        else:
+            clip["shape"] = props["shape"]
+        changed["shape"] = clip.get("shape")
     if "opacity" in props:
         clip["opacity"] = round(max(0.0, min(1.0, _f(props["opacity"], 1.0))), 3)
         changed["opacity"] = clip["opacity"]
@@ -918,6 +983,11 @@ def set_clip_props(seq: dict[str, Any], assets: dict, *, clip_id: str, props: di
             clip["grade"] = {k: round(_f(g.get(k)), 3) for k in ("ev", "contrast", "sat", "temp", "tint")
                              if g.get(k) is not None}
         changed["grade"] = clip.get("grade")
+    if clip.get("asset_id") is not None and ("position" in changed or "transform_keys" in changed):
+        _to_one_form(seq, assets, clip)
+        for k in ("position", "transform_keys"):
+            changed.pop(k, None)
+        changed.update({k: clip.get(k) for k in ("transform", "motion_keys", "crop", "fit")})
     return {"ok": True, "changed": changed}
 
 
@@ -953,6 +1023,12 @@ def _rebase_keys(keys: Any, cut_rel: float) -> tuple[list, list]:
     right = [dict(mid, t=0.0)] + [dict(k, t=round(_f(k.get("t")) - cut_rel, 3))
                                   for k in ks if _f(k.get("t")) > cut_rel + 1e-6]
     return left, right
+
+
+def _shift_motion(keys: Any, by: float) -> list:
+    """motion_keys moved by -by seconds (a clip's head moved `by` later). Every key is kept —
+    keys before the head still shape the eased move — so the picture moves exactly as before."""
+    return [dict(k, t=round(_f(k.get("t")) - by, 4)) for k in keys if isinstance(k, dict)] if isinstance(keys, list) else []
 
 
 def split_clip(seq: dict[str, Any], *, clip_id: str, at: float) -> dict[str, Any]:
@@ -993,6 +1069,8 @@ def split_clip(seq: dict[str, Any], *, clip_id: str, at: float) -> dict[str, Any
             if isinstance(c.get(key_field), list) and c[key_field]:
                 left, right = _rebase_keys(c[key_field], rel)
                 c[key_field], second[key_field] = left, right
+        if isinstance(c.get("motion_keys"), list) and c["motion_keys"]:
+            second["motion_keys"] = _shift_motion(c["motion_keys"], rel)
         for t in _tracks(seq):
             if any(x is c for x in t.get("clips") or []):
                 t["clips"].append(second)
@@ -1052,10 +1130,15 @@ def add_clip(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_start
                 aclip["speed"] = clip["speed"]
             atrack.setdefault("clips", []).append(aclip)
             _sorted(atrack)
+    if not isinstance(position, dict) and is_image:
+        # a picture trimmed out of a full-screen PNG goes back where it sat on that screen
+        from app.services.clip_placement import placed_box
+        position = placed_box(a)
     if isinstance(position, dict):
         clip["position"] = {"x": round(_f(position.get("x")), 4), "y": round(_f(position.get("y")), 4),
                             "width": round(max(0.01, _f(position.get("width"), 1.0)), 4),
                             "height": round(max(0.01, _f(position.get("height"), 1.0)), 4)}
+        _to_one_form(seq, assets, clip)
     lane_obj.setdefault("clips", []).append(clip)
     _sorted(lane_obj)
     _recompute_duration(seq)
@@ -1136,6 +1219,8 @@ def ripple_delete(seq: dict[str, Any], *, timeline_start: float, timeline_end: f
                         if isinstance(c.get(key_field), list) and c[key_field]:
                             c[key_field], _ = _rebase_keys(c[key_field], a - ts)
                             _, second[key_field] = _rebase_keys(second[key_field], b - ts)
+                    if isinstance(c.get("motion_keys"), list) and c["motion_keys"]:
+                        second["motion_keys"] = _shift_motion(c["motion_keys"], b - ts)
                     c["timeline_end"], c["source_end"] = round(a, 4), round(ss + (a - ts) * spd, 4)
                     second["timeline_start"], second["timeline_end"] = round(a, 4), round(te - d, 4)
                     second["source_start"] = round(ss + (b - ts) * spd, 4)
@@ -1148,6 +1233,8 @@ def ripple_delete(seq: dict[str, Any], *, timeline_start: float, timeline_end: f
                     for key_field in ("region_keys", "transform_keys"):
                         if isinstance(c.get(key_field), list) and c[key_field]:
                             _, c[key_field] = _rebase_keys(c[key_field], b - ts)
+                    if isinstance(c.get("motion_keys"), list) and c["motion_keys"]:
+                        c["motion_keys"] = _shift_motion(c["motion_keys"], b - ts)
                     c["timeline_start"], c["timeline_end"] = round(a, 4), round(te - d, 4)
                     c["source_start"] = round(ss + (b - ts) * spd, 4)
                     out.append(c)
@@ -1160,6 +1247,8 @@ def ripple_delete(seq: dict[str, Any], *, timeline_start: float, timeline_end: f
                 for key_field in ("region_keys", "transform_keys"):
                     if isinstance(c.get(key_field), list) and c[key_field]:
                         _, c[key_field] = _rebase_keys(c[key_field], b - ts)
+                if isinstance(c.get("motion_keys"), list) and c["motion_keys"]:
+                    c["motion_keys"] = _shift_motion(c["motion_keys"], b - ts)
             nts = ts if left else a
             c["timeline_start"], c["timeline_end"] = round(nts, 4), round(nts + te - ts - overlap, 4)
             if str(c.get("kind")) == "image":
