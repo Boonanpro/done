@@ -2696,11 +2696,8 @@ export function VideoReviewEditor({
   }, [seekTimeline, timeAtVisibleX]);
   useEffect(() => {
     if (!isTimelineScrubbing) return;
-    // つかんでいる間の手の形は、根の1か所だけで変える。段ごとに印を付け外しすると、
-    // 2,000個を超えるクリップの見た目を毎回計算し直して、押すたびに0.1秒以上止まっていた。
-    const rootEl = document.documentElement;
-    const prevCursor = rootEl.style.cursor;
-    rootEl.style.cursor = 'grabbing';
+    // つかんでいる間も、段やページ全体の見た目（手の形の印）は変えない。段ごとに印を付け外しすると、
+    // 2,000個を超えるクリップの見た目を毎回計算し直して、押すたびに0.1秒以上止まっていた（2026-11-16）。
     let lastT = -1;
     const moveScrub = (event: PointerEvent) => {
       scrubPointerXRef.current = event.clientX;
@@ -2739,7 +2736,6 @@ export function VideoReviewEditor({
     window.addEventListener('pointerup', stopScrub);
     window.addEventListener('pointercancel', stopScrub);
     return () => {
-      rootEl.style.cursor = prevCursor;
       cancelAnimationFrame(raf);
       window.removeEventListener('pointermove', moveScrub);
       window.removeEventListener('pointerup', stopScrub);
