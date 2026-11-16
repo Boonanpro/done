@@ -44,8 +44,25 @@ def _png_bbox(path: Path):
     return (W0, H0), [x0, y0, w, h]
 
 
+def _busy_contents(room: Path, hours: float = 6.0) -> set[str]:
+    """Works a Dan job is editing right now (an open draft): converting them would make that
+    job's commit see a changed timeline and stop. They convert on their own commit instead."""
+    import time
+    busy: set[str] = set()
+    for f in (room / "drafts").glob("*.json") if (room / "drafts").is_dir() else []:
+        try:
+            if time.time() - f.stat().st_mtime > hours * 3600:
+                continue
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if not d.get("committed_at"):
+            busy.add(str(d.get("content_id")))
+    return busy
+
+
 def migrate_room(room: Path, apply: bool, uploads_root: Path) -> dict:
-    stats = {"converted": 0, "kept": 0, "trimmed_assets": 0, "retargeted": 0}
+    stats = {"converted": 0, "kept": 0, "trimmed_assets": 0, "retargeted": 0, "busy_skipped": 0}
     cpath, apath = room / "contents.json", room / "assets.json"
     if not cpath.exists():
         return stats
@@ -54,7 +71,11 @@ def migrate_room(room: Path, apply: bool, uploads_root: Path) -> dict:
     assets = {str(a.get("id")): a for a in assets_list if isinstance(a, dict)}
     changed = False
     new_assets: dict[str, dict] = {}
+    busy = _busy_contents(room)
     for c in contents:
+        if str(c.get("id")) in busy:
+            stats["busy_skipped"] += 1
+            continue
         tl = c.get("timeline") if isinstance(c.get("timeline"), dict) else None
         seq = tl.get("sequence") if tl else None
         if not isinstance(seq, dict):
@@ -132,9 +153,14 @@ def main() -> None:
     args = ap.parse_args()
     root = Path(args.root)
     total: dict[str, int] = {}
+    from app.services.timeline_draft import ContentsLock
     for room in sorted(p for p in root.iterdir() if p.is_dir() and p.name.startswith(args.room)):
-        from app.services.timeline_draft import ContentsLock  # noqa: F401 - same lock as the app
-        st = migrate_room(room, args.apply, root.parent.parent)
+        if args.apply:
+            # the same lock the app takes around contents.json (no save lands in between)
+            with ContentsLock(room.name):
+                st = migrate_room(room, args.apply, root.parent.parent)
+        else:
+            st = migrate_room(room, args.apply, root.parent.parent)
         if any(st.values()):
             print(room.name, st)
         for k, v in st.items():

@@ -273,9 +273,6 @@ def _room_frame_rate(room_id: str) -> float:
 
 
 def _write_contents(room_id: str, contents: list[dict[str, Any]]) -> None:
-    # picture clips are stored in one form (サイズ・左右・上下・キーフレーム); old forms convert here
-    from app.services.clip_placement import normalize_contents
-    normalize_contents(contents, lambda: _read_assets(room_id))
     _write_json_list(_contents_path(room_id), contents)
 
 
@@ -6736,6 +6733,10 @@ async def update_content(
                     actor = (timeline_authors.OWNER if (request.headers.get("x-timeline-actor") or "").lower() == "owner"
                              else {"kind": "other", "label": "画面の外からの保存"})
                     timeline_authors.record(room_id, content_id, before_seq, after_seq, actor)
+                    # picture clips are stored in one form (サイズ・左右・上下・キーフレーム): an old
+                    # tab writing boxes is converted here, this work only (other works' drafts keep their hash)
+                    from app.services.clip_placement import normalize_contents
+                    normalize_contents([{"timeline": data.timeline, "format": content.get("format")}], lambda: _read_assets(room_id))
                 content["timeline"] = data.timeline
             if data.asset_ids is not None:
                 content["asset_ids"] = data.asset_ids

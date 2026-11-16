@@ -141,10 +141,6 @@ def _read_contents_raw(room_id: str) -> list[dict[str, Any]]:
 
 
 def _write_contents_raw(room_id: str, contents: list[dict[str, Any]]) -> None:
-    # picture clips are stored in one form (サイズ・左右・上下・キーフレーム); old forms convert here
-    from app.services.clip_placement import normalize_contents
-    from app.api.production_asset_routes import _read_assets
-    normalize_contents(contents, lambda: _read_assets(room_id))
     p = _room_dir(room_id) / "contents.json"
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(contents, ensure_ascii=False), encoding="utf-8")
@@ -281,6 +277,13 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
                     f"（base={draft['base_hash'][:8]} live={live_hash[:8]}）。"
                 ],
             }
+        # picture clips are stored in one form (サイズ・左右・上下・キーフレーム): whatever this draft
+        # still holds in the old box form converts here — this work only, in place (the draft's
+        # base hash below is taken after it)
+        from app.services.clip_placement import normalize_contents
+        from app.api.production_asset_routes import _read_assets
+        normalize_contents([{"timeline": {"sequence": draft["sequence"]}, "format": content.get("format")}],
+                           lambda: _read_assets(room_id))
         # single-writer swap
         before_seq = live_seq or {}
         content.setdefault("timeline", {})["sequence"] = draft["sequence"]

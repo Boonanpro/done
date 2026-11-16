@@ -435,7 +435,7 @@ def _needs_normalize(contents: list[dict[str, Any]]) -> bool:
 
 
 def normalize_contents(contents: list[dict[str, Any]], read_assets) -> int:
-    """Every work's timeline in the one form (called on each write of contents.json).
+    """The given works' timelines in the one form (a save of one work, a draft commit, the migration).
     `read_assets` is only called when some clip still needs converting."""
     if not isinstance(contents, list) or not _needs_normalize(contents):
         return 0
