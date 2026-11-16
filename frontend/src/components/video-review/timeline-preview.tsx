@@ -1557,7 +1557,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       e.stopPropagation();
       const wrap = wrapRef.current;
       if (!wrap) return;
-      const rect = wrap.getBoundingClientRect();
+      // the picture area inside the preview (the canvas is letterboxed in its frame)
+      const wb = wrap.getBoundingClientRect();
+      const rect = contentRect
+        ? { left: wb.left + contentRect.left, top: wb.top + contentRect.top, width: contentRect.width, height: contentRect.height }
+        : wb;
       const start = { x: e.clientX, y: e.clientY };
       const clipId = String(selectedBox.vc.clip.id);
 
@@ -1614,7 +1618,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
     },
-    [selectedBox, onPositionChange, onTransformChange],
+    [selectedBox, onPositionChange, onTransformChange, contentRect],
   );
 
   // 選んだテロップの枠: 描かれたテロップの文字の箱を測って、映像と同じ青い枠を出す
@@ -1791,8 +1795,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         <div
           className="absolute cursor-move border-2 border-sky-400"
           style={{
-            left: `${box.x * 100}%`, top: `${box.y * 100}%`,
-            width: `${box.width * 100}%`, height: `${box.height * 100}%`,
+            ...(contentRect
+              ? { left: contentRect.left + box.x * contentRect.width, top: contentRect.top + box.y * contentRect.height,
+                  width: box.width * contentRect.width, height: box.height * contentRect.height }
+              : { left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }),
             touchAction: 'none',
           }}
           onPointerDown={(e) => startBoxDrag(e, 'move')}

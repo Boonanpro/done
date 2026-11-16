@@ -2218,7 +2218,28 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             out_dur = nfr / timeline_fps
             _ibox = clip.get("position") if isinstance(clip.get("position"), dict) else None
             _icl, _ict, _icr, _icb = _image_crop(clip)
-            if (_ibox is None or _is_full_box(_ibox)) and _icl + _ict + _icr + _icb <= 1e-4:
+            _ikeys = _clip_box_keys(clip)
+            _imd = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+            _isw, _ish = float(_imd.get("width") or 0), float(_imd.get("height") or 0)
+            if _ikeys and _keys_move(_ikeys) and _isw > 0 and _ish > 0:
+                # a MOVING still on the bottom lane (push-in on a picture): the same per-frame
+                # placement as a moving video, over black
+                _ts_clip = float(clip.get("timeline_start") or 0)
+                _bx0, _by0, _bw0, _bh0 = _pos_box(_ibox)
+                layer_lines, layer = _moving_video_layer(
+                    f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur + 2 / timeline_fps:.6f},"
+                    f"setpts=PTS-STARTPTS,fps={fps_filter},format=rgba{_grade_filter(clip)}",
+                    rendered_count, _ikeys,
+                    (_bx0 * output_width, _by0 * output_height, _bw0 * output_width, _bh0 * output_height),
+                    _isw, _ish, output_width, output_height, fps_filter, out_dur,
+                    _frame_index(_ts_clip, timeline_fps) / timeline_fps - _ts_clip,
+                    crop=(_icl, _ict, _icr, _icb))
+                filters.extend(layer_lines)
+                filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur + 1 / timeline_fps:.6f}[bg{rendered_count}]")
+                filters.append(
+                    f"[bg{rendered_count}][{layer}]overlay=0:0:eof_action=repeat{_opacity_filter(clip, alpha=False)},format=yuv420p{norm_tail(nfr)}[v{rendered_count}]"
+                )
+            elif (_ibox is None or _is_full_box(_ibox)) and _icl + _ict + _icr + _icb <= 1e-4:
                 filters.append(
                     f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur:.6f},"
                     f"setpts=PTS-STARTPTS,fps={fps_filter},"

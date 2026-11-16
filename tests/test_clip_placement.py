@@ -103,3 +103,22 @@ def test_render_sequence_moves_and_negative_keys():
     # idempotent: box-form clips pass through
     again = cp.render_sequence(out, ASSETS)
     assert again["tracks"][0]["clips"][0] == c
+
+
+def test_trimmed_png_goes_back_where_it_sat(tmp_path):
+    from PIL import Image
+    p = tmp_path / "plate.png"
+    im = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
+    im.paste((255, 0, 0, 255), (100, 200, 700, 500))
+    im.save(p)
+    md = cp.trim_transparent(p)
+    assert md["placed_on"] == {"canvas": [1920, 1080], "box": [100, 200, 600, 300]}
+    assert Image.open(p).size == (600, 300)
+    asset = {"id": "pl", "kind": "image", "metadata": {"width": 600, "height": 300, "placed_on": md["placed_on"]}}
+    seq = {"format": "16:9", "tracks": [{"id": "v", "type": "video", "clips": []}]}
+    r = tc.add_clip(seq, {"pl": asset}, asset_id="pl", timeline_start=0, duration=2)
+    assert r["ok"], r
+    clip = [c for t in seq["tracks"] for c in t.get("clips", []) if c["id"] == r["clip_id"]][0]
+    P = cp.picture_rect(clip, 0, 600, 300, W, H)
+    assert abs(P[0] - 100) < 0.5 and abs(P[1] - 200) < 0.5 and abs(P[2] - 600) < 0.5
+    assert cp.trim_transparent(p) is None  # already trimmed

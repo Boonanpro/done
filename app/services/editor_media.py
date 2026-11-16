@@ -17,8 +17,12 @@ def import_media(room_id, path, name='', origin='editor'):
         shutil.copy2(src,dest)
         if kind=='image':
             from PIL import Image
+            from app.services.clip_placement import trim_transparent
+            try:trimmed=trim_transparent(dest)  # 透明な余白は切って、元の位置を覚える
+            except Exception:trimmed=None
             with Image.open(dest) as im:
                 im.load();meta={'width':im.width,'height':im.height,'duration':0,'has_audio':False,'has_video':False}
+            if trimmed:meta['placed_on']=trimmed['placed_on']
         else:
             probe=shutil.which('ffprobe') or next((str(p) for p in [Path('C:/Users/Owner/ffmpeg/bin/ffprobe.exe'),Path('C:/ffmpeg/bin/ffprobe.exe')] if p.is_file()),'ffprobe')
             result=subprocess.run([probe,'-v','error','-show_entries','format=duration:stream=index,codec_type,codec_name,width,height,sample_rate,channels,duration','-of','json',str(dest)],capture_output=True,text=True,timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))

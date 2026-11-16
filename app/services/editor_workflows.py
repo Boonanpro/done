@@ -42,7 +42,7 @@ def compact_state(room_id, content_id, playhead=0, selected=(), full=False, incl
             if not full and c['id'] not in ids and not (c['timeline_end'] > playhead-6 and c['timeline_start'] < playhead+6):
                 continue
             clips.append(clip_inspection({**{k:c[k] for k in ('id','text','style','asset_id','timeline_start','timeline_end','source_start','source_end','speed','volume','approved','role',
-                                              'grade','position','fit','crop','opacity','muted','video_enabled','transform_keys','region','locked') if k in c},
+                                              'grade','position','fit','crop','opacity','muted','video_enabled','transform_keys','transform','motion_keys','shape','region','locked') if k in c},
                           'lane':lane,'kind':track.get('type')},include_keyframes))
     total=sum(len(t.get('clips',[])) for t in seq.get('tracks',[]))
     return {'content_id':content_id,'title':content.get('title'),'duration':seq.get('duration'),
@@ -114,6 +114,15 @@ def transform_visuals(room_id,content_id,clip_ids,factor,anchor,edit_scope,expec
         _,c=indexed[cid]
         if c.get('transform_keys') or c.get('region_keys'):
             raise ValueError('動きのあるクリップはキーを含めた編集を使ってください: '+cid)
+        if c.get('asset_id') and 'text' not in c and not isinstance(c.get('position'),dict) and not isinstance(c.get('region'),dict):
+            # the one form (サイズ・左右・上下): scale about the anchor; keyframes scale the same way
+            from app.services.clip_placement import get_transform, clean_keys
+            def about(s0,x0,y0):
+                return {'scale':round(s0*factor,5),'x':round(ax+(0.5+x0-ax)*factor-0.5,5),'y':round(ay+(0.5+y0-ay)*factor-0.5,5)}
+            keys=clean_keys(c.get('motion_keys'))
+            props={'motion_keys':[{**k,**about(k['scale'],k['x'],k['y'])} for k in keys]} if keys else {'transform':about(*get_transform(c))}
+            ops.append({'op':'set_clip_props','args':{'clip_id':cid,'props':props}})
+            continue
         if 'text' in c:
             st=c.get('style') or {}
             # Explicit placement is required; renderer defaults vary by format.

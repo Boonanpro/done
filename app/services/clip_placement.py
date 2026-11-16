@@ -450,3 +450,84 @@ def normalize_contents(contents: list[dict[str, Any]], read_assets) -> int:
         if isinstance(seq, dict):
             n += normalize_sequence(seq, assets, seq.get("format") or tl.get("format") or c.get("format"))["converted"]
     return n
+
+
+# ---------------------------------------------------------------------------
+# pictures with transparent margins (a 1920×1080 PNG with the art in one corner)
+
+
+def trim_transparent(path: Any) -> dict[str, Any] | None:
+    """Cut the transparent margins off a PNG in place, so the clip IS the picture and its place
+    is the clip's numbers (押して選べる・欄で直せる). Returns the metadata to keep —
+    {"width","height","placed_on": {"canvas": [W,H], "box": [x,y,w,h]}} — or None when the
+    picture has no margins worth cutting."""
+    from pathlib import Path
+    from PIL import Image
+    p = Path(str(path))
+    if p.suffix.lower() != ".png" or not p.is_file():
+        return None
+    with Image.open(p) as im:
+        im.load()
+        if "A" not in im.getbands():
+            return None
+        W0, H0 = im.size
+        bbox = im.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox()
+        if not bbox:
+            return None
+        x0, y0, x1, y1 = bbox
+        w, h = x1 - x0, y1 - y0
+        if w * h > 0.6 * W0 * H0:  # only a picture sitting in a much larger transparent canvas
+            return None
+        out = im.crop(bbox)
+        out.save(p, format="PNG")
+    return {"width": w, "height": h, "placed_on": {"canvas": [W0, H0], "box": [x0, y0, w, h]}}
+
+
+def placed_box(asset: dict[str, Any] | None) -> dict[str, float] | None:
+    """Where a trimmed picture sat on its original canvas, as a box of the canvas (fractions)."""
+    md = (asset or {}).get("metadata") if isinstance((asset or {}).get("metadata"), dict) else {}
+    po = md.get("placed_on") if isinstance(md.get("placed_on"), dict) else None
+    try:
+        (cw, ch), (x, y, w, h) = po["canvas"], po["box"]
+        return {"x": x / cw, "y": y / ch, "width": w / cw, "height": h / ch}
+    except (TypeError, KeyError, ValueError, ZeroDivisionError):
+        return None
+
+
+def retarget_to_trimmed(clip: dict[str, Any], old_dims: tuple[float, float], box: list[float],
+                        W: float, H: float) -> None:
+    """A one-form clip switched from a full PNG to its trimmed picture (box = x,y,w,h of the
+    picture in the full PNG, px): the same pixels stay in the same place. Exact for keyframes
+    too (the new numbers are an affine function of the old ones)."""
+    ow, oh = old_dims
+    bx, by, bw, bh = box
+    fit = clip.get("fit")
+
+    def conv(s: float, x: float, y: float) -> tuple[float, float, float]:
+        P = picture_rect({"fit": fit, "transform": {"scale": s, "x": x, "y": y}}, 0, ow, oh, W, H)
+        nx, ny, nw = P[0] + P[2] * bx / ow, P[1] + P[3] * by / oh, P[2] * bw / ow
+        nh = P[3] * bh / oh
+        s2 = nw / base_size(bw, bh, W, H, fit)[0]
+        return s2, (nx + nw / 2) / W - 0.5, (ny + nh / 2) / H - 0.5
+
+    P0 = picture_rect(clip, 0, ow, oh, W, H)
+    c = _crop(clip)
+    if any(v > 1e-4 for v in c):
+        # the crop mask was a fraction of the full PNG: the same cut edges, now of the picture
+        vx0, vy0 = P0[0] + P0[2] * c[0], P0[1] + P0[3] * c[1]
+        vx1, vy1 = P0[0] + P0[2] * (1 - c[2]), P0[1] + P0[3] * (1 - c[3])
+        nx0, ny0 = P0[0] + P0[2] * bx / ow, P0[1] + P0[3] * by / oh
+        nw, nh = P0[2] * bw / ow, P0[3] * bh / oh
+        nc = (max(0.0, (vx0 - nx0) / nw), max(0.0, (vy0 - ny0) / nh),
+              max(0.0, (nx0 + nw - vx1) / nw), max(0.0, (ny0 + nh - vy1) / nh))
+        clip["crop"] = {k: round(min(0.95, v), 4) for k, v in zip(("left", "top", "right", "bottom"), nc)}
+        if not any(v > 1e-4 for v in nc):
+            clip.pop("crop", None)
+    keys = clean_keys(clip.get("motion_keys"))
+    if keys:
+        for k in keys:
+            k["scale"], k["x"], k["y"] = (round(v, 5) for v in conv(k["scale"], k["x"], k["y"]))
+        clip["motion_keys"] = keys
+    else:
+        s, x, y = conv(*get_transform(clip))
+        clip["transform"] = {"scale": round(s, 5), "x": round(x, 5), "y": round(y, 5)}

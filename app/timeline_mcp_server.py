@@ -1423,6 +1423,14 @@ def _media_dims(path: Path) -> dict:
 
 def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
                           filename_hint: str = "", metadata: dict | None = None) -> None:
+    # 透明な余白ごと画面の大きさで作った絵は、絵だけにして元の位置を覚える（add_clip が同じ所に置く）
+    from app.services.clip_placement import trim_transparent
+    try:
+        trimmed = trim_transparent(dest)
+    except Exception:  # noqa: BLE001 - an untrimmed picture still works
+        trimmed = None
+    if trimmed:
+        metadata = {**(metadata or {}), "placed_on": trimmed["placed_on"]}
     with td.ContentsLock(ROOM_ID):
         p = _room_dir() / "assets.json"
         data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []

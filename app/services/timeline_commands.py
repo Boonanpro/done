@@ -411,6 +411,7 @@ def add_overlay(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_st
     }
     if is_image:
         clip["kind"] = "image"
+    _to_one_form(seq, assets, clip)
     lane.setdefault("clips", []).append(clip)
     _sorted(lane)
     _recompute_duration(seq)
@@ -1129,6 +1130,10 @@ def add_clip(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_start
                 aclip["speed"] = clip["speed"]
             atrack.setdefault("clips", []).append(aclip)
             _sorted(atrack)
+    if not isinstance(position, dict) and is_image:
+        # a picture trimmed out of a full-screen PNG goes back where it sat on that screen
+        from app.services.clip_placement import placed_box
+        position = placed_box(a)
     if isinstance(position, dict):
         clip["position"] = {"x": round(_f(position.get("x")), 4), "y": round(_f(position.get("y")), 4),
                             "width": round(max(0.01, _f(position.get("width"), 1.0)), 4),
