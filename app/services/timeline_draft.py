@@ -141,6 +141,10 @@ def _read_contents_raw(room_id: str) -> list[dict[str, Any]]:
 
 
 def _write_contents_raw(room_id: str, contents: list[dict[str, Any]]) -> None:
+    # picture clips are stored in one form (サイズ・左右・上下・キーフレーム); old forms convert here
+    from app.services.clip_placement import normalize_contents
+    from app.api.production_asset_routes import _read_assets
+    normalize_contents(contents, lambda: _read_assets(room_id))
     p = _room_dir(room_id) / "contents.json"
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(contents, ensure_ascii=False), encoding="utf-8")

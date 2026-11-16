@@ -265,8 +265,13 @@ def tool_definitions() -> list[types.Tool]:
                "strength": _NUM, "color": _STR, "opacity": _NUM, "rotation": _NUM,
                "keys": {"type": "array", "items": {"type": "object"}}, "clear_keys": {"type": "boolean"}},
               ["clip_id"]),
-        _tool("set_clip_props", "映像/画像/音声クリップの属性を変更: position{x,y,width,height}(表示枠) fit(cover|contain|stretch) "
-              "crop{left,top,right,bottom}(表示枠を削る) transform_keys[{t,x,y,w,h}](寄り/パン) opacity volume muted speed(0.25-4) "
+        _tool("set_clip_props", "映像/画像/音声クリップの属性を変更。絵の大きさ・位置はエディターの欄と同じ1組の数字で持つ: "
+              "transform{scale,x,y}(scale 1=100%＝素材が画面を覆う大きさ(fit=containなら画面に収まる大きさ)。x,yは絵の中心の画面中央からのずれ、画面の幅/高さに対する割合) "
+              "motion_keys[{t,scale,x,y,ease}](キーフレーム。tはクリップの頭からの秒、easeは次のキーまでの動き方 linear|ease_out|ease_in|ease_in_out|hold。"
+              "動きの始めと終わりだけ打つ。1コマごとに書かない。最大60個) crop{left,top,right,bottom}(絵の端を割合で隠す) shape(rect|circle|rounded) opacity。"
+              "position{x,y,width,height}(絵が覆う枠)やtransform_keys[{t,x,y,w,h}](動く枠)で渡してもよいが、保存時に上の数字へ直る。"
+              "素材は先に切らずに元の長さのまま入れ、使う区間を source_start で指定する。画像は余白を切った絵を入れ、位置と大きさはtransformで置く。"
+              "fit(cover|contain|stretch) volume muted speed(0.25-4) "
               "video_enabled asset_id(+source_start: 絵だけ差し替え、尺は不変) source_start(素材の使う位置をずらす) "
               "grade{ev,contrast,sat,temp,tint}は全置換。evは露出段数(0=無補正)、contrast/satは倍率(1=無補正、sat=0は白黒)、"
               "temp/tintは0が無補正。既存の他の補正を保つ場合は現在値も含める。grade=nullで補正解除。",
@@ -275,6 +280,8 @@ def tool_definitions() -> list[types.Tool]:
                   "crop": {"type":"object"}, "opacity": _NUM, "volume": _NUM, "muted": {"type":"boolean"},
                   "speed": _NUM, "source_start": _NUM, "asset_id": _STR, "role": _STR, "keep_duration": {"type":"boolean"},
                   "video_enabled": {"type":"boolean"}, "transform_keys": {"type":["array","null"],"items":{"type":"object"}},
+                  "transform": {"type":["object","null"]}, "motion_keys": {"type":["array","null"],"items":{"type":"object"}},
+                  "shape": {"type":["string","null"],"enum":["rect","circle","rounded",None]},
                   "text": _STR, "style": {"type":"object"},
                   "grade": {"type":["object","null"],"properties":{k:_NUM for k in ['ev','contrast','sat','temp','tint']},"additionalProperties":False}
               },"additionalProperties":False}}, ["clip_id", "props"]),

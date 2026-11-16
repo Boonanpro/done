@@ -10,6 +10,7 @@ import { SceneLayer, isSceneClip, type SceneClip } from './scene-layer';
 import { gradeFilter } from './grade-filter';
 import { AudioSourceManager, STRETCH_BLOCK_SEC, audioOnlyUrl, webAudioSupported } from './audio-source';
 import { localMedia, localMediaEnabled, localPlaySrc, type LocalMediaProgress } from './local-media';
+import { isOneForm, motionAt, pictureRect, visibleRect, cropOf, type Motion } from './placement';
 
 // Live timeline compositor. Draws the current edit (base video + overlay/PiP layers +
 // captions + blur) onto a <canvas> for the playhead time, so manual edits reflect
@@ -171,6 +172,8 @@ function coversFrame(vc: VisualClip, imageAssets: Map<string, string>): boolean 
   const shape = (c as { shape?: string }).shape;
   if (shape === 'circle' || shape === 'rounded') return false;
   if (Array.isArray(c.transform_keys) && c.transform_keys.length) return false;
+  if (Array.isArray(c.motion_keys) && c.motion_keys.length) return false;
+  if (c.fit === 'contain') return false;
   const p = vc.position;
   if (p && !(p.x <= 0.001 && p.y <= 0.001 && p.x + p.width >= 0.999 && p.y + p.height >= 0.999)) return false;
   const cr = c.crop;
@@ -959,6 +962,27 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         ctx.filter = gradeFilter((vc.clip as { grade?: unknown }).grade);
         // blend mode (light leaks etc. on black): the export mixes the same way (clip.blend)
         ctx.globalCompositeOperation = BLEND_OPS[String((vc.clip as { blend?: string }).blend || '')] || 'source-over';
+        // 不透明度 (the export mixes the same: an overlay's alpha, a bottom-lane picture over black)
+        ctx.globalAlpha = vc.clip.opacity != null ? Math.max(0, Math.min(1, Number(vc.clip.opacity))) : 1;
+        const shape = (vc.clip as { shape?: string }).shape;
+        if (isOneForm(vc.clip)) {
+          // the one form (サイズ・左右・上下・キーフレーム): the picture rect at this time, the crop
+          // mask on it, the cut on what shows — the export draws the same (clip_placement.render_fields)
+          const P = pictureRect(vc.clip, motionAt(vc.clip, t - vc.clip.timeline_start), got.vw, got.vh, w, h);
+          if (shape === 'circle' || shape === 'rounded') {
+            const V = visibleRect(vc.clip, P);
+            ctx.save();
+            ctx.beginPath();
+            if (shape === 'circle') ctx.ellipse(V.x + V.w / 2, V.y + V.h / 2, V.w / 2, V.h / 2, 0, 0, Math.PI * 2);
+            else ctx.roundRect(V.x, V.y, V.w, V.h, Math.min(V.w, V.h) * 0.12);
+            ctx.clip();
+            drawSource(ctx, got.src, got.vw, got.vh, P.x, P.y, P.w, P.h, null, w, h, cropOf(vc.clip));
+            ctx.restore();
+          } else {
+            drawSource(ctx, got.src, got.vw, got.vh, P.x, P.y, P.w, P.h, null, w, h, cropOf(vc.clip));
+          }
+          continue;
+        }
         const tf = vc.clip.transform;
         const cr = vc.clip.crop;
         let px = vc.position ? vc.position.x * w : 0;
@@ -969,7 +993,6 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const k = boxKeyAt(vc.clip.transform_keys, t - vc.clip.timeline_start);
         if (k) { px += k.x * pw; py += k.y * ph; pw *= k.w; ph *= k.h; }
         // Wipe shape (circle / rounded "photo") clips ANY video clip to that box.
-        const shape = (vc.clip as { shape?: string }).shape;
         if (shape === 'circle' || shape === 'rounded') {
           ctx.save();
           ctx.beginPath();
@@ -985,6 +1008,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
 
       ctx.filter = 'none';
       ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
       // 再生中に絵を使わなかった映像の要素（上の映像にふさがれた段など）も、1画素だけ描いて絵を受け取り続ける。
       // ブラウザは誰も絵を受け取らない映像の要素を0.25秒おきにしか進めず、その要素だけ再生が遅れて、
       // ふさいでいた映像が終わって見えた瞬間にずれていた（音を時計にした時に、映像が平均0.1秒以上遅れていた）。
@@ -1470,6 +1494,23 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     audioAnchorRef.current = mgr && mgr.ctx.state === 'running' ? { ctxT0: mgr.ctx.currentTime + 0.04, t0: currentTimeRef.current, rate: rateRef.current } : null;
   }, [seekRev, stopAudioNodes]);
 
+  const pickAtRef = useRef<((e: { clientX: number; clientY: number; button: number }) => void) | null>(null);
+  // The source size of a picture clip (decoded video frame / loaded image), or null while loading.
+  const clipDims = (clip: SequenceClip): { w: number; h: number } | null => {
+    const imageUrl = imageSrcByAssetId.get(String(clip.asset_id || ''));
+    if (imageUrl) {
+      const img = imageFor(imageUrl);
+      return img ? { w: img.naturalWidth, h: img.naturalHeight } : null;
+    }
+    const url = srcByAssetId.get(String(clip.asset_id || ''));
+    const fs = url ? framesRef.current.get(url) : null;
+    if (fs?.width && fs?.height) return { w: fs.width, h: fs.height };
+    const vel = videosRef.current.get(String(clip.id));
+    if (vel?.videoWidth) return { w: vel.videoWidth, h: vel.videoHeight };
+    const md = (assets || []).find((a) => a.id === String(clip.asset_id || ''))?.metadata;
+    return md?.width && md?.height ? { w: Number(md.width), h: Number(md.height) } : null;
+  };
+
   // Selection box for the active selected clip. PiP/overlay uses its `position` window; a base
   // clip uses its SOURCE rectangle (locked to the footage aspect via `transform`) so shrinking
   // it reveals the whole source — no 9:16 crop. The box may overflow the frame.
@@ -1478,6 +1519,14 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const vc = visualClips.find((x) => String(x.clip.id) === String(selectedClipId));
     if (!vc) return null;
     if (!(currentTime >= vc.clip.timeline_start && currentTime < vc.clip.timeline_end)) return null;
+    if (isOneForm(vc.clip)) {
+      const d = clipDims(vc.clip);
+      if (!d) return null;
+      const m = motionAt(vc.clip, currentTime - vc.clip.timeline_start);
+      const P = pictureRect(vc.clip, m, d.w, d.h, dims.w, dims.h);
+      return { vc, kind: 'transform' as const, tf: m as Motion,
+        rect: { x: P.x / dims.w, y: P.y / dims.h, width: P.w / dims.w, height: P.h / dims.h } };
+    }
     const p = vc.position;
     const isFullPos = !!p && p.x <= 0.001 && p.y <= 0.001 && p.width >= 0.999 && p.height >= 0.999;
     if (p && !isFullPos) {
@@ -1512,13 +1561,19 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const start = { x: e.clientX, y: e.clientY };
       const clipId = String(selectedBox.vc.clip.id);
 
+      let moved = false;
+      const clickUp = () => {
+        if (!moved && mode === 'move') pickAtRef.current?.({ clientX: start.x, clientY: start.y, button: 0 });
+      };
       if (selectedBox.kind === 'transform') {
-        if (!onTransformChange) return;
+        if (!onTransformChange) { const up0 = () => { window.removeEventListener('pointerup', up0); clickUp(); }; window.addEventListener('pointerup', up0); return; }
         const tf0 = { ...selectedBox.tf };
         const boxCx = selectedBox.rect.x + selectedBox.rect.width / 2;
         const boxCy = selectedBox.rect.y + selectedBox.rect.height / 2;
         const startDist = Math.hypot((start.x - rect.left) / rect.width - boxCx, (start.y - rect.top) / rect.height - boxCy) || 0.0001;
         const move = (ev: PointerEvent) => {
+          if (!moved && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < 3) return;
+          moved = true;
           if (mode === 'move') {
             const dx = (ev.clientX - start.x) / rect.width;
             const dy = (ev.clientY - start.y) / rect.height;
@@ -1529,7 +1584,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
             onTransformChange(clipId, { scale: Number(Math.max(0.1, Math.min(5, tf0.scale * factor)).toFixed(4)), x: tf0.x, y: tf0.y });
           }
         };
-        const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+        const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); clickUp(); };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', up);
         return;
@@ -1538,6 +1593,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (!onPositionChange) return;
       const p0 = { ...selectedBox.rect };
       const move = (ev: PointerEvent) => {
+        if (!moved && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < 3) return;
+        moved = true;
         const dx = (ev.clientX - start.x) / rect.width;
         const dy = (ev.clientY - start.y) / rect.height;
         let { x, y, width, height } = p0;
@@ -1553,7 +1610,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         }
         onPositionChange(clipId, { x: Number(x.toFixed(4)), y: Number(y.toFixed(4)), width: Number(width.toFixed(4)), height: Number(height.toFixed(4)) });
       };
-      const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+      const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); clickUp(); };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
     },
@@ -1597,34 +1654,72 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     window.addEventListener('pointerup', up);
   }, [selectedCaption, onCaptionMove, contentRect]);
 
-  // プレビューの上で押した所にある一番手前の物を選ぶ: テロップ → 重ねた絵（上の段から）→ 映像
-  const pickAt = useCallback((e: React.PointerEvent) => {
+  // プレビューの上で押した所にある物を選ぶ: テロップ → 絵と映像（上の段から）→ 場面。
+  // 絵は透けている所を押しても選ばない（下の物が選ばれる）。同じ所をもう一度押すと、
+  // そこに重なっている下の物へ順に選び直す（2026-11-16 本人「全部の素材がクリックで選択できるように」）。
+  const pickCycleRef = useRef<{ x: number; y: number; ids: string[]; i: number } | null>(null);
+  const alphaCanvasRef = useRef<CanvasRenderingContext2D | null>(null);
+  const opaqueAt = useCallback((img: HTMLImageElement, sx: number, sy: number): boolean => {
+    if (!alphaCanvasRef.current) {
+      const c = document.createElement('canvas');
+      c.width = 1; c.height = 1;
+      alphaCanvasRef.current = c.getContext('2d', { willReadFrequently: true });
+    }
+    const ctx = alphaCanvasRef.current;
+    if (!ctx) return true;
+    try {
+      ctx.clearRect(0, 0, 1, 1);
+      ctx.drawImage(img, Math.floor(sx), Math.floor(sy), 1, 1, 0, 0, 1, 1);
+      return ctx.getImageData(0, 0, 1, 1).data[3] > 24;
+    } catch { return true; } // unreadable picture: treat as solid
+  }, []);
+  const pickAt = useCallback((e: { clientX: number; clientY: number; button: number }) => {
     if (!onPick || e.button !== 0) return;
     const wrap = wrapRef.current;
     if (!wrap) return;
+    const ids: string[] = [];
     for (const el of Array.from(wrap.querySelectorAll('[data-caption-id]')).reverse() as HTMLElement[]) {
       const b = el.getBoundingClientRect();
-      if (e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom) {
-        onPick(el.dataset.captionId || null);
-        return;
+      if (e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom && el.dataset.captionId) ids.push(el.dataset.captionId);
+    }
+    if (contentRect) {
+      const wb = wrap.getBoundingClientRect();
+      const fx = (e.clientX - wb.left - contentRect.left) / contentRect.width;
+      const fy = (e.clientY - wb.top - contentRect.top) / contentRect.height;
+      const X = fx * dims.w;
+      const Y = fy * dims.h;
+      const t = currentTime;
+      for (let i = visualClips.length - 1; i >= 0; i -= 1) {
+        const vc = visualClips[i];
+        if (!(t >= vc.clip.timeline_start && t < vc.clip.timeline_end)) continue;
+        if (isOneForm(vc.clip)) {
+          const d = clipDims(vc.clip);
+          if (!d) continue;
+          const P = pictureRect(vc.clip, motionAt(vc.clip, t - vc.clip.timeline_start), d.w, d.h, dims.w, dims.h);
+          const V = visibleRect(vc.clip, P);
+          if (!(X >= Math.max(0, V.x) && X <= Math.min(dims.w, V.x + V.w) && Y >= Math.max(0, V.y) && Y <= Math.min(dims.h, V.y + V.h))) continue;
+          const imageUrl = imageSrcByAssetId.get(String(vc.clip.asset_id || ''));
+          const img = imageUrl ? imageFor(imageUrl) : null;
+          if (img && !opaqueAt(img, ((X - P.x) / P.w) * img.naturalWidth, ((Y - P.y) / P.h) * img.naturalHeight)) continue;
+        } else {
+          const p = vc.position;
+          if (p && !(fx >= p.x && fx <= p.x + p.width && fy >= p.y && fy <= p.y + p.height)) continue;
+        }
+        ids.push(String(vc.clip.id));
+      }
+      for (const sc of [...sceneClips].reverse()) {
+        if (t >= Number(sc.timeline_start) && t < Number(sc.timeline_end)) ids.push(String(sc.id));
       }
     }
-    if (!contentRect) return;
-    const wb = wrap.getBoundingClientRect();
-    const fx = (e.clientX - wb.left - contentRect.left) / contentRect.width;
-    const fy = (e.clientY - wb.top - contentRect.top) / contentRect.height;
-    const t = currentTime;
-    for (let i = visualClips.length - 1; i >= 0; i -= 1) {
-      const vc = visualClips[i];
-      if (!(t >= vc.clip.timeline_start && t < vc.clip.timeline_end)) continue;
-      const p = vc.position;
-      if (p && !(fx >= p.x && fx <= p.x + p.width && fy >= p.y && fy <= p.y + p.height)) continue;
-      onPick(String(vc.clip.id));
-      return;
-    }
-    onPick(null);
-  }, [onPick, contentRect, currentTime, visualClips]);
+    if (!ids.length) { pickCycleRef.current = null; onPick(null); return; }
+    const prev = pickCycleRef.current;
+    const same = prev && Math.hypot(prev.x - e.clientX, prev.y - e.clientY) < 6 && prev.ids.join('|') === ids.join('|');
+    const i = same && prev ? (prev.i + 1) % ids.length : 0;
+    pickCycleRef.current = { x: e.clientX, y: e.clientY, ids, i };
+    onPick(ids[i]);
+  }, [onPick, contentRect, currentTime, visualClips, sceneClips, dims, imageSrcByAssetId, imageFor, opaqueAt]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  pickAtRef.current = pickAt;
   const box = selectedBox?.rect;
   const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
 

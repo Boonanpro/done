@@ -105,6 +105,12 @@ function sequenceAssetForEditor(asset: ProductionAsset) {
     label: asset.filename || asset.original_uri,
     fps: asset.metadata?.fps as string | number | undefined,
     kind: asset.kind,
+    // 素材そのものの大きさ・長さ: クリップの端を伸ばせるのは素材の長さまで
+    metadata: {
+      width: Number(asset.metadata?.width) || null,
+      height: Number(asset.metadata?.height) || null,
+      duration: Number(asset.metadata?.duration) || null,
+    },
   };
 }
 
