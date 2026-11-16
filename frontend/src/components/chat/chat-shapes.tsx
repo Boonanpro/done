@@ -372,7 +372,7 @@ function CellBody({ look, looks }: { look: Look | null; looks: boolean }) {
   if (image) {
     return (
       <span className="flex min-w-[10rem] max-w-[18rem] flex-col gap-1.5">
-        <ShapeImage src={image} alt={text} className="max-h-48 object-contain" zoom />
+        <ShapeImage src={image} alt={text} className="max-h-48" fit="contain" zoom />
         {text ? <span>{text}</span> : null}
       </span>
     );
@@ -552,7 +552,7 @@ function ChildList({ items, row = false }: { items: unknown; row?: boolean }) {
 }
 
 /** 写真1枚。読めなければ枠ごと消す。外の写真は Cookie・Referer を送らずに読む */
-function ShapeImage({ src, alt, className, zoom = false }: { src: unknown; alt?: string; className: string; zoom?: boolean }) {
+function ShapeImage({ src, alt, className, zoom = false, fit = 'cover' }: { src: unknown; alt?: string; className: string; zoom?: boolean; fit?: 'cover' | 'contain' }) {
   const { complete, onImageClick } = useContext(ShapeMetaContext);
   const onClient = useOnClient();
   const url = complete && onClient ? safeImageUrl(src, siteHost()) : null;
@@ -562,7 +562,7 @@ function ShapeImage({ src, alt, className, zoom = false }: { src: unknown; alt?:
     <img
       src={url} alt={alt || ''} loading="lazy" decoding="async" referrerPolicy="no-referrer" draggable={false}
       crossOrigin={url.startsWith('/') ? undefined : 'anonymous'} onError={() => setBroken(url)}
-      className={`w-full rounded-lg border border-border bg-muted/30 object-cover ${className}${zoom && onImageClick ? ' cursor-zoom-in' : ''}`}
+      className={`w-full rounded-lg border border-border bg-muted/30 ${fit === 'contain' ? 'object-contain' : 'object-cover'} ${className}${zoom && onImageClick ? ' cursor-zoom-in' : ''}`}
     />
   );
   // 写真・表のセルの写真は押すと、チャットの添付と同じ大きな表示で開く（ピンチで拡大できる）

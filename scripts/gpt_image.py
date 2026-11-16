@@ -1,4 +1,4 @@
-"""GPT Image 2.5 Sunburst を OpenAI API 直で叩く画像生成CLI。
+"""GPT Image 2.6 Sunburst を OpenAI API 直で叩く画像生成CLI。
 
 ダンの汎用画像生成（LP・デザイン・文字入り画像）はこれが正規経路。
 Higgsfield は動画・Soul ID・Nano Banana 系専用（GPT Image 2 をここへ一本化した
@@ -27,7 +27,7 @@ from pathlib import Path
 import requests
 
 ROOT = Path(__file__).resolve().parent.parent  # D:/done（cwd に依存しない）
-DEFAULT_MODEL = "gpt-image-2.5-sunburst"
+DEFAULT_MODEL = "gpt-image-2.6-sunburst"   # 2026-11-16 本人「高精度にやれるほう」。同じ値段で 2.6 の精度の方
 
 # 概算単価（2026-08 時点の公表レート。請求の正は OpenAI ダッシュボード）
 _USD_PER_M = {"text_in": 5.0, "image_in": 8.0, "image_out": 30.0}
