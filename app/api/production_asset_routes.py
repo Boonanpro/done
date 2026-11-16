@@ -5745,6 +5745,9 @@ def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path
     fps = float((asset.get("metadata") or {}).get("proxy_fps") or _room_frame_rate(room_id))
     cfr = ["-fps_mode", "cfr"] if _ffmpeg_major(_ffmpeg()) >= 6 else ["-vsync", "cfr"]
     scale = f"scale=w={VIEW_COPY_LONG_SIDE}:h={VIEW_COPY_LONG_SIDE}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps:g}"
+    _m = asset.get("metadata") or {}
+    if alpha and 0 < max(int(_m.get("width") or 0), int(_m.get("height") or 0)) <= VIEW_COPY_LONG_SIDE:
+        scale = f"fps={fps:g}"  # small already: don't blow it up
     if alpha:
         # STACKED: colour on the top half, the alpha as grey on the bottom half (H.264 has no alpha).
         # The preview joins the halves back (frontend alpha-unpack.ts). Colour where fully
