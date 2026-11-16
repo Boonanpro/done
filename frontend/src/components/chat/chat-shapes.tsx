@@ -132,7 +132,7 @@ export function ShapeAnswerProvider({
 }
 
 /** 1つの部品ブロックの素性: どの返事（id）のどの部品（part）か、閉じまで届いたか、ライブ枠（保存前）か */
-type ShapeMeta = { messageId: string | null; part: string; complete: boolean; live: boolean };
+type ShapeMeta = { messageId: string | null; part: string; complete: boolean; live: boolean; onImageClick?: (url: string) => void };
 const ShapeMetaContext = createContext<ShapeMeta>({ messageId: null, part: '', complete: false, live: false });
 
 // --- 共通の見た目 --------------------------------------------------------------------------
@@ -364,10 +364,19 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
   );
 };
 
-/** 表の見出し・セル: 文字と、色見本があればその左に（looks の時だけ） */
+/** 表の見出し・セル: 文字と、色見本があればその左に、写真があればその上に（looks の時だけ） */
 function CellBody({ look, looks }: { look: Look | null; looks: boolean }) {
   const text = look?.label ?? '';
   const color = looks ? look?.color : null;
+  const image = looks ? look?.image : null;
+  if (image) {
+    return (
+      <span className="flex min-w-[10rem] max-w-[18rem] flex-col gap-1.5">
+        <ShapeImage src={image} alt={text} className="max-h-48" fit="contain" zoom />
+        {text ? <span>{text}</span> : null}
+      </span>
+    );
+  }
   if (!color) return <>{text}</>;
   return <span className="inline-flex items-center gap-1.5"><Swatch color={color} className="h-4 w-4" /><span>{text}</span></span>;
 }
@@ -543,18 +552,26 @@ function ChildList({ items, row = false }: { items: unknown; row?: boolean }) {
 }
 
 /** 写真1枚。読めなければ枠ごと消す。外の写真は Cookie・Referer を送らずに読む */
-function ShapeImage({ src, alt, className }: { src: unknown; alt?: string; className: string }) {
-  const { complete } = useContext(ShapeMetaContext);
+function ShapeImage({ src, alt, className, zoom = false, fit = 'cover' }: { src: unknown; alt?: string; className: string; zoom?: boolean; fit?: 'cover' | 'contain' }) {
+  const { complete, onImageClick } = useContext(ShapeMetaContext);
   const onClient = useOnClient();
   const url = complete && onClient ? safeImageUrl(src, siteHost()) : null;
   const [broken, setBroken] = useState<string | null>(null);
   if (!url || broken === url) return null;
-  return (
+  const img = (
     <img
       src={url} alt={alt || ''} loading="lazy" decoding="async" referrerPolicy="no-referrer" draggable={false}
       crossOrigin={url.startsWith('/') ? undefined : 'anonymous'} onError={() => setBroken(url)}
-      className={`w-full rounded-lg border border-border bg-muted/30 object-cover ${className}`}
+      className={`w-full rounded-lg border border-border bg-muted/30 ${fit === 'contain' ? 'object-contain' : 'object-cover'} ${className}${zoom && onImageClick ? ' cursor-zoom-in' : ''}`}
     />
+  );
+  // 写真・表のセルの写真は押すと、チャットの添付と同じ大きな表示で開く（ピンチで拡大できる）
+  if (!zoom || !onImageClick) return img;
+  return (
+    <button type="button" className="block w-full" aria-label={alt ? `${alt}を大きく開く` : '写真を大きく開く'}
+      data-media-items={JSON.stringify([{ url, kind: 'image', name: alt || undefined }])} onClick={() => onImageClick(url)}>
+      {img}
+    </button>
   );
 }
 
@@ -614,7 +631,7 @@ const TextView: ComponentRenderer<TextInput> = ({ props }) => {
 
 const ImageView: ComponentRenderer<ImageInput> = ({ props }) => {
   const shape = props.shape === 'square' ? 'aspect-square max-w-[16rem]' : props.shape === 'tall' ? 'aspect-[3/4] max-w-[16rem]' : 'aspect-[16/9]';
-  return <div className="w-full" data-shape="Image"><ShapeImage src={props.src} alt={props.alt} className={shape} /></div>;
+  return <div className="w-full" data-shape="Image"><ShapeImage src={props.src} alt={props.alt} className={shape} zoom /></div>;
 };
 
 const StatView: ComponentRenderer<StatInput> = ({ props }) => {
@@ -1112,7 +1129,7 @@ class ShapeErrorBoundary extends Component<{ fallback: ReactNode; children: Reac
 }
 
 export const ShapeBlock = memo(function ShapeBlock({
-  code, complete, live = false, messageId = null, part, renderFallback,
+  code, complete, live = false, messageId = null, part, renderFallback, onImageClick,
 }: {
   /** ```openui-lang ブロックの中身（途中まででもよい） */
   code: string;
@@ -1126,6 +1143,8 @@ export const ShapeBlock = memo(function ShapeBlock({
   part: string;
   /** 部品として描けない時に、同じ中身を文章（コードブロック）として描く */
   renderFallback: (code: string) => ReactNode;
+  /** 写真を押した時に、チャットの大きな表示で開く（無ければ押せない） */
+  onImageClick?: (url: string) => void;
 }) {
   const trimmed = code.trim();
   // 読めたかどうかは「今の中身」に対する結果だけを見る。生成の途中（まだ root が無い）の結果を、
@@ -1134,7 +1153,7 @@ export const ShapeBlock = memo(function ShapeBlock({
   const onParseResult = useCallback((r: ParseResult | null) => {
     setParse(r ? { forCode: trimmed, root: !!r.root } : null);
   }, [trimmed]);
-  const meta = useMemo<ShapeMeta>(() => ({ messageId, part, complete, live }), [messageId, part, complete, live]);
+  const meta = useMemo<ShapeMeta>(() => ({ messageId, part, complete, live, onImageClick }), [messageId, part, complete, live, onImageClick]);
   // 完成した部品の検証（閉じが届いた時だけ。途中は段階表示を妨げない）
   const check = useMemo(() => (complete && trimmed ? checkCompleteShape(trimmed) : null), [complete, trimmed]);
   const parsed = parse && parse.forCode === trimmed ? parse : null;

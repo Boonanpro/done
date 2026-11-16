@@ -20,7 +20,7 @@ def test_section_is_generated_file_content() -> None:
                  "Facts", "Badge", "Button", "Divider"):
         assert f"- {name}(" in section
     # 2026-11-15: the box-and-arrow Flow is no longer offered (the screen still draws old messages that used it)
-    assert "- Flow(" not in section and "Never draw words with icons and arrows" in section
+    assert "- Flow(" not in section and "Never draw words with icons and arrows" not in section
     assert "```openui-lang" in section
     # 2026-10-17 (fix6): the comparison sentence the owner accepted and the "show the real thing" paragraph made it
     # 3.3KB (was 2.3KB); the cap moved from 2500 to 3400 with them. 2026-10-23: the eleven small parts to compose a
@@ -38,7 +38,7 @@ def test_section_asks_for_the_real_thing_and_a_table_for_comparisons() -> None:
     assert "Show the real thing when the user picks among things that differ by look" in section
     assert "Never invent an image URL" in section
     assert "(string | {label: string, color?: string, image?: string})[]" in section   # Choice options
-    assert "rows: (string | {label: string, color?: string})[][]" in section            # Compare cells
+    assert "rows: (string | {label: string, color?: string, image?: string})[][]" in section   # Compare cells (2026-11-16: a picture per cell)
 
 
 def test_missing_file_degrades_to_empty(monkeypatch, tmp_path) -> None:

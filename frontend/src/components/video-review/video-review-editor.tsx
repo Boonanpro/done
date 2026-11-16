@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { AI_VIDEO_MODELS, aiDurationFor, aiModelFor, aiModelsForLength } from '@/lib/ai-video-models';
 import {
   CAPTION_DESIGN_PRESETS,
@@ -40,6 +40,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { isSceneClip } from './scene-layer';
+import { createZoomPreview, type ZoomPreview } from './zoom-preview';
 import { BlendSelect, SceneClipPanel } from './scene-clip-panel';
 import { TimelinePreview } from './timeline-preview';
 import { MotionPanel } from './motion-panel';
@@ -203,6 +204,102 @@ type LaneItem = {
   clip?: SequenceClip;
   annotation?: ReviewAnnotation;
 };
+
+/** タイムラインの拡大率のつまみ。動かしている間は見せるだけの値（zoom-preview.ts）で動く。 */
+function ZoomSlider({ zoom, max, preview, onZoom, onRelease }: {
+  zoom: number;
+  max: number;
+  preview: ZoomPreview;
+  onZoom: (value: number, now: boolean) => void;
+  onRelease: () => void;
+}) {
+  const live = useSyncExternalStore(preview.subscribe, preview.get, () => null);
+  const z = live ?? zoom;
+  const lm = Math.log(Math.max(1.0001, max));
+  return (
+    <input
+      type="range"
+      min={0}
+      max={1000}
+      step={1}
+      // 拡大率は倍々に効くので、つまみは対数で動かす（左端＝全体、右端＝約0.5秒）
+      value={Math.round((Math.log(Math.max(1, z)) / lm) * 1000)}
+      aria-label="タイムラインズーム"
+      onChange={(event) => onZoom(Math.exp((Number(event.target.value) / 1000) * lm), false)}
+      onDoubleClick={() => onZoom(1, true)}
+      // 離したら本当の拡大率で描き直す。Space が再生に効くよう、つまみから手を離す
+      // （つまみに当たったままだと Space・矢印をつまみが受け取る）
+      onPointerUp={(event) => { onRelease(); event.currentTarget.blur(); }}
+      onMouseUp={(event) => event.currentTarget.blur()}
+      onKeyUp={onRelease}
+      className="h-1 w-24 cursor-pointer accent-sky-500"
+    />
+  );
+}
+
+/** タイムラインのクリップの種類（色分け）。 */
+function laneItemKind(item: LaneItem, asset: { kind?: string | null } | null | undefined): ClipKind {
+  const clip = item.clip;
+  if (!clip) return 'video';
+  if (isSceneClip(clip)) return 'scene';
+  if (item.itemType === 'caption') return 'caption';
+  if (item.itemType === 'effect') return 'effect';
+  if (item.itemType === 'audio') {
+    return clip.role === 'music' || clip.role === 'bgm' ? 'bgm' : clip.role === 'sfx' || clip.role === 'se' ? 'se' : 'voice';
+  }
+  return (clip as { kind?: string }).kind === 'image' || asset?.kind === 'image' ? 'image' : 'video';
+}
+
+/** 画面での幅を約19%刻みに切り上げる。ズームを動かしても、刻みをまたいだクリップだけが描き直される。 */
+function quantizeWidthPx(px: number): number {
+  if (!(px > 0)) return 0;
+  return Math.ceil(2 ** (Math.ceil(Math.log2(px) * 4 - 1e-9) / 4));
+}
+
+type LaneGroup = { kind: ClipKind; start: number; end: number; items: LaneItem[] };
+// これより細いクリップが同じ種類で隙間なく続く所は、1本の帯にまとめて描く
+const GROUP_MAX_PX = 3;
+const GROUP_GAP_PX = 1.5;
+
+/**
+ * 画面で数ピクセルしかないクリップが隣り合って続く所を1本の帯にまとめる（全体表示に近い時、
+ * 2,400個のクリップを1つずつ描くとズームのたびに0.3〜0.8秒止まっていた。2026-11-16）。
+ * 選んでいる・ダンが触っているクリップはまとめない。帯を押すと、押した所のクリップをつかむ。
+ */
+function groupLaneItems(
+  items: LaneItem[],
+  pxPerSec: number,
+  canGroup: (item: LaneItem) => boolean,
+  kindOf: (item: LaneItem) => ClipKind,
+): Array<{ item: LaneItem } | { group: LaneGroup }> {
+  if (!(pxPerSec > 0)) return items.map((item) => ({ item }));
+  let sorted = true;
+  for (let i = 1; i < items.length; i += 1) if (items[i].start < items[i - 1].start) { sorted = false; break; }
+  if (!sorted) items = [...items].sort((a, b) => a.start - b.start);
+  const out: Array<{ item: LaneItem } | { group: LaneGroup }> = [];
+  let run: LaneGroup | null = null;
+  const flush = () => {
+    if (!run) return;
+    if (run.items.length > 1) out.push({ group: run });
+    else out.push({ item: run.items[0] });
+    run = null;
+  };
+  for (const item of items) {
+    const small = item.kind === 'clip' && (item.end - item.start) * pxPerSec < GROUP_MAX_PX && canGroup(item);
+    if (!small) { flush(); out.push({ item }); continue; }
+    const kind = kindOf(item);
+    const cur = run as LaneGroup | null;
+    if (cur && cur.kind === kind && (item.start - cur.end) * pxPerSec < GROUP_GAP_PX && item.start >= cur.start) {
+      cur.items.push(item);
+      cur.end = Math.max(cur.end, item.end);
+    } else {
+      flush();
+      run = { kind, start: item.start, end: item.end, items: [item] };
+    }
+  }
+  flush();
+  return out;
+}
 
 type TimelineLane = {
   key: string;
@@ -1238,7 +1335,8 @@ export function VideoReviewEditor({
     const ids = danTargetRef.current;
     if (!root || !ids.length) return;
     const el = ids
-      .map((id) => root.querySelector(`[data-clip-id="${CSS.escape(id)}"]`) as HTMLElement | null)
+      .map((id) => (root.querySelector(`[data-clip-id="${CSS.escape(id)}"]`)
+        || root.querySelector(`[data-clip-ids~="${CSS.escape(id)}"]`)) as HTMLElement | null)
       .find(Boolean);
     if (!el) return;
     const r = el.getBoundingClientRect();
@@ -1478,6 +1576,10 @@ export function VideoReviewEditor({
   const scrubbingRef = useRef(false);
   const timelineDurationRef = useRef(0);
   const trackWidthRef = useRef(0);
+  // ズームの見せるだけの値（zoom-preview.ts）と、今タイムラインを何倍に引き伸ばして見せているか
+  const zoomPreview = useMemo<ZoomPreview>(() => createZoomPreview(), []);
+  const zoomScaleRef = useRef(1);
+  const timelineZoomRef = useRef(1);
   const timeReadoutRef = useRef<HTMLSpanElement>(null);
   const lastTimeStateRef = useRef(0);
   const timeFlushRef = useRef<number | null>(null);
@@ -1487,9 +1589,11 @@ export function VideoReviewEditor({
     const bar = playheadBarRef.current;
     const td = timelineDurationRef.current;
     const w = trackWidthRef.current || timelineRef.current?.offsetWidth || 0;
-    const tf = `translate3d(${td && w ? (t / td) * w : 0}px,0,0)`;
-    if (bar) bar.style.transform = tf;
-    if (playheadHeadRef.current) playheadHeadRef.current.style.transform = tf;
+    const x = td && w ? (t / td) * w : 0;
+    const k = zoomScaleRef.current;
+    // 拡大率を変えている途中はタイムラインを k 倍に引き伸ばして見せている。赤線は中で1pxのまま、目盛りの頭は k 倍の所
+    if (bar) bar.style.transform = k === 1 ? `translate3d(${x}px,0,0)` : `translate3d(${x}px,0,0) scaleX(${1 / k})`;
+    if (playheadHeadRef.current) playheadHeadRef.current.style.transform = `translate3d(${x * k}px,0,0)`;
   }, []);
   // 再生中の送り: 赤線が右端に来たら1画面めくる（Premiere の「ページスクロール」と同じ）。
   // 少しずつ送ると、毎コマ全部のクリップを描き直すことになる。
@@ -2448,7 +2552,7 @@ export function VideoReviewEditor({
       if (!modKey && (event.key === '+' || event.key === '=' || event.key === '-' || event.key === '_')) {
         event.preventDefault();
         const dir = event.key === '-' || event.key === '_' ? -1 : 1;
-        setTimelineZoom((value) => zoomStep(value * (dir > 0 ? 1.25 : 0.8), maxTimelineZoom));
+        requestZoom((value) => zoomStep(value * (dir > 0 ? 1.25 : 0.8), maxTimelineZoom));
         return;
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -2762,14 +2866,7 @@ export function VideoReviewEditor({
     const factor = event.ctrlKey && !event.shiftKey
       ? Math.exp(clamp(-event.deltaY, -50, 50) * 0.01)
       : (event.deltaY > 0 ? 1 / 1.2 : 1.2);
-    setTimelineZoom((value) => zoomStep(value * factor, maxTimelineZoom));
-    window.requestAnimationFrame(() => {
-      const scroller = timelineScrollRef.current;
-      const track = timelineRef.current;
-      if (!scroller || !track || !timelineDuration) return;
-      const redlineX = (liveTimeRef.current / timelineDuration) * track.offsetWidth;
-      scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
-    });
+    requestZoom((value) => zoomStep(value * factor, maxTimelineZoom));
   }, [timelineDuration, maxTimelineZoom]);
   // React の onWheel は受け身の受け手で、既定の動き（Ctrl+ホイールでページ全体の拡大）を止められない。
   // タイムラインの上では止めたいので、止められる受け手を直に付ける。
@@ -2836,6 +2933,59 @@ export function VideoReviewEditor({
     scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timelineZoom]);
+
+  // 拡大率を変える入口（つまみ・Shift+ホイール・＋／－）。変えている間はクリップを描き直さず、
+  // タイムラインを横に引き伸ばして見せる（遅いPCで1段ごとに0.25〜0.6秒止まっていた。2026-11-16）。
+  // 止めて0.25秒たつ・つまみを離す・2倍を超えて引き伸ばした時に、本当の拡大率で描き直す。
+  timelineZoomRef.current = timelineZoom;
+  const zoomCommitTimerRef = useRef<number | null>(null);
+  const showZoom = useCallback((target: number) => {
+    const track = timelineRef.current;
+    const scroller = timelineScrollRef.current;
+    const committed = timelineZoomRef.current;
+    const k = target / committed;
+    zoomScaleRef.current = k;
+    if (track) {
+      track.style.transformOrigin = '0 0';
+      track.style.transform = k === 1 ? '' : `scaleX(${k})`;
+    }
+    zoomPreview.set(target === committed ? null : target);
+    placePlayhead(liveTimeRef.current);
+    // 赤線を中心に拡大・縮小する（本当の拡大率に切り替えた時と同じ位置）
+    const center = () => {
+      const td = timelineDurationRef.current;
+      if (!scroller || !track || !td) return;
+      const w = track.offsetWidth * zoomScaleRef.current;
+      scroller.scrollLeft = track.offsetLeft + (liveTimeRef.current / td) * w - scroller.clientWidth / 2;
+    };
+    center();
+    window.requestAnimationFrame(center);
+  }, [zoomPreview, placePlayhead]);
+  const commitZoom = useCallback(() => {
+    if (zoomCommitTimerRef.current != null) { window.clearTimeout(zoomCommitTimerRef.current); zoomCommitTimerRef.current = null; }
+    const target = zoomPreview.get();
+    if (target != null && target !== timelineZoomRef.current) setTimelineZoom(target);
+  }, [zoomPreview]);
+  const requestZoom = useCallback((next: number | ((current: number) => number), now = false) => {
+    const current = zoomPreview.get() ?? timelineZoomRef.current;
+    const target = typeof next === 'function' ? next(current) : next;
+    if (target === current) { if (now) commitZoom(); return; }
+    showZoom(target);
+    const k = target / timelineZoomRef.current;
+    if (now || k > 2 || k < 0.5) { commitZoom(); return; }
+    if (zoomCommitTimerRef.current != null) window.clearTimeout(zoomCommitTimerRef.current);
+    zoomCommitTimerRef.current = window.setTimeout(commitZoom, 250);
+  }, [zoomPreview, showZoom, commitZoom]);
+  // 本当の拡大率に切り替わった瞬間（描き直しと同じコマ）に引き伸ばしを外す。その間にさらに動いていれば、残りの分だけ引き伸ばす
+  useLayoutEffect(() => {
+    const pending = zoomPreview.get();
+    if (pending != null && pending !== timelineZoom) { showZoom(pending); return; }
+    zoomScaleRef.current = 1;
+    if (timelineRef.current) timelineRef.current.style.transform = '';
+    zoomPreview.set(null);
+    placePlayhead(liveTimeRef.current);
+  }, [timelineZoom, zoomPreview, showZoom, placePlayhead]);
+  useEffect(() => () => { if (zoomCommitTimerRef.current != null) window.clearTimeout(zoomCommitTimerRef.current); }, []);
 
   const startTimelineDrag = useCallback(
     (event: React.PointerEvent, annotation: ReviewAnnotation, mode: TimelineDrag['mode']) => {
@@ -3897,6 +4047,20 @@ export function VideoReviewEditor({
       document.querySelectorAll('[data-clip-id]').forEach((el) => {
         if (intersects(el)) { const id = el.getAttribute('data-clip-id'); if (id) clipIds.push(id); }
       });
+      // 細いクリップをまとめた帯: 帯の中で囲んだ範囲に掛かるクリップだけを選ぶ
+      const track = timelineRef.current?.getBoundingClientRect();
+      if (track && timelineDuration) {
+        document.querySelectorAll('[data-clip-group]').forEach((el) => {
+          if (!intersects(el)) return;
+          for (const id of (el.getAttribute('data-clip-ids') || '').split(' ')) {
+            const hit = laneClipLookupRef.current.get(id);
+            if (!hit) continue;
+            const x0 = track.left + (hit.clip.timeline_start / timelineDuration) * track.width;
+            const x1 = track.left + (hit.clip.timeline_end / timelineDuration) * track.width;
+            if (x1 >= left && x0 <= right) clipIds.push(id);
+          }
+        });
+      }
       document.querySelectorAll('[data-annotation-id]').forEach((el) => {
         if (intersects(el)) { const id = el.getAttribute('data-annotation-id'); if (id) annIds.push(id); }
       });
@@ -3934,8 +4098,8 @@ export function VideoReviewEditor({
     let lastSent = 0;
     const note = (e: Event) => {
       const t = e.target as HTMLElement | null;
-      const el = t?.closest?.('[data-clip-id],[data-annotation-id],[data-timeline-ruler],button,input,textarea,canvas,[role="separator"]') as HTMLElement | null;
-      const what = el?.dataset?.clipId ? 'clip' : el?.dataset?.annotationId ? 'annotation' : el?.hasAttribute?.('data-timeline-ruler') ? 'ruler'
+      const el = t?.closest?.('[data-clip-id],[data-clip-group],[data-annotation-id],[data-timeline-ruler],button,input,textarea,canvas,[role="separator"]') as HTMLElement | null;
+      const what = el?.dataset?.clipId || el?.hasAttribute?.('data-clip-group') ? 'clip' : el?.dataset?.annotationId ? 'annotation' : el?.hasAttribute?.('data-timeline-ruler') ? 'ruler'
         : el ? `${el.tagName.toLowerCase()}:${(el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '').trim().slice(0, 24)}` : (t?.tagName || '').toLowerCase();
       lastAction = `${e.type}:${what}`;
       lastAt = performance.now();
@@ -3981,6 +4145,8 @@ export function VideoReviewEditor({
     for (const lane of timelineLanes) for (const it of lane.items) if (it.clip) m.set(it.clip.id, { clip: it.clip, itemType: it.itemType });
     return m;
   }, [timelineLanes]);
+  const laneClipLookupRef = useRef(laneClipLookup);
+  laneClipLookupRef.current = laneClipLookup;
   const clipFns = useRef<ClipBoxFns>({ startDrag: () => {}, openMenu: () => {}, focusClip: () => {}, setVolume: () => {} });
   clipFns.current = {
     startDrag: (event, id, mode) => {
@@ -4037,6 +4203,8 @@ export function VideoReviewEditor({
     ro.observe(sc);
     return () => { sc.removeEventListener('scroll', kick); ro.disconnect(); if (raf) cancelAnimationFrame(raf); };
   }, [timelineDuration, timelineZoom]);
+  const selectedClipSet = useMemo(() => new Set(selectedSequenceClipIds), [selectedSequenceClipIds]);
+  const pxPerSec = trackPx > 0 && timelineDuration ? trackPx / timelineDuration : 0;
   const lanesView = useMemo(() => (
     timelineLanes.map((lane, laneIndex) => {
                         const zoneChanged = laneIndex > 0 && timelineLanes[laneIndex - 1].zone !== lane.zone;
@@ -4071,10 +4239,50 @@ export function VideoReviewEditor({
                                 <span className="px-1 text-[9px] text-sky-100">ここに追加</span>
                               </div>
                             ) : null}
-                            {lane.items.map((item) => {
-                              if (item.end < viewWin[0] || item.start > viewWin[1]) {
-                                if (!(item.clip && selectedSequenceClipIds.includes(item.clip.id)) && !(item.annotation && selectedIds.includes(item.annotation.id))) return null;
+                            {groupLaneItems(lane.items.filter((item) => {
+                              if (item.end >= viewWin[0] && item.start <= viewWin[1]) return true;
+                              return !!(item.clip && selectedClipSet.has(item.clip.id)) || !!(item.annotation && selectedIds.includes(item.annotation.id));
+                            }), pxPerSec, (item) => !!item.clip && !selectedClipSet.has(item.clip.id) && !highlightedClipIds.has(item.clip.id)
+                              && !danTouch.ids.includes(item.clip.id) && !danTouch.appear.includes(item.clip.id) && !danTouch.vanish.includes(item.clip.id),
+                            (item) => laneItemKind(item, item.clip?.asset_id ? sequenceAssetMap.get(item.clip.asset_id) : null)).map((entry) => {
+                              if ('group' in entry) {
+                                const g = entry.group;
+                                const look = CLIP_KIND_STYLE[g.kind];
+                                const ids = g.items.map((it) => it.clip!.id);
+                                // この並びのうち、押した所にあるクリップ（無ければ一番近いもの）
+                                const pick = (event: React.MouseEvent) => {
+                                  const r = (event.currentTarget as HTMLElement).getBoundingClientRect();
+                                  const t = g.start + ((event.clientX - r.left) / Math.max(1, r.width)) * (g.end - g.start);
+                                  let best = g.items[0];
+                                  let bestD = Number.POSITIVE_INFINITY;
+                                  for (const it of g.items) {
+                                    const d = t < it.start ? it.start - t : t > it.end ? t - it.end : 0;
+                                    if (d < bestD) { bestD = d; best = it; }
+                                  }
+                                  return best.clip!.id;
+                                };
+                                return (
+                                  <div
+                                    key={`g:${g.items[0].key}`}
+                                    data-clip-group
+                                    data-clip-ids={ids.join(' ')}
+                                    data-clip-kind={g.kind}
+                                    className={`absolute cursor-grab rounded border border-white/30 ${look.cls}`}
+                                    style={{
+                                      left: `${(g.start / timelineDuration) * 100}%`,
+                                      width: `${((g.end - g.start) / timelineDuration) * 100}%`,
+                                      minWidth: '3px',
+                                      top: 3,
+                                      bottom: 3,
+                                    }}
+                                    title={`${look.name} ${ids.length}個（${fmtTime(g.start)}-${fmtTime(g.end)}）／拡大すると1つずつ見えます`}
+                                    onPointerDown={(event) => clipFns.current.startDrag(event, pick(event), 'move')}
+                                    onDoubleClick={(event) => { event.stopPropagation(); clipFns.current.focusClip(pick(event)); }}
+                                    onContextMenu={(event) => clipFns.current.openMenu(event, pick(event))}
+                                  />
+                                );
                               }
+                              const item = entry.item;
                               const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
                               // accurate width (% of timeline); a pixel minWidth keeps short clips
                               // clickable WITHOUT the old 0.8%-of-timeline floor that, on a long
@@ -4138,7 +4346,7 @@ export function VideoReviewEditor({
                               const clip = item.clip;
                               if (!clip) return null;
                               const clipAsset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
-                              const selected = selectedSequenceClipIds.includes(clip.id);
+                              const selected = selectedClipSet.has(clip.id);
                               const linkedSelected = !selected && highlightedClipIds.has(clip.id);
                               const isVideo = item.itemType === 'video';
                               const rawName = clipAsset?.label || '';
@@ -4151,11 +4359,7 @@ export function VideoReviewEditor({
                                     ? (assetName || clip.label || audioRoleLabel(clip.role))
                                     : clip.label || assetName || '素材';
                               const isImage = isVideo && ((clip as { kind?: string }).kind === 'image' || clipAsset?.kind === 'image');
-                              const kind: ClipKind = isScene ? 'scene'
-                                : item.itemType === 'caption' ? 'caption'
-                                  : item.itemType === 'effect' ? 'effect'
-                                    : item.itemType === 'audio' ? (clip.role === 'music' || clip.role === 'bgm' ? 'bgm' : clip.role === 'sfx' || clip.role === 'se' ? 'se' : 'voice')
-                                      : isImage ? 'image' : 'video';
+                              const kind: ClipKind = laneItemKind(item, clipAsset);
                               const badge = CLIP_KIND_STYLE[kind].name;
                               const srcStart = Number(clip.source_start || 0);
                               const srcEnd = clip.source_end != null ? Number(clip.source_end) : srcStart + (clip.timeline_end - clip.timeline_start);
@@ -4169,14 +4373,16 @@ export function VideoReviewEditor({
                               const strip = isVideo && !isScene && !isImage && clipAsset?.filmstrip_base
                                 ? `${clipAsset.filmstrip_base}&m=${Math.floor(stripSec / 60)}` : undefined;
                               const stripIndex = Math.floor((stripSec % 60) / 2);
-                              const widthPx = trackPx > 0 ? (width / 100) * trackPx : 200;
+                              // 画面での幅は段々に丸める（ズームを1段動かすたびに全部のクリップを描き直さない）
+                              const rawWidthPx = trackPx > 0 ? (width / 100) * trackPx : 200;
+                              const widthPx = trackPx > 0 ? quantizeWidthPx(rawWidthPx) : 200;
                               return (
                                 <ClipBox
                                   key={item.key}
                                   clipId={clip.id}
                                   left={left}
                                   width={width}
-                                  widthPx={Math.round(widthPx)}
+                                  widthPx={widthPx}
                                   kind={kind}
                                   label={labelText}
                                   thumb={thumb}
@@ -4186,7 +4392,7 @@ export function VideoReviewEditor({
                                   sourceStart={srcStart}
                                   sourceEnd={srcEnd}
                                   volume={clip.volume ?? 1}
-                                  narrow={!selected && trackPx > 0 && widthPx < 28}
+                                  narrow={!selected && trackPx > 0 && rawWidthPx < 28}
                                   selected={selected}
                                   linkedSelected={linkedSelected}
                                   touch={danTouch.ids.includes(clip.id)}
@@ -4224,7 +4430,7 @@ export function VideoReviewEditor({
                           </div>
                         );
                       })
-  ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch, viewWin, trackPx, instrJobs]);
+  ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedClipSet, highlightedClipIds, danTouch, viewWin, trackPx, pxPerSec, instrJobs]);
 
   return (
     <div
@@ -5579,21 +5785,12 @@ export function VideoReviewEditor({
                   <Maximize2 className="h-4 w-4" />
                 </Button>
                 <div data-keep className="flex shrink-0 items-center gap-1" title={`タイムラインの拡大率 ${Math.round(timelineZoom * 100)}%（左端＝全体表示・＋／－キーでも変わる）`}>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1000}
-                    step={1}
-                    // 拡大率は倍々に効くので、つまみは対数で動かす（左端＝全体、右端＝約0.5秒）
-                    value={Math.round((Math.log(Math.max(1, timelineZoom)) / Math.log(Math.max(1.0001, maxTimelineZoom))) * 1000)}
-                    aria-label="タイムラインズーム"
-                    onChange={(event) => setTimelineZoom(zoomStep(Math.exp((Number(event.target.value) / 1000) * Math.log(maxTimelineZoom)), maxTimelineZoom))}
-                    onDoubleClick={() => setTimelineZoom(1)}
-                    // Drop focus after dragging so a following Space goes to play/pause, not the
-                    // slider (a focused range input eats Space/arrow keys).
-                    onPointerUp={(event) => event.currentTarget.blur()}
-                    onMouseUp={(event) => event.currentTarget.blur()}
-                    className="h-1 w-24 cursor-pointer accent-sky-500"
+                  <ZoomSlider
+                    zoom={timelineZoom}
+                    max={maxTimelineZoom}
+                    preview={zoomPreview}
+                    onZoom={(value, now) => requestZoom(zoomStep(value, maxTimelineZoom), now)}
+                    onRelease={commitZoom}
                   />
                 </div>
                 <div data-keep className="shrink-0 whitespace-nowrap text-sm tabular-nums text-muted-foreground">
@@ -5631,6 +5828,7 @@ export function VideoReviewEditor({
                         headRef={playheadHeadRef}
                         duration={timelineDuration || 0}
                         zoom={timelineZoom}
+                        zoomPreview={zoomPreview}
                         fps={fps}
                         onScrubStart={beginScrub}
                       />
