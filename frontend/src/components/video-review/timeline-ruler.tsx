@@ -1,6 +1,11 @@
 'use client';
 
-import { memo, useEffect, useState, type RefObject } from 'react';
+import { memo, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from 'react';
+
+import type { ZoomPreview } from './zoom-preview';
+
+const noSubscribe = () => () => {};
+const noValue = (): number | null => null;
 
 /** タイムラインの上の目盛り。押す・引きずると再生位置が動く（他の編集ソフトの時間の物差しと同じ）。
  *  スクロールやズームで描き直すのはこの部品だけ。見えている範囲の目盛りだけを作る。 */
@@ -29,7 +34,8 @@ export const TimelineRuler = memo(function TimelineRuler({
   trackRef,
   headRef,
   duration,
-  zoom,
+  zoom: committedZoom,
+  zoomPreview,
   fps = 30,
   onScrubStart,
 }: {
@@ -38,20 +44,31 @@ export const TimelineRuler = memo(function TimelineRuler({
   headRef: RefObject<HTMLDivElement | null>;
   duration: number;
   zoom: number;
+  /** 拡大率を変えている途中の見せるだけの値（あればこちらで描く） */
+  zoomPreview?: ZoomPreview;
   fps?: number;
   onScrubStart: (clientX: number) => void;
 }) {
+  const preview = useSyncExternalStore(
+    zoomPreview ? zoomPreview.subscribe : noSubscribe,
+    zoomPreview ? zoomPreview.get : noValue,
+    noValue,
+  );
+  const zoom = preview ?? committedZoom;
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const [view, setView] = useState({ left: 0, width: 0, trackW: 0, trackX: 0 });
-  useEffect(() => {
+  useLayoutEffect(() => {
     const sc = scrollRef.current;
     const tr = trackRef.current;
-    if (!sc || !tr) return;
+    const own = rootRef.current;
+    if (!sc || !tr || !own) return;
     let raf = 0;
     const update = () => {
       raf = 0;
-      const trackX = tr.getBoundingClientRect().left - sc.getBoundingClientRect().left + sc.scrollLeft;
+      // 目盛り自身の幅で測る（タイムラインと同じ幅。拡大率を変えている途中は、引き伸ばした後の幅）
+      const trackX = own.getBoundingClientRect().left - sc.getBoundingClientRect().left + sc.scrollLeft;
       setView((v) => {
-        const next = { left: sc.scrollLeft, width: sc.clientWidth, trackW: tr.offsetWidth, trackX };
+        const next = { left: sc.scrollLeft, width: sc.clientWidth, trackW: own.offsetWidth, trackX };
         return v.left === next.left && v.width === next.width && v.trackW === next.trackW && v.trackX === next.trackX ? v : next;
       });
     };
@@ -60,7 +77,7 @@ export const TimelineRuler = memo(function TimelineRuler({
     sc.addEventListener('scroll', schedule, { passive: true });
     const ro = new ResizeObserver(schedule);
     ro.observe(sc);
-    ro.observe(tr);
+    ro.observe(own);
     return () => {
       sc.removeEventListener('scroll', schedule);
       ro.disconnect();
@@ -80,6 +97,7 @@ export const TimelineRuler = memo(function TimelineRuler({
 
   return (
     <div
+      ref={rootRef}
       data-timeline-ruler
       className="relative h-5 cursor-ew-resize select-none overflow-hidden rounded-sm border-b border-white/15 bg-neutral-900/90"
       style={{
