@@ -102,3 +102,68 @@ def test_content_edit_lock_serialises_two_dans(asset_root):
     for t in ts:
         t.join()
     assert order in (['a+', 'a-', 'b+', 'b-'], ['b+', 'b-', 'a+', 'a-'])
+
+
+@pytest.fixture
+def job_root(tmp_path, monkeypatch):
+    from app.services import command_job_state as state
+    root = tmp_path / 'jobs'
+    root.mkdir()
+    monkeypatch.setattr(state, 'ROOT', root)
+    return root
+
+
+J1 = '11111111-1111-4111-8111-111111111111'
+J2 = '22222222-2222-4222-8222-222222222222'
+
+
+def _job(root, jid, **kw):
+    s = {'id': jid, 'user_id': 'u1', 'room_id': 'r1', 'engine': 'parallel', 'state': 'completed',
+         'created_at': '2026-11-01T00:00:00+00:00', 'updated_at': '2026-11-01T00:00:00+00:00'}
+    s.update(kw)
+    (root / f'{jid}.json').write_text(json.dumps(s, ensure_ascii=False), encoding='utf-8')
+
+
+def test_resent_instruction_carries_the_previous_try(job_root):
+    """11/17 本人「直して返してきたものが十分じゃなくて、もう少しこうしなきゃいけない時」→ 書き直して送ると前の回を土台に直す。"""
+    from app.services.editor_instructions import _previous, build_task
+    first = build_task({'kind': 'marker', 'start': 3, 'note': 'ここで寄る'}, 't', None)
+    _job(job_root, J1, task=first, result='3秒で120%に寄せました。')
+    ann = {'kind': 'marker', 'start': 3, 'note': 'もっと強く寄って', 'data': {'job_id': J1}}
+    prev = _previous('u1', ann)
+    assert prev == {'note': 'ここで寄る', 'result': '3秒で120%に寄せました。'}
+    text = build_task(ann, 't', None, prev)
+    assert '「ここで寄る」' in text and '120%' in text and '「もっと強く寄って」' in text
+    assert _previous('someone-else', ann) is None
+    assert _previous('u1', {'kind': 'marker', 'start': 3, 'note': 'x'}) is None
+
+
+def test_room_work_text_keeps_the_whole_history_of_the_work(job_root):
+    from app.services.editor_instructions import room_work_text
+    _job(job_root, J1, title='ピン 0:03 寄る', result='寄せました')   # 2週間以上前でも履歴に残る
+    _job(job_root, J2, room_id='r2', title='別の作品')
+    text = room_work_text('r1')
+    assert 'ピン 0:03 寄る' in text and '寄せました' in text and '別の作品' not in text
+    assert 'チャットには出していない' in text
+
+
+def test_send_starts_quiet(asset_root, job_root, monkeypatch):
+    """結果は指示の欄にだけ出し、横のチャットに報告しない（11/17 本人）。"""
+    import asyncio
+    from app.services import editor_instructions as ei, editor_rooms, parallel_job_runner
+    _room(asset_root, 'lib', [], [{'id': 'c1', 'title': 't'}])
+    seen = {}
+
+    async def fake_room(user_id, asset_room_id, content_id):
+        return {'room_id': 'work-room'}
+
+    async def fake_start(room_id, user_id, task, **kw):
+        seen.update(kw, room_id=room_id, task=task)
+        return {'id': 'j9', 'state': 'queued'}
+
+    monkeypatch.setattr(editor_rooms, 'ensure_room', fake_room)
+    monkeypatch.setattr(parallel_job_runner, 'start', fake_start)
+    monkeypatch.setattr(ei, 'frame_path', lambda *a: None)
+    out = asyncio.run(ei.send('u1', 'lib', 'c1', {'id': 'a', 'kind': 'marker', 'start': 1, 'note': '音を足して'}))
+    assert out['job_id'] == 'j9' and seen['quiet'] is True and seen['room_id'] == 'work-room'
+    assert 'チャットには出ない' in seen['task']

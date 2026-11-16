@@ -5093,7 +5093,7 @@ export function VideoReviewEditor({
                             </div>
                             {job.active && job.progress ? <div className="mt-1 text-muted-foreground">{job.progress}</div> : null}
                             {!job.active && job.result ? <div className="mt-1 line-clamp-4 whitespace-pre-wrap text-muted-foreground">{job.result}</div> : null}
-                            {!job.active ? <div className="mt-1 text-[10px] text-muted-foreground">確かめたら、この指示は Delete で消せます。</div> : null}
+                            {!job.active ? <div className="mt-1 text-[10px] text-muted-foreground">足りなければ言葉を書き足して、もう一度送れます（消さなくて大丈夫です）。不要になったら Delete で消せます。</div> : null}
                           </div>
                         ) : null}
                         {toDan ? (
@@ -5106,7 +5106,7 @@ export function VideoReviewEditor({
                           </Button>
                         ) : null}
                         {toDan && !job ? (
-                          <p className="text-[10px] text-muted-foreground">送るとすぐ、エディターのダンがこの指示だけを直し始めます。いくつ送っても、それぞれ並んで進みます。結果は右の「ダンと制作」にも出ます。</p>
+                          <p className="text-[10px] text-muted-foreground">送るとすぐ、エディターのダンがこの指示だけを直し始めます。いくつ送っても、それぞれ並んで進みます。結果はこの欄に出ます（チャットには出しません）。</p>
                         ) : null}
                       </>
                     );
