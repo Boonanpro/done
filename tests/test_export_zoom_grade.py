@@ -172,3 +172,33 @@ def test_overlay_video_with_a_covering_box_and_grade(room, tmp_path):
     got = _frame(seq, 0.5, tmp_path, 'up')
     want = _native_grade(_zoomed(ref, -0.22, -0.17, 1.45, 1.45) / 255, -0.35, 1.18, 0.85, -0.08, 0.0) * 255
     assert np.abs(got - want).mean() < 8, np.abs(got - want).mean()
+
+
+@pytest.mark.parametrize('start', [0.0, 0.02, 0.03, 0.05])
+def test_moving_overlay_from_a_25fps_source_shows_from_its_first_frame(room, tmp_path, start):
+    """A 25 fps source on a 30 fps timeline, started between its frames: the moving overlay is
+    there from the clip's first frame (it used to miss frame 0 and let the lane beneath flash
+    through), and each frame shows the same source frame the still overlay shows."""
+    src = room / 'src25.mp4'   # moving picture: every frame differs
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', f'testsrc2=s={W}x{H}:r=25:d=3',
+                    '-c:v', 'libx264', '-qp', '0', '-g', '1', str(src)], check=True)
+    assets = json.loads((room / 'assets.json').read_text())
+    assets.append({'id': 'v25', 'kind': 'video', 'local_path': str(src),
+                   'metadata': {'duration': 3, 'width': W, 'height': H, 'fps': 25, 'has_audio': False}})
+    (room / 'assets.json').write_text(json.dumps(assets))
+
+    def seq(moving):
+        s = _seq(grade={'sat': 0})                               # grey base, colour overlay
+        up = {'id': 'u', 'asset_id': 'v25', 'timeline_start': 0.5, 'timeline_end': 1.5,
+              'source_start': 1 + start, 'source_end': 2 + start, 'position': {'x': 0, 'y': 0, 'width': 1, 'height': 1}}
+        if moving:   # keys that move, then a still stretch to compare against the still overlay
+            up['transform_keys'] = [{'t': 0, 'x': 0, 'y': 0, 'w': 1, 'h': 1}, {'t': 0.9, 'x': 0, 'y': 0, 'w': 1, 'h': 1},
+                                    {'t': 1, 'x': 0.01, 'y': 0, 'w': 1, 'h': 1}]
+        s['tracks'].append({'id': 'up', 'type': 'video', 'clips': [up]})
+        return s
+
+    for i, t in enumerate((0.5, 0.5 + 1 / 30, 0.8)):
+        moved = _frame(seq(True), t, tmp_path, f'm{i}')
+        still = _frame(seq(False), t, tmp_path, f's{i}')
+        assert (moved.max(-1) - moved.min(-1)).mean() > 40, (start, t)   # the colour picture, not the grey base
+        assert np.abs(moved - still).mean() < 2, (start, t, np.abs(moved - still).mean())

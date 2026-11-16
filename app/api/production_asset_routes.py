@@ -2762,10 +2762,16 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             # (A circle/rounded shape is not drawn on a moving box.)
             k_a, k_b = _frame_index(ts, timeline_fps), _frame_index(te, timeline_fps)
             t0 = (k_a - 0.5) / timeline_fps
+            # Layer frame j is drawn at layer time j/F and stands for timeline frame k_a + j, so a
+            # source frame placed at timeline time P sits at P - k_a/F in layer time (the same
+            # "latest frame <= t" rule as the plain overlay). Shifting by t0 instead put every frame
+            # half a frame late: when the source's frames are off the timeline grid (a 25/24 fps
+            # clip, or a start between frames) frame 0 of the layer had nothing yet and the lane
+            # beneath flashed through (2026-11-16, found swapping Envato originals into X固定ポスト).
             layer_lines, layer = _moving_video_layer(
                 _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.4f}:end={source_end:.4f},"
-                f"{ov_pre.rstrip(',')}{_grade_filter(clip)},setpts=PTS-STARTPTS{ov_offset - t0:+.5f}/TB",
+                f"{ov_pre.rstrip(',')}{_grade_filter(clip)},setpts=PTS-STARTPTS{ov_offset - k_a / timeline_fps:+.5f}/TB",
                 f"o{oi}", okeys, (_pos_box(pos)[0] * output_width, _pos_box(pos)[1] * output_height,
                                   _pos_box(pos)[2] * output_width, _pos_box(pos)[3] * output_height),
                 sw_o, sh_o, output_width, output_height, fps_filter, max(1, k_b - k_a) / timeline_fps,
