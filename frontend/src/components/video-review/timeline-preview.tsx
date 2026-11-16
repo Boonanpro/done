@@ -1545,9 +1545,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     }
     const url = srcByAssetId.get(String(clip.asset_id || ''));
     const fs = url ? framesRef.current.get(url) : null;
-    if (fs?.width && fs?.height) return { w: fs.width, h: fs.height };
+    // a transparent video's watching copy is colour over alpha: the picture is the top half
+    const half = ALPHA_ASSET_IDS.has(String(clip.asset_id || '')) ? 2 : 1;
+    if (fs?.width && fs?.height) return { w: fs.width, h: fs.height / half };
     const vel = videosRef.current.get(String(clip.id));
-    if (vel?.videoWidth) return { w: vel.videoWidth, h: vel.videoHeight };
+    if (vel?.videoWidth) return { w: vel.videoWidth, h: vel.videoHeight / half };
     const md = (assets || []).find((a) => a.id === String(clip.asset_id || ''))?.metadata;
     return md?.width && md?.height ? { w: Number(md.width), h: Number(md.height) } : null;
   };
@@ -1576,7 +1578,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
     const fs = url ? framesRef.current.get(url) : null;
     const vw = fs?.width || 0;
-    const vh = fs?.height || 0;
+    const vh = (fs?.height || 0) / (ALPHA_ASSET_IDS.has(String(vc.clip.asset_id || '')) ? 2 : 1);
     if (!vw || !vh) return null;
     const tf = vc.clip.transform || { scale: 1, x: 0, y: 0 };
     const { w, h } = dims;
