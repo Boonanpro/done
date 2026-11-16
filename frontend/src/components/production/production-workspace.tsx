@@ -103,6 +103,8 @@ function sequenceAssetForEditor(asset: ProductionAsset) {
       ? `/api/v1/production-assets/peaks?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}`
       : undefined,
     label: asset.filename || asset.original_uri,
+    // 透明な映像は、見るための写しが「上に色・下に透明度」の形。写しができるまでは渡さない（元の動画は画面で解読できない）
+    alpha: (asset as { view_alpha?: string }).view_alpha === 'stacked' && asset.view_url ? 'stacked' as const : null,
     fps: asset.metadata?.fps as string | number | undefined,
     kind: asset.kind,
     // 素材そのものの大きさ・長さ: クリップの端を伸ばせるのは素材の長さまで

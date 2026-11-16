@@ -336,6 +336,8 @@ export type SequenceAsset = {
   label?: string | null;
   fps?: number | string | null;
   kind?: string | null;
+  /** 透明な映像: 見るための写しが「上に色・下に透明度」を縦に重ねた形（stacked）。プレビューが透かして描く */
+  alpha?: 'stacked' | null;
   /** 素材そのものの大きさ・長さ（端を伸ばせる所まで＝素材の長さ） */
   metadata?: { width?: number | null; height?: number | null; duration?: number | null } | null;
 };
