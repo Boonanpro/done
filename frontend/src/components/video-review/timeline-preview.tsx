@@ -656,6 +656,33 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     return () => { window.clearTimeout(t); off(); };
   }, [localUrlsKey]);
   useEffect(() => () => { if (localMediaEnabled()) localMedia().stop(); }, []);
+  // 開いてすぐ（取り込みの途中）に位置を飛ばした: 飛んだ先の絵と音は Mac から読むので、その間は取り込みを休ませて
+  // 回線を譲る。あわせて、飛んだ先の近くで使う素材を先に取り込む（2026-11-16 本人「開いてすぐいろんな秒数に飛ぶとかくつく」）。
+  const seekSeenRef = useRef({ rev: seekRev, t: currentTime });
+  useEffect(() => {
+    const prev = seekSeenRef.current;
+    seekSeenRef.current = { rev: seekRev, t: currentTime };
+    if (!localMediaEnabled()) return;
+    const jumped = seekRev !== prev.rev || (!playingRef.current && Math.abs(currentTime - prev.t) > 0.05);
+    if (!jumped) return;
+    const store = localMedia();
+    if (!store.status().active) return;
+    store.yieldToForeground();
+    const from = currentTime - 1;
+    const to = currentTime + 20;
+    const near = new Map<string, number>();
+    const note = (u: string | undefined, start: number, end: number) => {
+      if (!u || end < from || start > to) return;
+      const k = Math.max(start, currentTime);
+      if (!(near.get(u)! <= k)) near.set(u, k);
+    };
+    for (const { clip } of audibleAudio) {
+      const u = srcByAssetId.get(String(clip.asset_id || ''));
+      note(u && useWebAudio ? (audioOnlyUrl(u) || u) : u, clip.timeline_start || 0, clip.timeline_end || 0);
+    }
+    for (const vc of visualClips) note(srcByAssetId.get(String(vc.clip.asset_id || '')), vc.clip.timeline_start || 0, vc.clip.timeline_end || 0);
+    store.prioritize([...near.entries()].sort((a, b) => a[1] - b[1]).map(([u]) => u));
+  }, [currentTime, seekRev, audibleAudio, visualClips, srcByAssetId, useWebAudio]);
 
   // 止まっている間も、再生位置の先の音を解読しておく（再生を押した瞬間から鳴る）
   const ensureAudioAhead = useCallback((t: number, aheadReal: number) => {
