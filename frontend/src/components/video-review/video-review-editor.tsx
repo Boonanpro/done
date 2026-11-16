@@ -1671,7 +1671,10 @@ export function VideoReviewEditor({
       const tIdx = tracks.findIndex((tr) => (tr.clips || []).some((c) => c.id === clicked.id));
       const freeze: SequenceClip = {
         id: makeId(), asset_id: clicked.asset_id, track: clicked.track, layer: clicked.layer,
-        composition: clicked.composition, position: clicked.position ?? null, transform: clicked.transform ?? null,
+        composition: clicked.composition, position: clicked.position ?? null,
+        // a still keeps the size/place the picture had at that moment (keyframes included)
+        transform: sortedKeys(clicked).length ? motionAt(clicked, t - clicked.timeline_start) : clicked.transform ?? null,
+        fit: clicked.fit ?? null, opacity: clicked.opacity,
         crop: clicked.crop ?? null, shape: clicked.shape ?? null,
         timeline_start: r(t), timeline_end: r(t + F), source_start: srcT, source_end: srcT, // freeze
         role: 'freeze', label: '静止画',

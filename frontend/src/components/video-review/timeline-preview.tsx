@@ -1723,7 +1723,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     onPick(ids[i]);
   }, [onPick, contentRect, currentTime, visualClips, sceneClips, dims, imageSrcByAssetId, imageFor, opaqueAt]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  pickAtRef.current = pickAt;
+  useEffect(() => { pickAtRef.current = pickAt; }, [pickAt]);
   const box = selectedBox?.rect;
   const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
 

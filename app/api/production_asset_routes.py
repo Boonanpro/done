@@ -8346,7 +8346,12 @@ async def track_blur_region(
         raise HTTPException(status_code=404, detail="Content not found")
     timeline = content.get("timeline") if isinstance(content.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
-    out_w, out_h = _output_size(str((sequence or {}).get("format") or timeline.get("format") or content.get("format") or "9:16"))
+    _fmt = str((sequence or {}).get("format") or timeline.get("format") or content.get("format") or "9:16")
+    out_w, out_h = _output_size(_fmt)
+    if isinstance(sequence, dict):
+        # where each picture actually sits (the one form → its box), like the export
+        from app.services.clip_placement import render_sequence
+        sequence = render_sequence(sequence, _assets_by_id(payload.room_id), _fmt)
 
     box_cx = payload.x + payload.width / 2.0
     box_cy = payload.y + payload.height / 2.0
