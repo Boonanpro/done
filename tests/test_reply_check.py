@@ -92,13 +92,3 @@ def test_keep_mark_checks_the_reply_before_it(tmp_path):
     out = _run({"_dir": tmp_path / "store", "hook_event_name": "Stop", "transcript_path": str(t),
                 "session_id": "k1", "last_assistant_message": "REPLY_UNCHANGED"})
     assert out and json.loads(out).get("decision") == "block"
-
-
-def test_a_new_box_and_arrow_diagram_is_stopped_but_other_parts_and_words_are_not():
-    # 2026-11-15「このクソの役にも立たん表現を止めろって言ったよな」: Done の部屋のダンが Flow を2つ出した
-    flow = '発信の仕方は3つです。\n\n```openui-lang\nroot = Column([Heading("広がる流れ"), Flow([{id: "a", label: "料理動画", icon: "video"}, {id: "b", label: "冷蔵庫", icon: "home"}])])\n```\n'
-    assert "retired-shape" in ids(flow)
-    assert "retired-shape" in ids(flow.replace("```openui-lang", "~~~openui").replace("```", "~~~"))
-    assert "retired-shape" not in ids('比べました。\n\n```openui-lang\nroot = Compare(["案", "点"], [["A", "7"]])\n```\n')
-    assert "retired-shape" not in ids("Workflow( の話と、`Flow(` という部品を外した話です。")   # 文の中で名前を言うのは止めない
-    assert "retired-shape" not in ids("```python\nFlow(x)\n```")

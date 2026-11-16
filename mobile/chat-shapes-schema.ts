@@ -78,6 +78,7 @@ const CompareCell = z.union([
   z.object({
     label: z.string().describe('セルの文字'),
     color: z.string().optional().describe('色見本: #rgb・#rrggbb・rgb(r, g, b)'),
+    image: z.string().optional().describe('セルの写真（書き出した絵・画面の写真）: /api/v1/files/… か https://。押すと大きく開く'),
   }),
 ]);
 /** 表の見出し・セルの文字（{label, color} なら label） */
@@ -434,8 +435,7 @@ export const SHAPE_SPECS = [
 export const SHAPE_NAMES: readonly string[] = SHAPE_SPECS.map((s) => s.name);
 
 /**
- * ダンにはもう勧めない部品。画面は前のメッセージに出た分を今までどおり描くが、ダンへの指示の一覧には載せず、
- * 新しい返事に書くと返事の点検（scripts/hook_reply_check.py）が止めて書き直させる。
+ * ダンにはもう勧めない部品。画面は前のメッセージに出た分を今までどおり描くが、ダンへの指示の一覧には載せない。
  * Flow（文字にアイコンを付けた箱と矢印の図）: 本人「ただのテキストにアイコンをつけただけ」（2026-11-11）、
  * 「このクソの役にも立たん表現を止めろって言ったよな」（2026-11-15）。
  */

@@ -91,6 +91,14 @@ function Photo({ src, ratio }: { src: unknown; ratio: number }) {
   return <Image source={{ uri }} onError={() => setBroken(true)} style={[styles.photo, { aspectRatio: ratio }]} resizeMode="cover" />;
 }
 
+/** 表のセルの写真（書き出した絵・画面の写真）。PC と同じく /api/v1/files/… か https:// だけ */
+function CellPhoto({ src }: { src: unknown }) {
+  const uri = useImageUrl(src);
+  const [broken, setBroken] = useState(false);
+  if (!uri || broken) return null;
+  return <Image source={{ uri }} onError={() => setBroken(true)} style={styles.cellPhoto} resizeMode="contain" />;
+}
+
 function Box({ children, flat, framed }: { children: ReactNode; flat?: boolean; framed?: boolean }) {
   const inside = useContext(InsideContext);
   // 組み合わせの中のカードは細い枠だけ（外のカードと区別できるように）
@@ -258,22 +266,35 @@ function InputNode({ p }: { p: Record<string, unknown> }) {
 }
 
 function CompareNode({ p }: { p: Record<string, unknown> }) {
-  const cols = (Array.isArray(p.columns) ? p.columns : []).map((c) => readLook(c));
+  const colsRaw = Array.isArray(p.columns) ? p.columns : [];
+  const cols = colsRaw.map((c) => readLook(c));
   const rows = (Array.isArray(p.rows) ? p.rows : []).filter(Array.isArray) as unknown[][];
-  const cell = (c: ReturnType<typeof readLook>, head: boolean, key: string) => (
-    <View key={key} style={[styles.cell, head && styles.headCell]}>
-      {c?.color && safeColor(c.color) ? <View style={[styles.swatch, { backgroundColor: safeColor(c.color)! }]} /> : null}
-      <Text style={[styles.cellText, head && styles.headText]}>{c?.label ?? ''}</Text>
-    </View>
-  );
+  // 写真のあるセルがある列は、写真が読める幅にする
+  const photoCols = new Set<number>();
+  const rawImage = (c: unknown) => (c && typeof c === 'object' && typeof (c as { image?: unknown }).image === 'string' ? (c as { image: string }).image : null);
+  (Array.isArray(p.columns) ? p.columns : []).forEach((c, i) => { if (rawImage(c)) photoCols.add(i); });
+  rows.forEach((r) => r.forEach((c, i) => { if (rawImage(c)) photoCols.add(i); }));
+  const cell = (raw: unknown, head: boolean, key: string, ci: number) => {
+    const c = readLook(raw);
+    const image = rawImage(raw);
+    return (
+      <View key={key} style={[styles.cell, head && styles.headCell, photoCols.has(ci) && styles.photoCell]}>
+        {image ? <CellPhoto src={image} /> : null}
+        <View style={styles.cellLine}>
+          {c?.color && safeColor(c.color) ? <View style={[styles.swatch, { backgroundColor: safeColor(c.color)! }]} /> : null}
+          <Text style={[styles.cellText, head && styles.headText]}>{c?.label ?? ''}</Text>
+        </View>
+      </View>
+    );
+  };
   return (
     <Box>
       {str(p.caption) ? <Text style={styles.question}>{str(p.caption)}</Text> : null}
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>
         <View style={styles.table}>
-          <View style={styles.tr}>{cols.map((c, i) => cell(c, true, `h${i}`))}</View>
+          <View style={styles.tr}>{cols.map((_, i) => cell(colsRaw[i], true, `h${i}`, i))}</View>
           {rows.map((r, ri) => (
-            <View key={ri} style={styles.tr}>{cols.map((_, ci) => cell(readLook(r[ci] ?? ''), false, `${ri}-${ci}`))}</View>
+            <View key={ri} style={styles.tr}>{cols.map((_, ci) => cell(r[ci] ?? '', false, `${ri}-${ci}`, ci))}</View>
           ))}
         </View>
       </ScrollView>
@@ -811,7 +832,10 @@ const styles = StyleSheet.create({
   sendText: { color: '#fff', fontWeight: '600' },
   table: { borderWidth: 1, borderColor: 'rgba(110,120,115,0.35)', borderRadius: 8, overflow: 'hidden' },
   tr: { flexDirection: 'row' },
-  cell: { width: 120, paddingHorizontal: 8, paddingVertical: 6, borderTopWidth: StyleSheet.hairlineWidth * 2, borderLeftWidth: StyleSheet.hairlineWidth * 2, borderColor: 'rgba(110,120,115,0.25)', flexDirection: 'row', alignItems: 'center', gap: 4 },
+  cell: { width: 120, paddingHorizontal: 8, paddingVertical: 6, borderTopWidth: StyleSheet.hairlineWidth * 2, borderLeftWidth: StyleSheet.hairlineWidth * 2, borderColor: 'rgba(110,120,115,0.25)', gap: 4 },
+  cellLine: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  photoCell: { width: 180 },
+  cellPhoto: { width: '100%', aspectRatio: 16 / 9, borderRadius: 6, backgroundColor: '#eef2ee' },
   headCell: { backgroundColor: 'rgba(36,94,73,0.08)' },
   cellText: { fontSize: 13, lineHeight: 19, color: '#1f2724', flexShrink: 1 },
   headText: { fontWeight: '700' },
