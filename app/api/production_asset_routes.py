@@ -160,8 +160,29 @@ def _filter_script_args(exe: str, path: Path) -> list[str]:
     """Filtergraph read from a file. FFmpeg 7 added `-/filter_complex <file>` and 8 removed
     `-filter_complex_script`; older builds (and unknown versions) keep the old spelling."""
     if _ffmpeg_major(exe) >= 7:
+        _cap_graph_threads(path)
         return ["-/filter_complex", str(path)]
     return ["-filter_complex_script", str(path)]
+
+
+_GRAPH_SWS_THREADS = "sws_flags=bicubic:threads=1;"
+
+
+def _cap_graph_threads(path: Path) -> None:
+    """One graph holds hundreds of movie sources and format conversions. With FFmpeg's automatic
+    thread counts each decoder and each converter starts a pool sized to the CPU, and a long
+    window (2026-11-18, スヤさん1本目 21:39〜26:19: 264 sources) passed the 8192 threads a
+    macOS process may own: converters then failed to start ("Failed initializing scaling graph
+    (Resource temporarily unavailable)") and their frames were silently dropped, so the export
+    came out 28 s short with the picture running ahead of the sound. The window is already
+    rendered in parallel with others, so one thread per converter costs no wall time."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return
+    if text.lstrip().startswith("sws_flags="):
+        return
+    path.write_text(_GRAPH_SWS_THREADS + text, encoding="utf-8")
 
 
 def _ffprobe() -> str:
@@ -1332,6 +1353,9 @@ def _shape_cut_filter(shape: str | None, w: int, h: int, alpha: bool) -> str:
     return f",geq=lum='if({cond}\\,lum(X,Y)\\,16)':cb='if({cond}\\,cb(X,Y)\\,128)':cr='if({cond}\\,cr(X,Y)\\,128)'"
 
 
+_MOVIE_DEC_THREADS = 2
+
+
 def _movie_input(path: Any, seek: float, *, audio: bool = False, streams: str | None = None, fmt: str | None = None) -> str:
     """movie=/amovie= source for the filtergraph SCRIPT — replaces a command-line -i input.
 
@@ -1343,6 +1367,9 @@ def _movie_input(path: Any, seek: float, *, audio: bool = False, streams: str | 
     # splits on ':' — so the drive colon must be escaped even inside quotes ('C\:/...')
     p = str(path).replace("\\", "/").replace("'", "\\'").replace(":", "\\:")
     out = ("amovie" if audio else "movie") + f"=filename='{p}'"
+    # a few decoder threads per source: hundreds of sources × a CPU-sized pool each exceed the
+    # per-process thread limit (see _cap_graph_threads)
+    out += f":dec_threads={_MOVIE_DEC_THREADS}"
     if seek > 0.001:
         out += f":seek_point={seek:.3f}"
     if streams:
