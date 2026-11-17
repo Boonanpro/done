@@ -39,6 +39,16 @@ CODE_KINDS = ('summon', 'question', 'answer')
 # A number read digit by digit: a code, not an amount. 「802227」 went in whole and was said 「8、0、2、2、7」 (11/7 12:23).
 CODE = re.compile(r'(?<![\d,.¥$＄/:-])(\d{4,8})(?![\d,.:/-]|\s*(?:円|年|月|日|時|分|秒|件|人|枚|個|回|歳|万|千|億|%|％|km|ｍ|m|g|kg|mm|cm|kcal|ml|h))')
 SECONDS_CLOCK = re.compile(r'[（(]?\d{1,2}:\d{2}:\d{2}[）)]?')
+# A place in a video, 「0:55.8」 or 「0:47」: said 「五五点ハチ」 on 11/17 (the editor's call). Read as 「55秒」 / 「3分47秒」.
+# A time of day (14:05) has neither the leading 0: nor tenths, and is left as it is.
+VIDEO_TIME = re.compile(r'(?<![\d:])(\d{1,2}):(\d{2})(\.\d+)?(?![\d:])')
+
+
+def video_time(match):
+    minutes, seconds, tenths = int(match.group(1)), int(match.group(2)), match.group(3)
+    if not tenths and minutes != 0:
+        return match.group(0)
+    return f'{seconds}秒' if minutes == 0 else f'{minutes}分{seconds}秒'
 
 
 def spaced_digits(match):
@@ -62,6 +72,7 @@ def speakable(kind, text):
         text = URL_TEXT.sub(lambda m: f'（{site_of(m.group(0))}のリンク）', text)
     text = unspoken_urls(text)
     text = SECONDS_CLOCK.sub('', text)
+    text = VIDEO_TIME.sub(video_time, text)
     text = re.sub(r'(?<=\d),(?=\d{3})', '', text)   # 14,320円 was read as 「十四、三百二十円」 (2026-09-22)
     if kind in CODE_KINDS:
         text = CODE.sub(spaced_digits, text)

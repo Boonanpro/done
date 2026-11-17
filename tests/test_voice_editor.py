@@ -153,3 +153,9 @@ async def test_where_the_call_is_goes_with_the_question_of_where_a_request_goes(
     r.dialogue.editor = voice_editor.Moments('assets', 'c1')
     got = await r.route()
     assert got[0] == 'make' and 'エディター' in j.asked[-1][0]['call_place']
+
+
+def test_a_place_in_the_video_is_said_in_minutes_and_seconds():
+    assert voice_say.speakable('note', '0:55.8のテロップを消すね') == '55秒のテロップを消すね'
+    assert voice_say.speakable('note', '3:47.2の札') == '3分47秒の札'
+    assert voice_say.speakable('answer', '14:05に始めた') == '14:05に始めた'   # a time of day stays
