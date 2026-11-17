@@ -162,8 +162,13 @@ function boxKeyAt(keys: unknown, rel: number): { x: number; y: number; w: number
 function isFrozen(clip: SequenceClip): boolean {
   return clip.source_end != null && Number(clip.source_end) <= Number(clip.source_start || 0);
 }
+// クリップの速さ（1.08 なら元の素材を1.08倍で流す。タイムラインの1秒＝素材の1.08秒）
+function clipSpeed(clip: SequenceClip): number {
+  const s = Number(clip.speed);
+  return Number.isFinite(s) && s > 0 ? s : 1;
+}
 function clipSourceTime(clip: SequenceClip, t: number): number {
-  return Number(clip.source_start || 0) + (isFrozen(clip) ? 0 : t - clip.timeline_start);
+  return Number(clip.source_start || 0) + (isFrozen(clip) ? 0 : (t - clip.timeline_start) * clipSpeed(clip));
 }
 
 // この段の映像が画面を全部ふさぐか（ふさぐなら、それより下の段は見えない）。
@@ -708,19 +713,23 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const R = rateRef.current;
     const ahead = aheadReal * R;
     // 倍速の時は、すぐ鳴る区切りを1つずつ前もって縮めておく（鳴らす瞬間に縮めると、その分だけ画面が引っかかる）
-    let warmed = R === 1;
+    // クリップに速さが付いている時（1.08 など）も同じ（速さ＝再生の速さ×クリップの速さ）
+    let warmed = false;
     for (const { clip: c } of audibleAudio) {
       if (warmed) break;
       if (c.timeline_end <= t) continue;
       if (c.timeline_start > t + 3 * R) break;
+      const sp = clipSpeed(c);
+      const Rc = R * sp;
+      if (Rc === 1) continue;
       const src = mgr.get(srcByAssetId.get(String(c.asset_id || '')) || '');
       if (!src || src.mute) continue;
       const ss = Number(c.source_start || 0);
-      const s0 = ss + Math.max(0, t - c.timeline_start);
-      const s1 = Math.min(ss + (c.timeline_end - c.timeline_start), s0 + 3 * R);
+      const s0 = ss + Math.max(0, t - c.timeline_start) * sp;
+      const s1 = Math.min(ss + (c.timeline_end - c.timeline_start) * sp, s0 + 3 * Rc);
       for (let b = Math.floor(s0 / STRETCH_BLOCK_SEC); b * STRETCH_BLOCK_SEC < s1; b += 1) {
-        if (src.hasStretched(b, R)) continue;
-        if (src.stretchedBlock(b, R)) warmed = true;
+        if (src.hasStretched(b, Rc)) continue;
+        if (src.stretchedBlock(b, Rc)) warmed = true;
         break;
       }
     }
@@ -729,9 +738,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (c.timeline_start > t + ahead) break;
       const src = mgr.get(srcByAssetId.get(String(c.asset_id || '')) || '');
       if (!src) continue;
+      const sp = clipSpeed(c);
       const ss = Number(c.source_start || 0);
-      const from = ss + Math.max(0, t - c.timeline_start);
-      const to = Math.min(ss + (c.timeline_end - c.timeline_start), from + ahead);
+      const from = ss + Math.max(0, t - c.timeline_start) * sp;
+      const to = Math.min(ss + (c.timeline_end - c.timeline_start) * sp, from + ahead * sp);
       void src.ensure(from, to);
     }
   }, [audibleAudio, srcByAssetId]);
@@ -758,21 +768,24 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (ts > t + LOOK) break;
       const src = mgr.get(srcByAssetId.get(String(c.asset_id || '')) || '');
       if (!src || gain <= 0) continue;
+      // クリップの速さ sp: タイムラインの1秒＝素材の sp 秒。鳴らす速さは Rc = R × sp
+      const sp = clipSpeed(c);
+      const Rc = R * sp;
       const ss = Number(c.source_start || 0);
-      const srcEnd = ss + (te - ts);
-      const srcNow = ss + Math.max(0, t - ts);
-      void src.ensure(srcNow, Math.min(srcEnd, srcNow + 8 * R));
+      const srcEnd = ss + (te - ts) * sp;
+      const srcNow = ss + Math.max(0, t - ts) * sp;
+      void src.ensure(srcNow, Math.min(srcEnd, srcNow + 8 * Rc));
       if (src.mute) continue;
-      // 倍速の時は、4秒ずつ声の高さを保ったまま縮めた音を鳴らす（buffer の1秒 = 素材の R 秒）
-      const BL = R !== 1 ? STRETCH_BLOCK_SEC : src.blockLen();
-      const srcLook = ss + (Math.min(te, t + LOOK) - ts);
+      // 倍速の時は、4秒ずつ声の高さを保ったまま縮めた音を鳴らす（buffer の1秒 = 素材の Rc 秒）
+      const BL = Rc !== 1 ? STRETCH_BLOCK_SEC : src.blockLen();
+      const srcLook = ss + (Math.min(te, t + LOOK) - ts) * sp;
       for (let b = Math.floor(srcNow / BL); b * BL < srcLook; b += 1) {
         const key = `${c.id}|${b}`;
         if (nodes.has(key)) continue;
         let buf: AudioBuffer | null;
         let srcDur: number;
-        if (R !== 1) {
-          const st = src.stretchedBlock(b, R);
+        if (Rc !== 1) {
+          const st = src.stretchedBlock(b, Rc);
           buf = st ? st.buffer : null;
           srcDur = st ? st.srcDur : 0;
         } else {
@@ -783,14 +796,14 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const a = Math.max(b * BL, ss);
         const z = Math.min((b + 1) * BL, srcEnd, b * BL + srcDur);
         if (z <= a + 1e-4) { nodes.set(key, null); continue; }
-        const tl = ts + (a - ss);
+        const tl = ts + (a - ss) / sp;
         const nominal = anchor.ctxT0 + (tl - anchor.t0) / R;
         let when = nominal;
         let off = a - b * BL;   // 素材の秒
         let dur = z - a;        // 素材の秒
         const earliest = ctx.currentTime + 0.005;
         if (when < earliest) {
-          const late = (earliest - when) * R;
+          const late = (earliest - when) * Rc;
           if (late >= dur) { nodes.set(key, null); continue; }
           if (late > 0.04 && tl > anchor.t0 + 0.05) stats.audioLateStarts += 1;
           when = earliest; off += late; dur -= late;
@@ -801,9 +814,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         g.gain.value = gain;
         node.connect(g);
         g.connect(mgr.master);
-        node.start(when, off / R, dur / R);
+        node.start(when, off / Rc, dur / Rc);
         node.onended = () => { try { g.disconnect(); } catch { /* noop */ } };
-        nodes.set(key, { node, gain: g, t0: tl + (when - nominal) * R, t1: tl + (z - a) });
+        nodes.set(key, { node, gain: g, t0: tl + (when - nominal) * R, t1: tl + (z - a) / sp });
         stats.audioScheduled += 1;
       }
     }
@@ -823,9 +836,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (gain <= 0) continue;
       const src = mgr.get(srcByAssetId.get(String(c.asset_id || '')) || '');
       if (!src) continue;
+      const sp = clipSpeed(c);
       const ss = Number(c.source_start || 0);
-      const from = ss + Math.max(0, t - c.timeline_start);
-      const to = Math.min(ss + (c.timeline_end - c.timeline_start) - 0.01, from + 0.6);
+      const from = ss + Math.max(0, t - c.timeline_start) * sp;
+      const to = Math.min(ss + (c.timeline_end - c.timeline_start) * sp - 0.01, from + 0.6 * sp);
       if (!src.hasAt(from) || !src.hasAt(Math.max(from, to))) return false;
     }
     return true;
@@ -1138,7 +1152,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       for (const c of audioClips) {
         if (!(currentTime >= c.timeline_start && currentTime < c.timeline_end)) continue;
         const a = audiosRef.current.get(String(c.id));
-        const want = Number(c.source_start || 0) + (currentTime - c.timeline_start);
+        const want = Number(c.source_start || 0) + (currentTime - c.timeline_start) * clipSpeed(c);
         if (a && a.paused && Math.abs(a.currentTime - want) > 0.04) { try { a.currentTime = want; } catch { /* not ready */ } }
       }
     }, 120);
@@ -1236,6 +1250,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       }
       return 0;
     };
+    // 映像の要素ごとの再生の速さ（再生の速さ × クリップの速さ）
+    const speedById = new Map(visualClips.map((vc) => [String(vc.clip.id), clipSpeed(vc.clip)]));
+    const rateOf = (id: string) => R * (speedById.get(id) ?? 1);
     const PREROLL = 1.5; // pre-seek a clip about to start so its first frame is ready at the cut
     const LEAD = 0.4;    // 映像の要素を境目より前から走らせておく長さ
     // 映像と音がそろって流れ出せるまで、再生ヘッド・音・映像を全部止めて待つ（2026-11-13 本人
@@ -1264,7 +1281,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       badSince = 0;
       stopAudioNodes();
       audioAnchorRef.current = null;
-      for (const [, v] of videosRef.current) { if (!v.paused) v.pause(); if (v.playbackRate !== R) v.playbackRate = R; }
+      for (const [id, v] of videosRef.current) { if (!v.paused) v.pause(); if (v.playbackRate !== rateOf(id)) v.playbackRate = rateOf(id); }
       prevActiveVideoRef.current = new Set();
       prevActiveAudioRef.current = new Set();
       const c = playClockRef.current;
@@ -1307,7 +1324,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       for (const vc of active) {
         if (isFrozen(vc.clip)) continue;
         const v = videosRef.current.get(String(vc.clip.id));
-        if (v) { if (v.playbackRate !== R) v.playbackRate = R; void v.play().catch(() => {}); }
+        if (v) { const rv = rateOf(String(vc.clip.id)); if (v.playbackRate !== rv) v.playbackRate = rv; void v.play().catch(() => {}); }
       }
       if (mgr && mgr.ctx.state === 'running') audioAnchorRef.current = { ctxT0: mgr.ctx.currentTime + 0.05, t0: t, rate: R };
       clock.t = t;
@@ -1361,6 +1378,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const v = videosRef.current.get(id);
         if (!v) continue;
         activeVids.add(id);
+        const Rv = rateOf(id);
         const expected = clipSourceTime(vc.clip, t);
         // Seek on activation or on big drift only; re-seeking a playing element every frame is
         // what made audio warble in the old code. Video re-seeks aren't audible.
@@ -1378,18 +1396,18 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           // 再生中の要素を頭出しすると、その間（0.2〜0.3秒）止まって、かえってずれが広がる（頭出し→止まる→
           // また頭出し、を繰り返していた）。大きく外れた時だけ頭出しし、ふだんは速さを段で変えて追いつかせる。
           // 毎コマ細かく速さを変えると、ブラウザが再生を引っかける。
-          const want = R * (signed < -0.06 ? 1.25 : signed < -0.02 ? 1.06 : signed > 0.06 ? 0.8 : signed > 0.02 ? 0.94 : drift < 0.008 ? 1 : v.playbackRate / R);
-          if ((!prevActiveVideoRef.current.has(id) && (v.paused ? drift > 0.04 : drift > 0.25 * R)) || drift > 0.7 * R) {
+          const want = Rv * (signed < -0.06 ? 1.25 : signed < -0.02 ? 1.06 : signed > 0.06 ? 0.8 : signed > 0.02 ? 0.94 : drift < 0.008 ? 1 : v.playbackRate / Rv);
+          if ((!prevActiveVideoRef.current.has(id) && (v.paused ? drift > 0.04 : drift > 0.25 * Rv)) || drift > 0.7 * Rv) {
             try { v.currentTime = expected; } catch { /* not ready */ }
-            if (v.playbackRate !== R) v.playbackRate = R;
+            if (v.playbackRate !== Rv) v.playbackRate = Rv;
           } else if (v.playbackRate !== want) {
             v.playbackRate = want;
           }
-        } else if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.15 * R) {
+        } else if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.15 * Rv) {
           try { v.currentTime = expected; } catch { /* not ready */ }
-          if (v.playbackRate !== R) v.playbackRate = R;
+          if (v.playbackRate !== Rv) v.playbackRate = Rv;
         }
-        if (v.paused) { if (heard == null && v.playbackRate !== R) v.playbackRate = R; void v.play().catch(() => {}); }
+        if (v.paused) { if (heard == null && v.playbackRate !== Rv) v.playbackRate = Rv; void v.play().catch(() => {}); }
       }
       for (const [id, v] of videosRef.current) {
         if (activeVids.has(id) || v.paused) continue;
@@ -1409,7 +1427,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (vc.kind !== 'base' || isFrozen(vc.clip)) continue;
         const v = videosRef.current.get(String(vc.clip.id));
         if (v && v.readyState >= 2 && v.videoWidth && !v.paused) {
-          masterT = Number(vc.clip.timeline_start) + (v.currentTime - Number(vc.clip.source_start || 0));
+          masterT = Number(vc.clip.timeline_start) + (v.currentTime - Number(vc.clip.source_start || 0)) / clipSpeed(vc.clip);
           break;
         }
       }
@@ -1436,12 +1454,14 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         // 境目より LEAD 秒手前から走らせておき、境目では元から同じ所を進んでいるようにする。
         const until = vc.clip.timeline_start - t;
         // 倍速の時は、その分だけタイムラインの手前から走らせる（走り出しにかかる実時間は同じ）
-        const lead = Math.min(LEAD * R, startSrc);
+        // クリップの速さ sp: タイムラインの lead 秒＝素材の lead×sp 秒
+        const sp = clipSpeed(vc.clip);
+        const lead = Math.min(LEAD * R, startSrc / sp);
         if (v && v.paused) {
-          const parkAt = startSrc - lead;
+          const parkAt = startSrc - lead * sp;
           if (until <= lead && lead > 0.05) {
-            try { v.currentTime = startSrc - until; } catch { /* not ready */ }
-            if (v.playbackRate !== R) v.playbackRate = R;
+            try { v.currentTime = startSrc - until * sp; } catch { /* not ready */ }
+            if (v.playbackRate !== rateOf(id)) v.playbackRate = rateOf(id);
             void v.play().catch(() => {});
           } else if (Math.abs(v.currentTime - parkAt) > 0.1) {
             try { v.currentTime = parkAt; } catch { /* not ready */ }
@@ -1467,12 +1487,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const a = audiosRef.current.get(id);
         if (!a) continue;
         activeAudioClips.add(id);
-        const expected = Number(c.source_start || 0) + (t - c.timeline_start);
+        const expected = Number(c.source_start || 0) + (t - c.timeline_start) * clipSpeed(c);
         const aDrift = Math.abs(a.currentTime - expected);
         if ((!prevActiveAudioRef.current.has(id) && aDrift > 0.04) || aDrift > 0.3) a.currentTime = expected;
         a.muted = false;
         a.preservesPitch = true;
-        if (a.playbackRate !== R) a.playbackRate = R;
+        if (a.playbackRate !== R * clipSpeed(c)) a.playbackRate = R * clipSpeed(c);
         a.volume = c.volume == null ? 1 : Math.max(0, Math.min(1, Number(c.volume) || 0));
         if (a.paused) void a.play().catch(() => {});
         if (a.paused || a.seeking || a.readyState < 3 || Math.abs(a.currentTime - expected) > 0.25) elementGap = true;
