@@ -9,6 +9,7 @@ from uuid import uuid4, uuid5, NAMESPACE_URL
 from app.services.chat_service import ChatService
 from app.services.project_service import ProjectService
 import logging
+from app.services import prompt_store
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,7 @@ async def _wake_job(job_id):
     raise RuntimeError('作業担当への接続を確認できませんでした')
 
 
-CONFIRMATION_RULE = """購入・予約の確定、決済、他人へのメッセージ送信、公開、復元できない削除などの不可逆操作は、実行前に具体的な対象・内容・金額（該当する場合）を本人に示し、その内容を確定してよいという返事を得るまで止まる。相談や候補の比べ合いだけを確定の承認と解釈しない。ただし本人が中身（対象・金額・相手）を自分の言葉で決めた時（「11ドルチャージして」と頼んだ、確定する中身を並べて聞いた問いに金額や候補で答えた）は、確かめた事実がその言葉・示した中身・前回の同じ操作と食い違わなければ承認として扱い、同じ確認を重ねずに確定する。聞く必要がある時は、先に税込の合計・支払い方法などを確かめてから1回で聞く。閲覧、検索、入力、本人の登録先へのログイン認証コード送付・入力など、依頼を進める通常操作には確認を求めない。
-委譲時もこの確認を省略しない。実行担当は確定前の内容と確認待ちであることを報告し、窓口が本人の返事を取り次ぐ。提示した具体内容への承認が既に得られていれば重複確認は不要だが、その後の条件変更・待機指示・未回答の確認質問がある間は確定しない。"""
+# CONFIRMATION_RULE: the text is ~/.dan/workspace/prompts/work/confirmation-rule.md (seed app/prompts/seed/), read at each use (prompt_store).
 
 INSTRUCTIONS = """ここはDone。音声とテキストで共用する全体の窓口として、各プロジェクトの確認、相談、雑用を扱う。
 継続的なプロジェクトに育った話は、専用の部屋で進めることを提案し、合意したら背景を引き継ぐ。
@@ -306,3 +306,14 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
                 return {'accepted':False,'job_id':job_id,'error':saved['error']}
     return {"accepted": True, "engine":"steerable_cli", "receipt": {'scheduled':True,'id':job_id},
         "project": summary(target), "report_message_id": report_id(job_id)}
+
+
+_PROMPTS = {
+    'CONFIRMATION_RULE': lambda: prompt_store.text('work/confirmation-rule'),
+}
+
+
+def __getattr__(name):
+    """The sentences moved to prompts/ (2026-11-17), read when used so a change on the /prompts screen works at once."""
+    if name in _PROMPTS: return _PROMPTS[name]()
+    raise AttributeError(name)

@@ -1,0 +1,807 @@
+{
+ "places": [
+  {
+   "id": "owner",
+   "name": "みきさん",
+   "line": "スマホやPCで話しかける・頼む"
+  },
+  {
+   "id": "voice",
+   "name": "通話のダン",
+   "line": "声で受け答えする（GPT-Live）"
+  },
+  {
+   "id": "router",
+   "name": "振り分け",
+   "line": "頼みをどこへ回すか、一瞬で選ぶ"
+  },
+  {
+   "id": "backend",
+   "name": "判断役",
+   "line": "声の裏で道具を使う・下書きを書く"
+  },
+  {
+   "id": "lookup",
+   "name": "調べもの係",
+   "line": "会話を止めずに裏で調べる"
+  },
+  {
+   "id": "stage",
+   "name": "通話の画面",
+   "line": "通話中の画面を描く"
+  },
+  {
+   "id": "work",
+   "name": "作業の部屋",
+   "line": "時間のかかる制作・手続きをする"
+  },
+  {
+   "id": "editor",
+   "name": "エディター",
+   "line": "動画を一緒に作る"
+  },
+  {
+   "id": "chat",
+   "name": "チャットのダン",
+   "line": "チャットで話す・作業の部屋の土台"
+  }
+ ],
+ "prompts": [
+  {
+   "id": "call/persona",
+   "title": "通話のダンが、自分は誰かを知る文",
+   "place": "voice",
+   "reader": "声のモデル（GPT-Live）",
+   "when": "通話が始まる時に毎回",
+   "source": "app/services/voice_plain.py の persona()",
+   "why": "11/3、通話で「自己紹介して」と聞かれたダンが、誰のアシスタントか・チャットのダンと同じか・自分で作業するかを言えなかったので足した。",
+   "kind": "template",
+   "marks": [
+    "owner",
+    "whose"
+   ],
+   "mark_notes": {
+    "owner": "USER.md の名前と呼び名（本田樹さん（呼び名はみきさん））",
+    "whose": "USER.md の呼び名（みきさん）"
+   },
+   "code_history": [
+    {
+     "date": "2026-11-03",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/policies",
+   "title": "通話のダンの話し方・相づち・作業を回す時の決まり",
+   "place": "voice",
+   "reader": "声のモデル（GPT-Live）",
+   "when": "通話が始まる時に毎回（上の文のすぐ後に続く）",
+   "source": "app/services/voice_plain.py の POLICIES",
+   "why": "11/3、ChatGPT の音声と比べて「全くダメ」と言われ、それまでの差し込みを外して OpenAI のおすすめの形（話し方・相づち・割り込み・作業の回し方）だけにした。11/7 に声に渡す物を1か所にまとめた。英語の部分は OpenAI の手本の言葉のまま。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-07",
+     "what": "通話: 声のモデルに渡す物を1か所から、話されて困らない物だけに"
+    },
+    {
+     "date": "2026-11-03",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/router-routes",
+   "title": "頼みの行き先の一覧（15か所）",
+   "place": "router",
+   "reader": "振り分け係（Jev）",
+   "when": "みきさんが通話で何か頼むたび",
+   "source": "app/services/voice_router.py の ROUTES",
+   "why": "11/5、通話で美容院2軒の空きを頼んだら短い調べものに回って「確認できなかった」が3回続いたので、何の話かではなく「どこで・何を使ってやるか」で行き先を選ぶ一覧にした。site・app・make・dan はチャットのダンの作業（作業の部屋）に回る。",
+   "kind": "sections",
+   "keys": [
+    "status",
+    "clock",
+    "calendar",
+    "lookup",
+    "show",
+    "site",
+    "app",
+    "make",
+    "document",
+    "dan",
+    "message",
+    "contact",
+    "rooms",
+    "end",
+    "other"
+   ],
+   "code_history": [
+    {
+     "date": "2026-11-13",
+     "what": ""
+    },
+    {
+     "date": "2026-11-07",
+     "what": "通話: 声のモデルに渡す物を1か所から、話されて困らない物だけに"
+    },
+    {
+     "date": "2026-11-05",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/router-ask",
+   "title": "行き先を選ぶ時の問いかけ",
+   "place": "router",
+   "reader": "振り分け係（Jev）",
+   "when": "みきさんが通話で何か頼むたび（上の一覧と一緒に）",
+   "source": "app/services/voice_router.py の ASK",
+   "why": "11/5、上の一覧と一緒に作った。「美容院もレストランも、予約サイトで空きを見るなら site」はその時の失敗から。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-05",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/router-work",
+   "title": "動いている作業への言葉の読み分け（様子・止める・訂正・別の話）",
+   "place": "router",
+   "reader": "振り分け係（Jev）",
+   "when": "通話で動いている作業がある時、みきさんが話すたび",
+   "source": "app/services/voice_router.py の WORK",
+   "why": "11/5、「ホットペッパーで確認するんだって」のような訂正が、元の作業の直しではなく新しい作業になったので足した。{label} には作業の短い名前が入る。",
+   "kind": "sections",
+   "keys": [
+    "status",
+    "stop",
+    "change",
+    "new"
+   ],
+   "code_history": [
+    {
+     "date": "2026-11-05",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/router-reply",
+   "title": "「はい、押したよ」を新しい頼みと取り違えない読み分け",
+   "place": "router",
+   "reader": "振り分け係（Jev）",
+   "when": "みきさんが通話で話すたび",
+   "source": "app/services/voice_router.py の REPLY",
+   "why": "11/7 12:25、LINE の番号を押した後の「はい、押したよ」が「はい、押したよ」という名前の新しい作業になり、同じ作業が2回動いたので足した。",
+   "kind": "sections",
+   "keys": [
+    "reply",
+    "request"
+   ],
+   "code_history": [
+    {
+     "date": "2026-11-07",
+     "what": "通話: 声のモデルに渡す物を1か所から、話されて困らない物だけに"
+    }
+   ]
+  },
+  {
+   "id": "call/router-calendar",
+   "title": "予定を聞かれた時の期間の読み分け",
+   "place": "router",
+   "reader": "振り分け係（Jev）",
+   "when": "みきさんが予定を聞いた時",
+   "source": "app/services/voice_router.py の CALENDAR",
+   "why": "11/5、振り分けと一緒に作った。",
+   "kind": "sections",
+   "keys": [
+    "today",
+    "tomorrow",
+    "week",
+    "other"
+   ],
+   "code_history": [
+    {
+     "date": "2026-11-05",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/router-promise-words",
+   "title": "ダンが「やるね」と言ったのに何も始めていない時に、作業を起こす言葉",
+   "place": "router",
+   "reader": "プログラム（言葉の照合。モデルは読まない）",
+   "when": "ダンが話し終えて2秒黙った時、その話の最後の70文字に、この言葉のどれかがあれば",
+   "source": "app/services/voice_router.py の PROMISE",
+   "why": "11/5 15:12、ダンが「メールを作り直すね。ちょっと待ってて」と言ったのに何も始めず、みきさんが7分待ったので足した。1行に1つの言葉。どれかが含まれていて、問いかけで終わっていなければ、作業を起こす。",
+   "kind": "words",
+   "code_history": [
+    {
+     "date": "2026-11-06",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/router-job-started",
+   "title": "作業の部屋に回した直後に、声のモデルに返す一言",
+   "place": "router",
+   "reader": "声のモデル（GPT-Live）",
+   "when": "振り分けがチャットのダンに作業を回した直後",
+   "source": "app/services/voice_router.py の route_job_started",
+   "why": "11/5、振り分けと一緒に作った。声のモデルはこれを読んで、自分の言葉で受け答えする（そのまま読み上げるとは限らない）。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-05",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/backend-instructions",
+   "title": "通話の判断役（声の裏で道具を使う係）の決まり",
+   "place": "backend",
+   "reader": "通話の判断役（GPT）",
+   "when": "振り分け係が「迷う」「メッセージ・文書」と判断した時、毎回",
+   "source": "app/services/voice_responses.py の INSTRUCTIONS",
+   "why": "9/22 に通話の判断役を作ってから、通話での失敗のたびに1行ずつ足してきた文（34回直した）。裏の調べもの係がある時は、この中の4行が別の文に置き換わり、2行が外れる（その置き換えはまだプログラムの中。下の「プログラムの中の文」にある）。行の書き出しを変えると、その置き換えが効かなくなる。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-13",
+     "what": "連絡確認をメールとLINEにも: 受信箱3つ・公式LINEの記録・Galaxyの通知を読む"
+    },
+    {
+     "date": "2026-11-13",
+     "what": ""
+    },
+    {
+     "date": "2026-11-10",
+     "what": "通話: 確かめられなかった事を書かせる指示を消す・本人の情報は聞く前に読む"
+    },
+    {
+     "date": "2026-11-01",
+     "what": ""
+    },
+    {
+     "date": "2026-11-01",
+     "what": "別室の停止を実行中の作業IDへ限定する"
+    },
+    {
+     "date": "2026-10-31",
+     "what": ""
+    },
+    {
+     "date": "2026-10-30",
+     "what": "Add common voice controls and fact cards for call screens"
+    },
+    {
+     "date": "2026-10-27",
+     "what": ""
+    },
+    {
+     "date": "2026-10-27",
+     "what": "通話の画面に成果物の本物の画面を開き、直しをその編集アシスタントに頼む"
+    },
+    {
+     "date": "2026-10-27",
+     "what": "isolate work and prepare generation routing with voice status evidence"
+    },
+    {
+     "date": "2026-10-27",
+     "what": "通話の画面に記事・台本・画像を出して声で直す・投稿する（⑤⑥）"
+    },
+    {
+     "date": "2026-10-27",
+     "what": "feat(voice): 通話の画面に送信案の下書きを出し、声で直し、読み上げ＋承認の言葉でだけ送る"
+    },
+    {
+     "date": "2026-10-27",
+     "what": "手順は1つ目から描き始める・行ったり来たりの抑え12秒・ページは前置き無しで出す"
+    },
+    {
+     "date": "2026-10-27",
+     "what": "通話の図: 節の切れ目で判断・本人の質問で先に動く・待ち1.5秒・札だけの変更で図を作り直さない・玉を小さく・自由な絵と画像・ページを写す道具"
+    },
+    {
+     "date": "2026-10-25",
+     "what": "--help"
+    },
+    {
+     "date": "2026-10-25",
+     "what": "通話の画面係（voice_stage）・Flow 部品・声のモデル名を1か所に・Atom を削除"
+    },
+    {
+     "date": "2026-10-03",
+     "what": "声に渡す結果の地名に、読み間違えやすいものだけ読みを添える"
+    },
+    {
+     "date": "2026-10-03",
+     "what": "近くの店・施設は places で（現在地から距離順に一瞬）、要る数件だけ web_search で確かめる"
+    },
+    {
+     "date": "2026-10-02",
+     "what": "声のモデルは裏側の結果を自分の言葉で話す／作業報告の決まりは作業の結果だけに／ダンの役割は公私にわたる秘書のようなパートナー"
+    },
+    {
+     "date": "2026-09-30",
+     "what": "ダン本体の第一歩 — 声の裏側と作業担当が、チャットのダンと同じ説明（本人・人格・運用・保存情報・作業のきまり）で動く"
+    },
+    {
+     "date": "2026-09-28",
+     "what": "「電話切って」で即座に切れるように — アプリが end_call を見た瞬間に自分で切る／話し方の縛りを外す"
+    },
+    {
+     "date": "2026-09-27",
+     "what": "音声の部屋チャットを時系列で読める形に — 「出して」を即表示・同じ部屋の作業表示を整理・断片/相づちをまとめる"
+    },
+    {
+     "date": "2026-09-26",
+     "what": "事実は一次情報で答える — 日本語のメール検索が全件失敗していたのを根治"
+    },
+    {
+     "date": "2026-09-25",
+     "what": "ダンが自分でカレンダーのアカウントをつなぐ — 本人はアドレスを言うだけ"
+    },
+    {
+     "date": "2026-09-24",
+     "what": "実通話で出た失敗への手当て — 再起動の守り・切断は裏側だけという事実・「やった」前の確認と正確な事実の調べ方"
+    },
+    {
+     "date": "2026-09-24",
+     "what": "声の裏側と作業のモデルにチャットのダンと同じ道具一式を — 段階的開示（一覧→詳細→使う）"
+    },
+    {
+     "date": "2026-09-23",
+     "what": "自作スクリプトに頼らない道具・作業場所の分離・宣言の二重化の根治"
+    },
+    {
+     "date": "2026-09-22",
+     "what": "電話のダン — GPT-Live 委譲・サーバー側サイドバンド・裏側関数・現在地・読み方"
+    }
+   ]
+  },
+  {
+   "id": "call/backend-plain-rules",
+   "title": "判断役が途中経過を伝える・候補を条件で確かめる決まり",
+   "place": "backend",
+   "reader": "通話の判断役（GPT）",
+   "when": "上の決まりの後ろに続けて",
+   "source": "app/services/voice_responses.py の PLAIN_RULES",
+   "why": "11/3 13:35 の通話で「ちょっと待って」から答えまで29秒黙った・100キロと言ったのに40キロのセットを出したので足した。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-03",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/backend-background-rules",
+   "title": "判断役が調べものを裏に回す時の決まり",
+   "place": "backend",
+   "reader": "通話の判断役（GPT）",
+   "when": "上の決まりの後ろに続けて（裏の調べもの係がある時）",
+   "source": "app/services/voice_responses.py の BACKGROUND_RULES",
+   "why": "11/3 19:15 の通話で判断役が44秒つかまったまま会話が止まったので、調べものを裏に回すようにした時に足した。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-03",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/luna-rules",
+   "title": "判断役に毎回添える「きまり」",
+   "place": "backend",
+   "reader": "通話の判断役（GPT）",
+   "when": "振り分けが迷った頼みを判断役に回すたび",
+   "source": "app/services/voice_router.py の LUNA_RULES",
+   "why": "11/6、通話で見つけた商品とページの住所を判断役がもう一度みきさんに聞き返し、頼まれていないインスタのメッセージまで作ったので足した。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-07",
+     "what": "通話: 声のモデルに渡す物を1か所から、話されて困らない物だけに"
+    },
+    {
+     "date": "2026-11-06",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/lookup-instructions",
+   "title": "調べもの係の決まり",
+   "place": "lookup",
+   "reader": "調べもの係（DeepSeek）",
+   "when": "通話で調べものを頼むたび",
+   "source": "app/services/voice_lookup.py の INSTRUCTIONS",
+   "why": "11/3 に会話を止めずに裏で調べる係を作った時の文。その後、通話の調べものの速さ・正しさ・連絡の確認（メール・LINE）のたびに12回直した。{parts} には調べものに使える道具の一覧が入る。",
+   "kind": "text",
+   "marks": [
+    "parts"
+   ],
+   "mark_notes": {
+    "parts": "調べものに使える道具の一覧"
+   },
+   "code_history": [
+    {
+     "date": "2026-11-13",
+     "what": "連絡確認をメールとLINEにも: 受信箱3つ・公式LINEの記録・Galaxyの通知を読む"
+    },
+    {
+     "date": "2026-11-13",
+     "what": ""
+    },
+    {
+     "date": "2026-11-12",
+     "what": "本物の中身の部品（地図・写真の札・引用・出どころ・コマ・前後）と通話の画面で押した物"
+    },
+    {
+     "date": "2026-11-12",
+     "what": "通話の調べものの判断を DeepSeek V4 Pro に・文字起こしの字を事実として扱わない・時間内に必ず答える"
+    },
+    {
+     "date": "2026-11-10",
+     "what": "通話: 確かめられなかった事を書かせる指示を消す・本人の情報は聞く前に読む"
+    },
+    {
+     "date": "2026-11-06",
+     "what": ""
+    },
+    {
+     "date": "2026-11-03",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/call-job-note",
+   "title": "通話から作業の部屋に回す頼みの最後に付ける注意書き",
+   "place": "work",
+   "reader": "作業の部屋のダン（この部屋と同じモデル）",
+   "when": "通話から作業の部屋に作業を回すたび（頼みの文の一番最後）",
+   "source": "app/services/voice_router.py の CALL_JOB_NOTE",
+   "why": "11/5、作業の部屋に回すようにした時に、電話の向こうで待っている人がいること・途中で一言伝える書き方（【途中】）を伝えるために足した。11/7 に直した。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-07",
+     "what": "通話: 声のモデルに渡す物を1か所から、話されて困らない物だけに"
+    },
+    {
+     "date": "2026-11-05",
+     "what": ""
+    }
+   ]
+  },
+  {
+   "id": "call/voice-task",
+   "title": "通話から回す頼みに付ける「声で読み上げられる」注意書き",
+   "place": "work",
+   "reader": "作業の部屋のダン",
+   "when": "通話から作業を回すたび（制作の作業では途中で外され、下の文に替わる）",
+   "source": "app/services/voice_parts.py の VOICE_TASK",
+   "why": "9/23、音声から起こす作業を作った時に足した。新規登録の時のメールアドレスの確認は、勝手に登録先のアドレスを決めた件から。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-09-23",
+     "what": "旧方式の音声経路を撤去 — 委譲は常にサーバーが答える／確定の承認は Jev／記憶した手順の再生は作業として"
+    }
+   ]
+  },
+  {
+   "id": "call/make-origin-note",
+   "title": "通話で頼まれた制作に付ける注意書き",
+   "place": "work",
+   "reader": "作業の部屋のダン",
+   "when": "通話から作る・直す作業を回した時（作業の決まりの最後に付く）",
+   "source": "app/services/make_job_runner.py の ORIGIN_NOTE",
+   "why": "9/30、声で頼んだ「作る・直す」を、チャットのダンと同じ作り（Opus など）で動かすようにした時に足した。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-09-30",
+     "what": "制作担当 — 声で頼んだ「作る・直す」を、チャットのダンと同じ器（既定 Opus 5.5／Fable／GPT Astra）で"
+    }
+   ]
+  },
+  {
+   "id": "work/parallel-job-rules",
+   "title": "並行作業の決まり（「この会話について」）",
+   "place": "work",
+   "reader": "作業の部屋のダン（並行作業）",
+   "when": "並行作業が動き出す時（チャットのダンの決まり全部の後ろに付く）",
+   "source": "app/services/parallel_job_runner.py の JOB_RULES",
+   "why": "10/8、1つの部屋で並行作業を動かすようにした時に作った。10/25 に「報告に確かめ方や仕組みの状態を書かない」、10/29 に「裏の担当と ScheduleWakeup を使わない」を足した。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-05",
+     "what": ""
+    },
+    {
+     "date": "2026-10-29",
+     "what": "並行作業: 裏の担当と ScheduleWakeup を使わせない・返事の後に残った裏の作業は打ち切る"
+    },
+    {
+     "date": "2026-10-25",
+     "what": "報告に確かめ方と仕組みの状態を書かせない（手順書・裏の作業の報告）"
+    },
+    {
+     "date": "2026-10-08",
+     "what": "1つの部屋で並行作業 — 部屋の会話から枝分かれして別に動く作業・モデル選択・同じものを触る作業は自動で順番"
+    }
+   ]
+  },
+  {
+   "id": "work/confirmation-rule",
+   "title": "取り返しのつかない操作の前に止まる決まり（作業担当用）",
+   "place": "work",
+   "reader": "作業の部屋のダン（並行作業・作業担当の全部）",
+   "when": "作業が動き出す時、毎回",
+   "source": "app/services/command_center.py の CONFIRMATION_RULE",
+   "why": "9/22 の作業の仕組みと一緒に作った。11/12、DeepSeek のチャージで同じ確認を2回押させたので「本人が中身を決めた時は聞き直さない」を足した。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-11-12",
+     "what": "確認カード・作業担当の確定の決まり: 本人が決めた中身は聞き直さない、聞く時は先に確かめて1回で"
+    },
+    {
+     "date": "2026-09-22",
+     "what": "作業基盤 — command center / 作業ジョブ runner / 引き継ぎ / カード"
+    }
+   ]
+  },
+  {
+   "id": "work/codex-job-rules",
+   "title": "作業担当（Codex）の決まり",
+   "place": "work",
+   "reader": "作業担当（Codex のダン）",
+   "when": "チャットの外から起こした作業が Codex で動く時",
+   "source": "app/services/command_job_runner.py の作業の決まり",
+   "why": "9/22 の作業の仕組みと一緒に作った。下の「作業担当（API）の決まり」とほとんど同じ文が2つに分かれていて、片方だけ直されてきた（API の方にだけ「過去の会話は伝聞」「ダンの仕組みで止まったら回避しない」がある）。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-09-22",
+     "what": "作業基盤 — command center / 作業ジョブ runner / 引き継ぎ / カード"
+    }
+   ]
+  },
+  {
+   "id": "work/api-job-instructions",
+   "title": "作業担当（API）の決まり",
+   "place": "work",
+   "reader": "作業担当（API のダン。通話から起こす手続きなど）",
+   "when": "通話や見張りから API の作業担当が動く時",
+   "source": "app/services/api_job_runner.py の JOB_INSTRUCTIONS",
+   "why": "9/23 に音声から起こす作業のために作った。9/30 に「部屋の過去の会話は渡さない」、10/3 に古い道具の名前を直した。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-10-03",
+     "what": "古くなった道具の名指しを直す（作業担当の「PCに出すなら webbrowser.open」・声の「ウェブ検索（現在地）」）"
+    },
+    {
+     "date": "2026-09-30",
+     "what": "作業担当に部屋の会話を渡さない — 過去の依頼を今の指示と取り違える穴を、除外ではなく構造で塞ぐ"
+    },
+    {
+     "date": "2026-09-27",
+     "what": "音声の部屋チャットを時系列で読める形に — 「出して」を即表示・同じ部屋の作業表示を整理・断片/相づちをまとめる"
+    },
+    {
+     "date": "2026-09-26",
+     "what": "事実は一次情報で答える — 日本語のメール検索が全件失敗していたのを根治"
+    },
+    {
+     "date": "2026-09-25",
+     "what": "ダンが自分でカレンダーのアカウントをつなぐ — 本人はアドレスを言うだけ"
+    },
+    {
+     "date": "2026-09-23",
+     "what": "DeepSeek の道具記法の混入を直す・作業に現在日時を渡す・記憶した手順は flow 道具で見る"
+    },
+    {
+     "date": "2026-09-23",
+     "what": "音声から起こす作業を Responses API のワーカーで実行"
+    }
+   ]
+  },
+  {
+   "id": "work/relay-header",
+   "title": "別の部屋に頼みを写す時の見出し",
+   "place": "work",
+   "reader": "別の部屋のチャットの画面（みきさんと、その部屋のダン）",
+   "when": "別の部屋から作業を頼んだ時、頼まれた部屋のチャットに頼みの写しを出す時",
+   "source": "app/services/command_job_runner.py と command_handoff.py の見出し",
+   "why": "9/22 の作業の仕組みと一緒に作った。11/16、スヤさんの2本目でエディターに届いた頼みの頭に付いていた「【あなたの依頼・Done経由】」がこれ。「あなた」が誰か分からないと言われた。",
+   "kind": "text",
+   "code_history": [
+    {
+     "date": "2026-09-22",
+     "what": "作業基盤 — command center / 作業ジョブ runner / 引き継ぎ / カード"
+    }
+   ]
+  },
+  {
+   "id": "call-code/backend-tools",
+   "title": "判断役が使える道具の説明（38個）",
+   "place": "backend",
+   "reader": "通話の判断役",
+   "when": "毎回",
+   "source": "app/services/voice_responses.py の TOOLS",
+   "readonly": true,
+   "module": "app.services.voice_responses",
+   "attr": "TOOLS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "call-code/backend-background-lines",
+   "title": "裏の調べもの係がある時に、判断役の決まりの行を置き換える文",
+   "place": "backend",
+   "reader": "プログラム（判断役の決まりの行を差し替える）",
+   "when": "裏の調べもの係がある時",
+   "source": "app/services/voice_responses.py の BACKGROUND_LINES",
+   "readonly": true,
+   "module": "app.services.voice_responses",
+   "attr": "BACKGROUND_LINES",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "call-code/stage-instructions",
+   "title": "通話の画面係の決まり",
+   "place": "stage",
+   "reader": "画面係",
+   "when": "通話中、画面を描き替えるたび",
+   "source": "app/services/voice_stage.py の INSTRUCTIONS",
+   "readonly": true,
+   "module": "app.services.voice_stage",
+   "attr": "INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "call-code/stage-flow-message",
+   "title": "画面のメッセージの下書きへの言葉を読み分ける決まり",
+   "place": "stage",
+   "reader": "画面係",
+   "when": "画面に下書きが出ている時",
+   "source": "app/services/voice_stage.py の FLOW_INSTRUCTIONS",
+   "readonly": true,
+   "module": "app.services.voice_stage",
+   "attr": "FLOW_INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "call-code/stage-flow-doc",
+   "title": "画面の文書への言葉を読み分ける決まり",
+   "place": "stage",
+   "reader": "画面係",
+   "when": "画面に文書が出ている時",
+   "source": "app/services/voice_stage.py の DOC_FLOW_INSTRUCTIONS",
+   "readonly": true,
+   "module": "app.services.voice_stage",
+   "attr": "DOC_FLOW_INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "call-code/stage-flow-assist",
+   "title": "成果物の画面の文書への言葉を読み分ける決まり",
+   "place": "stage",
+   "reader": "画面係",
+   "when": "X運用室・台本室が画面に出ている時",
+   "source": "app/services/voice_stage.py の ASSIST_FLOW_INSTRUCTIONS",
+   "readonly": true,
+   "module": "app.services.voice_stage",
+   "attr": "ASSIST_FLOW_INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "call-code/stage-flow-media",
+   "title": "画面の画像への言葉を読み分ける決まり",
+   "place": "stage",
+   "reader": "画面係",
+   "when": "画面に画像が出ている時",
+   "source": "app/services/voice_stage.py の MEDIA_FLOW_INSTRUCTIONS",
+   "readonly": true,
+   "module": "app.services.voice_stage",
+   "attr": "MEDIA_FLOW_INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/editor-conversation",
+   "title": "エディターのダンの会話の決まり",
+   "place": "editor",
+   "reader": "エディターのダン",
+   "when": "エディターで話すたび",
+   "source": "app/services/editor_conversation.py の INSTRUCTIONS",
+   "readonly": true,
+   "module": "app.services.editor_conversation",
+   "attr": "INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/editor-reasoning",
+   "title": "エディターのダンの判断の決まり",
+   "place": "editor",
+   "reader": "エディターのダン",
+   "when": "エディターで話すたび",
+   "source": "app/services/editor_reasoning.py の INSTRUCTIONS",
+   "readonly": true,
+   "module": "app.services.editor_reasoning",
+   "attr": "INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/editor-live",
+   "title": "エディターのダン（声で話す時）の決まり",
+   "place": "editor",
+   "reader": "エディターのダン（声）",
+   "when": "エディターで声で話す時",
+   "source": "app/services/editor_live.py の INSTRUCTIONS",
+   "readonly": true,
+   "module": "app.services.editor_live",
+   "attr": "INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/command-center",
+   "title": "窓口の部屋（Done）の決まり",
+   "place": "chat",
+   "reader": "チャットのダン（Done の部屋）",
+   "when": "Done の部屋で話すたび",
+   "source": "app/services/command_center.py の INSTRUCTIONS",
+   "readonly": true,
+   "module": "app.services.command_center",
+   "attr": "INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "workspace/user",
+   "title": "みきさんについての帳面（名前・好み・指示）",
+   "place": "chat",
+   "reader": "チャットのダン・作業の部屋のダン",
+   "when": "チャット・作業の部屋が動くたび（一番先に読む）",
+   "source": "~/.dan/workspace/USER.md",
+   "workspace_file": "USER.md",
+   "why": "みきさんが「覚えて」と言った好みや指示をダンが書き足してきた帳面。",
+   "kind": "text"
+  },
+  {
+   "id": "workspace/soul",
+   "title": "ダンの話し方",
+   "place": "chat",
+   "reader": "チャットのダン・作業の部屋のダン",
+   "when": "チャット・作業の部屋が動くたび",
+   "source": "~/.dan/workspace/SOUL.md",
+   "workspace_file": "SOUL.md",
+   "why": "10/12・10/25・11/3 など、みきさんに叱られた話し方をダンが書き足してきた。",
+   "kind": "text"
+  },
+  {
+   "id": "workspace/rules",
+   "title": "ダンの運用の決まり",
+   "place": "chat",
+   "reader": "チャットのダン・作業の部屋のダン",
+   "when": "チャット・作業の部屋が動くたび（最後に読む）",
+   "source": "~/.dan/workspace/RULES.md",
+   "workspace_file": "RULES.md",
+   "why": "取り返しのつかない操作（11/11）など、ダンの進め方の決まり。",
+   "kind": "text"
+  }
+ ]
+}
