@@ -7,6 +7,7 @@ import { CaptionLayer, type RenderCaption } from './caption-layer';
 import type { CaptionDesign } from './caption-design';
 import { FrameSourceManager, webCodecsSupported } from './frame-source';
 import { SceneLayer, isSceneClip, type SceneClip } from './scene-layer';
+import { byLane, stackBands, visualLane } from './lane-order';
 import { gradeFilter } from './grade-filter';
 import { ALPHA_ASSET_IDS, alphaSolidAt, unpackStacked } from './alpha-unpack';
 import { AudioSourceManager, STRETCH_BLOCK_SEC, audioOnlyUrl, webAudioSupported } from './audio-source';
@@ -367,7 +368,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (track.type === 'caption') {
         for (const clip of track.clips || []) {
           if (!clip.asset_id || isSceneClip(clip)) continue;
-          out.push({ clip, kind: 'overlay', layer: clip.layer ?? Math.max(2, visualIndex), position: (clip.position as VisualClip['position']) || null });
+          out.push({ clip, kind: 'overlay', layer: visualLane(track.type, clip, visualIndex), position: (clip.position as VisualClip['position']) || null });
         }
         continue;
       }
@@ -384,8 +385,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         out.push({
           clip,
           kind: overlay ? 'overlay' : 'base',
-          // no own layer → its lane's place in the stack (same rule as the exporter)
-          layer: clip.layer ?? (overlay ? 1 : visualIndex),
+          // the lane the timeline shows it on (lane-order.ts: the same rule as the timeline and the export)
+          layer: visualLane(track.type, clip, visualIndex),
           position: (clip.position as VisualClip['position']) || null,
         });
       }
@@ -393,10 +394,24 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     return out.sort((a, b) => a.layer - b.layer); // draw bottom (low layer) first
   }, [sequence]);
 
+  // 段（前後）: 上の段ほど前。テロップ・場面・絵と映像のどれも、作品に入った順ではなく段で重ねる（lane-order.ts）
+  const laneById = useMemo(() => {
+    const m = new Map<string, number>();
+    let visualIndex = -1;
+    for (const track of sequence?.tracks || []) {
+      if (track.type === 'audio') continue;
+      visualIndex += 1;
+      for (const clip of track.clips || []) if (clip.id != null) m.set(String(clip.id), visualLane(track.type, clip, visualIndex));
+    }
+    return m;
+  }, [sequence]);
   const captionClips = useMemo(
     // what a clip IS comes from its fields, not its lane (timeline_commands): captions on any lane
-    () => (sequence?.tracks || []).flatMap((t) => (t.clips || []).filter((c) => t.type === 'caption' || c.track === 'caption')),
-    [sequence],
+    () => byLane(
+      (sequence?.tracks || []).flatMap((t) => (t.clips || []).filter((c) => t.type === 'caption' || c.track === 'caption')),
+      (c) => laneById.get(String(c.id)) ?? 0,
+    ),
+    [sequence, laneById],
   );
 
   const renderCaptions = useMemo<RenderCaption[]>(
@@ -418,10 +433,27 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
 
   // Editable scenes (HTML + one GSAP timeline), drawn over the canvas by the same frame the export uses.
   const sceneClips = useMemo<SceneClip[]>(
-    () => (sequence?.tracks || []).filter((t) => t.type !== 'audio' && !(t as { hidden?: boolean }).hidden)
-      .flatMap((t) => (t.clips || []).filter(isSceneClip)),
-    [sequence],
+    () => byLane(
+      (sequence?.tracks || []).filter((t) => t.type !== 'audio' && !(t as { hidden?: boolean }).hidden)
+        .flatMap((t) => (t.clips || []).filter(isSceneClip)),
+      (c) => laneById.get(String(c.id)) ?? 0,
+    ),
+    [sequence, laneById],
   );
+
+  // 重ねる層: 下から順に「絵と映像（canvas）」「場面」「テロップ」の層を、段の上下どおりに積む。
+  // 絵と映像がテロップより上の段にあれば、その絵はテロップの上の別の canvas に描く。同じ段の物は重ならない
+  // （1つの段に同じ時刻の物は置けない）ので、層の数が増えないよう絵→場面→テロップの順にまとめる。
+  const stack = useMemo(() => stackBands([
+    ...visualClips.map((vc) => ({ kind: 'pic' as const, layer: vc.layer, id: String(vc.clip.id) })),
+    ...sceneClips.map((c) => ({ kind: 'scene' as const, layer: laneById.get(String(c.id)) ?? 0, id: String(c.id) })),
+    ...renderCaptions.map((c) => ({ kind: 'cap' as const, layer: laneById.get(String(c.id)) ?? 0, id: String(c.id) })),
+  ]), [visualClips, sceneClips, renderCaptions, laneById]);
+  const stackRef = useRef(stack);
+  stackRef.current = stack;
+  // 上の段の絵を描く canvas（1枚目は canvasRef）。描いた物が残っている canvas だけ消す。
+  const upperCanvasRefs = useRef<Array<HTMLCanvasElement | null>>([]);
+  const upperDirty = useRef<boolean[]>([]);
 
   const effectClips = useMemo(
     () => (sequence?.tracks || []).filter((t) => t.type === 'effect').flatMap((t) => t.clips || []),
@@ -1009,13 +1041,33 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (missing.length) { stats.wrongDraws += 1; stats.lastWrong = t; }
       }
 
-      ctx.setTransform(ps, 0, 0, ps, 0, 0);
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, w, h);
+      const baseCtx = ctx;
+      baseCtx.setTransform(ps, 0, 0, ps, 0, 0);
+      baseCtx.imageSmoothingEnabled = true;
+      baseCtx.imageSmoothingQuality = 'high';
+      baseCtx.fillStyle = '#000';
+      baseCtx.fillRect(0, 0, w, h);
+      // テロップ・場面より上の段の絵は、その上の canvas に描く（段の上下 = 前後）
+      const { canvasOf } = stackRef.current;
+      const upperCtx: Array<CanvasRenderingContext2D | null> = [];
+      const usedUpper = new Set<number>();
+      for (const l of layers) { const ci = canvasOf.get(String(l.vc.clip.id)) || 0; if (ci > 0) usedUpper.add(ci); }
+      upperCanvasRefs.current.forEach((cv, ci) => {
+        if (!cv || ci === 0) return;
+        if (!usedUpper.has(ci) && !upperDirty.current[ci]) return;
+        const c2 = cv.getContext('2d');
+        if (!c2) return;
+        c2.setTransform(ps, 0, 0, ps, 0, 0);
+        c2.clearRect(0, 0, w, h);
+        c2.imageSmoothingEnabled = true;
+        c2.imageSmoothingQuality = 'high';
+        upperCtx[ci] = c2;
+        upperDirty.current[ci] = usedUpper.has(ci);
+      });
 
       for (const { vc, got } of layers) {
+        const ci = canvasOf.get(String(vc.clip.id)) || 0;
+        const ctx = (ci > 0 && upperCtx[ci]) || baseCtx;
         // colour grade: the same matrix the export applies (clip.grade)
         ctx.filter = gradeFilter((vc.clip as { grade?: unknown }).grade);
         // blend mode (light leaks etc. on black): the export mixes the same way (clip.blend)
@@ -1064,9 +1116,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         }
       }
 
-      ctx.filter = 'none';
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1;
+      for (const c2 of [ctx, ...upperCtx]) {
+        if (!c2) continue;
+        c2.filter = 'none';
+        c2.globalCompositeOperation = 'source-over';
+        c2.globalAlpha = 1;
+      }
       // 再生中に絵を使わなかった映像の要素（上の映像にふさがれた段など）も、1画素だけ描いて絵を受け取り続ける。
       // ブラウザは誰も絵を受け取らない映像の要素を0.25秒おきにしか進めず、その要素だけ再生が遅れて、
       // ふさいでいた映像が終わって見えた瞬間にずれていた（音を時計にした時に、映像が平均0.1秒以上遅れていた）。
@@ -1751,9 +1806,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const ids: string[] = [];
     let fx = -1;
     let fy = -1;
+    // 押した所にある物を、前（上の段）から順に。同じ段ならテロップ → 絵と映像 → 場面
+    const hits: Array<{ id: string; layer: number; rank: number }> = [];
+    const pushHit = (id: string, rank: number) => hits.push({ id, layer: laneById.get(id) ?? 0, rank });
     for (const el of Array.from(wrap.querySelectorAll('[data-caption-id]')).reverse() as HTMLElement[]) {
       const b = el.getBoundingClientRect();
-      if (e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom && el.dataset.captionId) ids.push(el.dataset.captionId);
+      if (e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom && el.dataset.captionId) pushHit(el.dataset.captionId, 0);
     }
     if (contentRect) {
       const wb = wrap.getBoundingClientRect();
@@ -1781,14 +1839,17 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           const p = vc.position;
           if (p && !(fx >= p.x && fx <= p.x + p.width && fy >= p.y && fy <= p.y + p.height)) continue;
         }
-        ids.push(String(vc.clip.id));
+        pushHit(String(vc.clip.id), 1);
       }
       for (const sc of [...sceneClips].reverse()) {
-        if (t >= Number(sc.timeline_start) && t < Number(sc.timeline_end)) ids.push(String(sc.id));
+        if (t >= Number(sc.timeline_start) && t < Number(sc.timeline_end)) pushHit(String(sc.id), 2);
       }
     }
+    hits.forEach((h, i) => { (h as { i?: number }).i = i; });
+    hits.sort((a, b) => b.layer - a.layer || a.rank - b.rank || ((a as { i?: number }).i! - (b as { i?: number }).i!));
+    for (const h of hits) if (!ids.includes(h.id)) ids.push(h.id);
     return { ids, fx, fy };
-  }, [contentRect, currentTime, visualClips, sceneClips, dims, imageSrcByAssetId, imageFor, opaqueAt]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [contentRect, currentTime, visualClips, sceneClips, dims, imageSrcByAssetId, imageFor, opaqueAt, laneById]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pointAt = useCallback((clientX: number, clientY: number, pressed: boolean) => {
     if (!onPoint) return;
@@ -1867,24 +1928,47 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           素材を取り込み中 {Math.min(99, Math.floor((localProg.bytesDone / localProg.bytesTotal) * 100))}%
         </div>
       ) : null}
-      {contentRect && sceneClips.length ? (
-        <div
-          className="pointer-events-none absolute overflow-hidden"
-          style={{ left: contentRect.left, top: contentRect.top, width: contentRect.width, height: contentRect.height }}
-        >
-          <SceneLayer clips={sceneClips} time={currentTime} playing={playing} clockRef={playClockRef} liveTime={currentTime} />
-        </div>
-      ) : null}
-      {contentRect && renderCaptions.length ? (
-        <div
-          className="pointer-events-none absolute overflow-hidden"
-          style={{ left: contentRect.left, top: contentRect.top, width: contentRect.width, height: contentRect.height }}
-        >
-          <div style={{ transformOrigin: 'top left', transform: `scale(${contentRect.width / dims.w})` }}>
-            <LiveCaptionLayer playing={playing} currentTime={currentTime} clockRef={playClockRef} outW={dims.w} outH={dims.h} captions={renderCaptions} />
+      {/* 段の上下どおりに下から積む: 場面・テロップ・上の段の絵（lane-order.ts） */}
+      {stack.bands.map((band, bi) => {
+        if (band.kind === 'pic') {
+          if (band.canvas === 0) return null; // 一番下は上の canvas（canvasRef）
+          return (
+            <canvas
+              key={`pic-${band.canvas}`}
+              ref={(el) => { upperCanvasRefs.current[band.canvas] = el; }}
+              width={Math.round(dims.w * pxScale)}
+              height={Math.round(dims.h * pxScale)}
+              className="pointer-events-none absolute left-0 top-0"
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            />
+          );
+        }
+        if (!contentRect) return null;
+        if (band.kind === 'scene') {
+          const clips = sceneClips.filter((c) => band.ids.has(String(c.id)));
+          return clips.length ? (
+            <div
+              key={`scene-${bi}`}
+              className="pointer-events-none absolute overflow-hidden"
+              style={{ left: contentRect.left, top: contentRect.top, width: contentRect.width, height: contentRect.height }}
+            >
+              <SceneLayer clips={clips} time={currentTime} playing={playing} clockRef={playClockRef} liveTime={currentTime} />
+            </div>
+          ) : null;
+        }
+        const caps = renderCaptions.filter((c) => band.ids.has(String(c.id)));
+        return caps.length ? (
+          <div
+            key={`cap-${bi}`}
+            className="pointer-events-none absolute overflow-hidden"
+            style={{ left: contentRect.left, top: contentRect.top, width: contentRect.width, height: contentRect.height }}
+          >
+            <div style={{ transformOrigin: 'top left', transform: `scale(${contentRect.width / dims.w})` }}>
+              <LiveCaptionLayer playing={playing} currentTime={currentTime} clockRef={playClockRef} outW={dims.w} outH={dims.h} captions={caps} />
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : null;
+      })}
       {capBox ? (
         <div
           data-caption-select-box
