@@ -10,6 +10,8 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+from app.services import prompt_store
+
 # Words that carry no topic: fillers, question endings, time words that never appear in the record itself.
 STOP = set('この前 こないだ 先週 昨日 今日 明日 さっき 結局 ちゃんと 普通 登録 情報 確認 お前 あれ それ これ どう なった だっけ できた 教えて 言ってた '
            'やりとり 話 件 あの その ダン 前 後 時 方 感じ 全部 本当 場合 以前 最近 いつ どこ なに 何 誰'.split())
@@ -54,7 +56,7 @@ async def gather(user_id, utterance, dialogue, jobs=(), days=45, budget=4.0):
         weight = 1 / (1 + math.log10(max(matches, 1)))
         for r in result:
             text = r.get('content') or ''
-            if text.startswith('【あなたの依頼・Done経由】'): continue   # the relayed copy of a voice request, not a record of what happened
+            if text.startswith(('【あなたの依頼・Done経由】', prompt_store.text('work/relay-header'))): continue   # the relayed copy of a voice request, not a record of what happened
             rows[r['id']] = r; score[r['id']] = score.get(r['id'], 0)+weight
     # A record that mentions more of the topic words first, the newer one first among equals.
     ranked = list(rows.values())

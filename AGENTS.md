@@ -48,6 +48,7 @@ Keep credentials in the credential service, never in skill text, logs or source 
 ## References by task
 
 - Runtime prompts: `app/agent/bootstrap_context.py`, `app/agent/cli_runner.py`, `app/agent/codex_runner.py`.
+- Instructions the owner can read and rewrite (`app/services/prompt_store.py`, screen `/prompts`, 2026-11-17): the call's and the jobs' sentences live in `~/.dan/workspace/prompts/` and are listed in `app/prompts/catalog.json` with who reads them and when. Change them with `python scripts/prompts.py save <id> --note "<the owner's complaint>"` (or on the screen), never by adding a sentence inside Python code; a new instruction for a model goes into a prompt file and the catalog. `app/prompts/seed/` is only for a fresh machine; editing a seed changes nothing that runs.
 - Browser sessions: `docs/current/browser-lifecycle.md` and `docs/current/browser-speed-and-verification.md`.
 - Editable artifact integration: `docs/editable-artifact-build-integration.md`.
 - What the owner sees in each place Dan talks (chat, artifact tab, the dev-lead board's rooms, the phone app) and in each artifact, how to open it and what proves a screen works: `docs/places/README.md` (place maps, `scripts/place_map.py`; open and photograph a place with `scripts/place_shot.py`, before and after a UI change; when the owner reports that something on a screen does not work, reproduce it first with `--expect-…` before touching code, as in the README's bug-report section).

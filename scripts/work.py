@@ -289,6 +289,10 @@ def try_up(wt):
     started['api'] = api.pid
     fenv = {**os.environ, **_env_file(LIVE / 'frontend' / '.env.local'),
             'BACKEND_URL': f"http://127.0.0.1:{TRY_PORTS['api']}", 'NEXT_DIST_DIR': '.next-preview'}
+    # Next.js 16.4 stops `next dev` with an upgrade notice addressed to the agent when it sees one (AI_AGENT, CLAUDECODE…),
+    # so try started no screens from Dan (2026-11-17). The trial server is not the agent's terminal: start it as a plain one.
+    for name in [k for k in fenv if k == 'AI_AGENT' or k.startswith(('CLAUDE', 'CODEX_'))]:
+        fenv.pop(name)
     log = open(state / 'screens.log', 'w', encoding='utf-8')
     subprocess.run([_python(wt), str(wt / 'scripts' / 'wire_artifact_tailwind_sources.py')], stdout=log,
                    stderr=subprocess.STDOUT, creationflags=NO_WINDOW)

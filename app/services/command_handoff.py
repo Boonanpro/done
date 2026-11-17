@@ -6,6 +6,7 @@ from app.services.chat_service import ChatService
 from app.services.run_service import RunService
 from app.services.project_service import ProjectService
 from app.services.followups import reschedule_watch, mark_status
+from app.services import prompt_store
 
 
 def usable(text):
@@ -41,7 +42,7 @@ async def start(row):
         await defer(row, spec)
         return
     message = await chat.send_message(row['room_id'], row['user_id'],
-        '【あなたの依頼・Done経由】\n' + spec.get('task', row['plain_note']), sender_type='system',
+        prompt_store.text('work/relay-header') + '\n' + spec.get('task', row['plain_note']), sender_type='system',
         message_id=report_id(row['id'] + ':request'))
     runs = RunService()
     run = await runs.create_run(project['id'], row['room_id'], origin_message_id=message['id'],
