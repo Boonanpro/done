@@ -1776,14 +1776,25 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     if (!hit || hit.fx < 0 || hit.fx > 1 || hit.fy < 0 || hit.fy > 1) { onPoint(null); return; }
     onPoint({ x: Math.round(hit.fx * 1000) / 1000, y: Math.round(hit.fy * 1000) / 1000, ids: hit.ids.slice(0, 6), pressed });
   }, [onPoint, hitsAt]);
+  // 動かしている間は0.2秒に1回だけ調べ、最後に止まった所は必ず知らせる（間引いた最後の位置を落とさない）
   const pointMoveAt = useRef(0);
+  const pointLast = useRef<{ x: number; y: number } | null>(null);
+  const pointTimer = useRef<number | undefined>(undefined);
   const onPointerMove = useCallback((e: { clientX: number; clientY: number; buttons: number }) => {
     if (!onPoint || e.buttons) return;
+    pointLast.current = { x: e.clientX, y: e.clientY };
     const now = performance.now();
-    if (now - pointMoveAt.current < 200) return;
-    pointMoveAt.current = now;
-    pointAt(e.clientX, e.clientY, false);
+    if (now - pointMoveAt.current >= 200) {
+      pointMoveAt.current = now;
+      pointAt(e.clientX, e.clientY, false);
+    }
+    window.clearTimeout(pointTimer.current);
+    pointTimer.current = window.setTimeout(() => {
+      const last = pointLast.current;
+      if (last) pointAt(last.x, last.y, false);
+    }, 220);
   }, [onPoint, pointAt]);
+  useEffect(() => () => window.clearTimeout(pointTimer.current), []);
 
   const pickAt = useCallback((e: { clientX: number; clientY: number; button: number }) => {
     if (e.button === 0) pointAt(e.clientX, e.clientY, true);
@@ -1804,7 +1815,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
 
   return (
-    <div ref={wrapRef} className={`relative ${className || ''}`} style={{ width: '100%', height: '100%' }} onPointerDown={pickAt} onPointerMove={onPointerMove} onPointerLeave={() => onPoint?.(null)}>
+    <div ref={wrapRef} className={`relative ${className || ''}`} style={{ width: '100%', height: '100%' }} onPointerDown={pickAt} onPointerMove={onPointerMove} onPointerLeave={() => { window.clearTimeout(pointTimer.current); pointLast.current = null; onPoint?.(null); }}>
       <canvas
         ref={canvasRef}
         width={Math.round(dims.w * pxScale)}
