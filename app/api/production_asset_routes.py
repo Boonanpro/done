@@ -8833,6 +8833,9 @@ class EditorStateRequest(BaseModel):
     playhead: float | None = None
     playing: bool = False
     selected: list[dict[str, Any]] = Field(default_factory=list)
+    # プレビューの上でマウスを置いた・押した所 {x, y（画面に対する割合）, ids（そこにある物、上から）, pressed, inside,
+    # age_ms（最後に動かして・押してからの時間）}。通話で「ここ」と指した所（app/services/voice_editor.py）
+    pointer: dict[str, Any] | None = None
 
 
 @router.post("/editor-state")
@@ -8843,6 +8846,15 @@ def post_editor_state(data: EditorStateRequest, current_user: TokenData = Depend
     d.mkdir(parents=True, exist_ok=True)
     state = {"content_id": data.content_id or "", "editor": data.screen, "playhead": data.playhead,
              "playing": data.playing, "selected": data.selected[:20], "source": "web"}
+    p = data.pointer if isinstance(data.pointer, dict) else None
+    if p is not None:
+        try:
+            state["pointer"] = {"x": float(p.get("x")), "y": float(p.get("y")),
+                                "ids": [str(i) for i in (p.get("ids") or [])][:6], "pressed": bool(p.get("pressed")),
+                                "inside": bool(p.get("inside")),
+                                "at": round(time.time() - max(0.0, float(p.get("age_ms") or 0)) / 1000.0, 2)}
+        except (TypeError, ValueError):
+            pass
     tmp = d / "editor_state.json.tmp"
     tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     tmp.replace(d / "editor_state.json")

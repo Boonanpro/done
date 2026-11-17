@@ -44,6 +44,13 @@ def session_config(history=None, timezone='Asia/Tokyo', files=None, room_id=None
     now = datetime.now(zone)
     # The day only: the time of day is read when wanted (voice_router 'clock'); given, the clock was said into replies (11/7).
     clock = f'通話を始めた日: {now.year}年{now.month}月{now.day}日（{"月火水木金土日"[now.weekday()]}曜日、{zone.key}）。'
+    # A call from the editor's 「話す」: where the owner is. Without it 「このドン、小さくて聞こえないから大きくして」 was
+    # taken as his own voice (「大きめの声で話すね」, 11/17 voice_editor).
+    if room_id:
+        from app.services import voice_editor
+        place = voice_editor.call_editor(room_id)
+        if place:
+            clock += chr(10) + voice_editor.Moments(place['asset_room_id'], place['content_id']).place()
     records = chr(10).join(('ユーザー' if row['role'] == 'user' else 'Dan') + ': ' + row['content'][0]['text'] for row in (history or []))
     from app.services.voice_responses import delegation
     from app.services.voice_settings import snapshot

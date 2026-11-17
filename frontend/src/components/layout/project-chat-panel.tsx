@@ -3104,7 +3104,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
   return (
     <div data-media-gallery-scope className="relative flex h-full w-full overflow-hidden">
     {voiceOpen && project?.room_id && (
-      <div className="dark fixed bottom-4 right-4 z-50 w-[520px] max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-950 shadow-2xl">
+      <div className={`dark fixed bottom-4 right-4 z-50 ${editorChat ? 'w-[396px]' : 'w-[520px]'} max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-950 shadow-2xl`}>
         <VoiceSession
           roomId={project.room_id}
           chatTitle={project.title || undefined}
@@ -3213,10 +3213,10 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
                 ? 'border-emerald-700 bg-emerald-900/30 text-emerald-200 hover:bg-emerald-900/50'
                 : 'border-border bg-background text-foreground hover:bg-muted'
             }`}
-            title="このチャットの文脈で音声開発（パネルを開閉。delegate はこのチャットに書き戻されます）"
+            title={editorChat ? 'この作品のダンと話しながら直す（再生位置・選んだクリップ・プレビューで指した所がダンに届きます）' : 'このチャットの文脈で音声開発（パネルを開閉。delegate はこのチャットに書き戻されます）'}
           >
             <Mic className="h-3.5 w-3.5" />
-            <span>音声</span>
+            <span>{editorChat ? '話す' : '音声'}</span>
           </button>
         )}
         {project?.room_id && <ModelSwitcher roomId={project.room_id} />}
@@ -3363,7 +3363,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
           <div className="flex h-full flex-col items-center justify-center p-6">
             <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/20" />
             <p className="text-base text-muted-foreground md:text-[17px]">
-              {editorChat ? 'どんな動画を作りたいか、ここに書くか、上の「音声」で話してください。' : 'メッセージを送信して開始してください。'}
+              {editorChat ? 'どんな動画を作りたいか、ここに書くか、上の「話す」で話してください。' : 'メッセージを送信して開始してください。'}
             </p>
           </div>
         ) : (

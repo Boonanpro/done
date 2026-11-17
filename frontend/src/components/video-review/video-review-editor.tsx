@@ -1462,6 +1462,17 @@ export function VideoReviewEditor({
     }
   }, [adoptShown, pointDanAt]);
 
+  // プレビューの上でマウスを置いた・押した所。通話で「ここ」と言いながら指した所をダンが分かるよう、下の知らせに足す
+  // （2026-11-17。読むのは通話: app/services/voice_editor.py）。同じ所なら知らせ直さない
+  const [previewPoint, setPreviewPoint] = useState<{ x: number; y: number; ids: string[]; pressed: boolean; at: number } | null>(null);
+  const handlePreviewPoint = useCallback((p: { x: number; y: number; ids: string[]; pressed: boolean } | null) => {
+    setPreviewPoint((prev) => {
+      if (!p) return prev ? { ...prev, pressed: false, at: -Math.abs(prev.at) } : prev;   // 外れた: 最後の所を「外れた」として残す
+      if (prev && prev.at > 0 && !p.pressed && Math.abs(prev.x - p.x) < 0.02 && Math.abs(prev.y - p.y) < 0.02 && prev.ids.join('|') === p.ids.join('|')) return prev;
+      return { ...p, at: Date.now() };
+    });
+  }, []);
+
   // 「ここ」「この字幕」をダンが分かるよう、再生位置と選んだクリップを知らせる（0.4秒まとめて。ネイティブ版と同じ
   // editor_state.json。読むのは「ダンと制作」と本体のチャットと通話のダン: app/services/timeline_live.py）
   useEffect(() => {
@@ -1478,11 +1489,15 @@ export function VideoReviewEditor({
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ room_id: roomId, content_id: contentId, screen: 'editor', playhead: Math.round(currentTime * 100) / 100, playing, selected }),
+        body: JSON.stringify({
+          room_id: roomId, content_id: contentId, screen: 'editor', playhead: Math.round(currentTime * 100) / 100, playing, selected,
+          pointer: previewPoint ? { x: previewPoint.x, y: previewPoint.y, ids: previewPoint.ids, pressed: previewPoint.pressed,
+            inside: previewPoint.at > 0, age_ms: Math.max(0, Date.now() - Math.abs(previewPoint.at)) } : null,
+        }),
       }).catch(() => {});
     }, playing ? 2000 : 400);
     return () => window.clearTimeout(timer);
-  }, [roomId, contentId, currentTime, playing, selectedSequenceClipId, selectedSequenceClipIds, editSequence]);
+  }, [roomId, contentId, currentTime, playing, selectedSequenceClipId, selectedSequenceClipIds, editSequence, previewPoint]);
 
   useEffect(() => {
     if (!roomId || !contentId) return;
@@ -4537,6 +4552,7 @@ export function VideoReviewEditor({
               else updateSequenceClip(clipId, { transform });
             }}
             onPick={(clipId) => { if (clipId) selectSequenceClip(clipId); else clearSelection(); }}
+            onPoint={handlePreviewPoint}
             onCaptionMove={(clipId, nudge) => {
               const c = allSequenceClips.find((x) => x.id === clipId);
               updateSequenceClip(clipId, { style: { ...((c?.style || {}) as Record<string, unknown>), x: nudge.x, y: nudge.y } } as Partial<SequenceClip>);
