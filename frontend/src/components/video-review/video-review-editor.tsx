@@ -16,6 +16,8 @@ import {
   Check,
   MapPin,
   Maximize2,
+  MessageSquare,
+  MoreVertical,
   Music2,
   MousePointer2,
   Pause,
@@ -33,6 +35,7 @@ import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipKind } from './time
 import { perfLog } from '@/lib/perf-log';
 import { TimelineRuler } from './timeline-ruler';
 import { FullscreenBar } from './fullscreen-bar';
+import { PhoneSwipeSurface, PhoneTime, PhoneTimeline, createPhoneScrub, type PhoneLane } from './phone-timeline';
 import { SfxPanel, SFX_DND_TYPE, type SfxItem } from './sfx-panel';
 
 import { Button } from '@/components/ui/button';
@@ -755,7 +758,8 @@ export function VideoReviewEditor({
   onGenerateClip,
   onExecute,
   sidePanelTop,
-  previewTopLeft,
+  headerTools,
+  phoneChat,
   roomId,
   contentId,
   onExternalEdit,
@@ -775,7 +779,7 @@ export function VideoReviewEditor({
   initialAnnotations?: ReviewAnnotation[];
   initialSequence?: EditSequence | null;
   sequenceAssets?: SequenceAsset[];
-  /** スマホの幅: 道具の並び・調整欄・境目を畳み、プレビューと再生と小さいタイムラインだけにする */
+  /** スマホの形: 映像を横幅いっぱい（横持ちでは画面いっぱい）に出し、指で左右に送る細いタイムラインと会話の欄だけにする */
   compact?: boolean;
   embedded?: boolean;
   onBack?: () => void;
@@ -787,8 +791,10 @@ export function VideoReviewEditor({
   onGenerateClip?: (annotation: ReviewAnnotation) => void | boolean | Promise<void | boolean>;
   onExecute?: (payload: SessionPayload) => void | Promise<void>;
   sidePanelTop?: ReactNode;
-  /** プレビュー領域の左上に浮かせるパネル（例: 使用素材の折りたたみ）。 */
-  previewTopLeft?: ReactNode;
+  /** 上のボタンの並びに置く物（例: 使用素材）。スマホではメニューの中に出す（2026-11-17 本人「使用素材はプレビューに被せると邪魔」）。 */
+  headerTools?: ReactNode;
+  /** スマホの形で、タイムラインと入れ替えて（横持ちでは右に重ねて）出す会話の欄 */
+  phoneChat?: ReactNode;
 }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -4432,6 +4438,498 @@ export function VideoReviewEditor({
                       })
   ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedClipSet, highlightedClipIds, danTouch, viewWin, trackPx, pxPerSec, instrJobs]);
 
+
+  // ── スマホの形（2026-11-17 本人「縦持ちは横幅いっぱい・YouTube やショート動画の感覚で左右に動かして移動・
+  //    チャットはタイムラインと入れ替え・横持ちでも同じように」）──
+  const phoneScrub = useMemo(() => createPhoneScrub(), []);
+  const [phoneVp, setPhoneVp] = useState({ w: 412, h: 915 });
+  const [phoneChatOpen, setPhoneChatOpen] = useState(false);
+  const [phoneMenuOpen, setPhoneMenuOpen] = useState(false);
+  const [phoneControls, setPhoneControls] = useState(true);
+  useEffect(() => {
+    if (!compact) return;
+    const read = () => setPhoneVp({ w: window.innerWidth, h: window.innerHeight });
+    read();
+    window.addEventListener('resize', read);
+    window.addEventListener('orientationchange', read);
+    return () => {
+      window.removeEventListener('resize', read);
+      window.removeEventListener('orientationchange', read);
+    };
+  }, [compact]);
+  const phoneLandscape = compact && phoneVp.w > phoneVp.h;
+  // 横持ちで再生中は、押してから3秒で再生のボタンを隠す（YouTube と同じ）
+  useEffect(() => {
+    if (!phoneLandscape || !phoneControls || !playing || phoneChatOpen || phoneMenuOpen) return;
+    const id = window.setTimeout(() => setPhoneControls(false), 3000);
+    return () => window.clearTimeout(id);
+  }, [phoneLandscape, phoneControls, playing, phoneChatOpen, phoneMenuOpen]);
+  const phoneLanes = useMemo<PhoneLane[]>(() => {
+    if (!compact) return [];
+    const out: PhoneLane[] = [];
+    for (const lane of timelineLanes) {
+      if (!lane.items.length) continue;
+      const items = lane.items
+        .map((it) => {
+          const kind = (it.clip as { kind?: string } | undefined)?.kind;
+          const color = it.kind === 'annotation' ? '#f97316'
+            : it.itemType === 'audio' ? '#22c55e'
+              : it.itemType === 'caption' ? '#a855f7'
+                : it.itemType === 'effect' ? '#f59e0b'
+                  : kind === 'image' ? '#14b8a6' : '#3b82f6';
+          return { s: Number(it.start) || 0, e: Number(it.end) || 0, color };
+        })
+        .sort((a, b) => a.s - b.s);
+      const maxLen = items.reduce((m, it) => Math.max(m, it.e - it.s), 0);
+      out.push({ key: lane.key, zone: lane.zone, items, maxLen });
+    }
+    return out;
+  }, [compact, timelineLanes]);
+  const phoneSetPlaying = useCallback((p: boolean) => { if (p) setPlayRate(1); setPlaying(p); }, []);
+  const phonePrimeScale = useRef(false);
+  useEffect(() => {
+    // 最初は画面の幅に約20秒が映る細かさ（短い作品は全体が映る）
+    if (!compact || phonePrimeScale.current || !(contentDuration > 0)) return;
+    phonePrimeScale.current = true;
+    const span = Math.min(20, contentDuration);
+    phoneScrub.pps = Math.max(1, (phoneVp.w || 412) / Math.max(2, span));
+  }, [compact, contentDuration, phoneScrub, phoneVp.w]);
+
+  // 映像の部分（PC とスマホの両方の形で同じ物を使う）
+  const stageNode = (
+      <div
+        ref={stageRef}
+        className={`relative h-full max-h-full max-w-full overflow-hidden ${nativeShell ? '' : 'bg-black'}`}
+        style={{ aspectRatio: previewAspect }}
+        onContextMenu={(event) => event.preventDefault()}
+      >
+        {nativeShell ? (
+          // native engine composites the real video BELOW this transparent stage (the page
+          // is transparent here so it shows through); the web CaptionLayer renders on top,
+          // synced to the playhead. Anything opaque here would hide the video, so only the
+          // (transparent) caption overlay is drawn.
+          renderCaptions.length && stageCssW > 0 ? (
+            <div className="pointer-events-none absolute inset-0 overflow-hidden">
+              <div style={{ transformOrigin: 'top left', transform: `scale(${stageCssW / captionDims.w})` }}>
+                <CaptionLayer outW={captionDims.w} outH={captionDims.h} captions={renderCaptions} time={currentTime} />
+              </div>
+            </div>
+          ) : null
+        ) : (
+          <TimelinePreview
+            sequence={editSequence}
+            assets={stableSequenceAssets || EMPTY_ASSETS}
+            blurRegionsAt={blurRegionsAt}
+            currentTime={currentTime}
+            seekRev={seekRev}
+            playing={playing}
+            format={editSequence?.format || initialSequence?.format || '9:16'}
+            onTimeChange={handlePreviewTime}
+            onEnded={handlePreviewEnded}
+            className="h-full w-full"
+            selectedClipId={selectedSequenceClipId}
+            onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
+            onTransformChange={(clipId, transform) => {
+              // 動き（キーフレーム）がある時は、再生位置のキーを動かす（無ければ足す）
+              const c = allSequenceClips.find((x) => x.id === clipId);
+              const ks = c ? sortedKeys(c) : [];
+              if (c && ks.length) updateSequenceClip(clipId, { motion_keys: setKeyAt(ks, currentTime - c.timeline_start, transform, Number((editSequence as { frame_rate?: number } | null)?.frame_rate) || 30) });
+              else updateSequenceClip(clipId, { transform });
+            }}
+            onPick={(clipId) => { if (clipId) selectSequenceClip(clipId); else clearSelection(); }}
+            onCaptionMove={(clipId, nudge) => {
+              const c = allSequenceClips.find((x) => x.id === clipId);
+              updateSequenceClip(clipId, { style: { ...((c?.style || {}) as Record<string, unknown>), x: nudge.x, y: nudge.y } } as Partial<SequenceClip>);
+            }}
+            rate={playRate}
+          />
+        )}
+        {playing && playRate !== 1 ? (
+          <div className="pointer-events-none absolute right-2 top-2 z-30 rounded bg-black/70 px-2 py-0.5 text-sm font-semibold text-white" data-testid="play-rate">
+            {playRate}倍速
+          </div>
+        ) : null}
+        {/* Browser only: in the desktop app the NATIVE engine composites the pop-out
+            (same clock = no drift, replaces the wipe). See project_production_native_rewrite_intent.
+            Two hidden videos (color + matte-as-luma, both HW-decoded H.264) are merged on
+            the canvas — see the draw effect above. */}
+        {!nativeShell && activePopout ? (
+          <>
+            <svg width="0" height="0" className="absolute" aria-hidden>
+              <filter id="dan-popout-luma-alpha"><feColorMatrix type="luminanceToAlpha" /></filter>
+            </svg>
+            <video
+              key={activePopout.url}
+              ref={popoutVideoRef}
+              src={activePopout.url}
+              muted
+              playsInline
+              preload="auto"
+              onCanPlay={() => {
+                // prime a decoded frame (a never-played <video> has none for the canvas to
+                // draw), then honor the current play state so it still stops with the main.
+                const v = popoutVideoRef.current;
+                if (v) v.play().then(() => { if (!playingRef.current) v.pause(); }).catch(() => {});
+              }}
+              className="pointer-events-none absolute h-px w-px opacity-0"
+            />
+            <video
+              key={activePopout.alphaUrl}
+              ref={popoutAlphaRef}
+              src={activePopout.alphaUrl}
+              muted
+              playsInline
+              preload="auto"
+              onCanPlay={() => {
+                const v = popoutAlphaRef.current;
+                if (v) v.play().then(() => { if (!playingRef.current) v.pause(); }).catch(() => {});
+              }}
+              className="pointer-events-none absolute h-px w-px opacity-0"
+            />
+            <canvas
+              ref={popoutCanvasRef}
+              className="pointer-events-none absolute z-10"
+              style={{
+                left: `${activePopout.pos.x * 100}%`,
+                top: `${activePopout.pos.y * 100}%`,
+                width: `${activePopout.pos.width * 100}%`,
+                height: `${activePopout.pos.height * 100}%`,
+              }}
+            />
+          </>
+        ) : null}
+        {/* pop-out bake progress: 0→100% HUD over the card position while the person is
+            being matted. This DOM layer sits above the native video in the app too, so
+            the bar is visible in both. */}
+        {(() => {
+          const entry = allSequenceClips
+            .map((c) => ({ c, st: popoutPreviews[String(c.id)] }))
+            .find(({ st }) => st?.preparing);
+          if (!entry) return null;
+          const box = popoutBox(entry.c);
+          const pct = Math.max(0, Math.min(100, entry.st?.progress ?? 0));
+          return (
+            <div
+              className="pointer-events-none absolute z-20 flex items-center justify-center"
+              style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }}
+            >
+              <div className="w-3/4 max-w-[260px] rounded-md bg-black/70 px-3 py-2 text-center">
+                <div className="mb-1 text-[10px] text-white">飛び出しを生成中… {pct}%</div>
+                <div className="h-1.5 w-full overflow-hidden rounded bg-white/20">
+                  <div className="h-full rounded bg-sky-400 transition-[width] duration-500" style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        <div
+          className={`absolute ${tool === 'select' ? 'pointer-events-none' : 'pointer-events-auto'}`}
+          style={videoContentStyle}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerUp}
+        />
+        <div className="pointer-events-none absolute" style={videoContentStyle}>
+          {annotations.filter(isActiveAnnotation).map((a) => {
+            if (a.kind === 'rect') {
+              const bd = (a.data || {}) as { track?: boolean; track_boxes?: Record<string, number[]>; keyframes?: Keyframe[]; kfMode?: boolean };
+              // box position priority: manual keyframes > OCR track path > static box.
+              const kf = a.intent === 'blur' && bd.keyframes && bd.keyframes.length ? keyframeBoxAt(bd.keyframes, currentTime) : null;
+              const tracked = !kf && a.intent === 'blur' && bd.track ? trackedBoxAt(bd.track_boxes, currentTime) : null;
+              const isKf = a.intent === 'blur' && !!bd.kfMode;
+              const selectedThis = selectedIds.includes(a.id);
+              const editable = isKf && selectedThis;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    selectAnnotation(a.id, e.shiftKey || e.ctrlKey || e.metaKey);
+                  }}
+                  onPointerDown={editable ? (e) => startBlurBoxDrag(e, a, 'move') : undefined}
+                  className={`pointer-events-auto absolute ${
+                    // Only show the outline when SELECTED — an unselected region needs no
+                    // chrome (the blur itself is already painted on the canvas). Still
+                    // clickable (transparent) so it can be picked.
+                    selectedThis
+                      ? `border-2 border-yellow-300 ${a.intent === 'blur' ? '' : 'bg-red-500/15'}`
+                      : 'border-0 bg-transparent'
+                  } ${editable ? 'cursor-move' : ''}`}
+                  style={{
+                    // The blur itself is painted on the canvas (TimelinePreview blurRegions),
+                    // so this is just a thin selectable outline — NO backdrop-filter (which
+                    // flickered when the canvas repainted).
+                    ...rectStyle(kf || tracked || a.data),
+                  }}
+                  title={a.note || a.intent}
+                >
+                  {editable ? (
+                    <span
+                      onPointerDown={(e) => startBlurBoxDrag(e, a, 'resize')}
+                      className="absolute -bottom-1 -right-1 h-3 w-3 cursor-nwse-resize rounded-sm border border-yellow-300 bg-yellow-300/80"
+                    />
+                  ) : null}
+                </button>
+              );
+            }
+            if (a.kind === 'marker') {
+              const p = a.data.point as Point | undefined;
+              if (!p) return null;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    selectAnnotation(a.id, e.shiftKey || e.ctrlKey || e.metaKey);
+                  }}
+                  className={`pointer-events-auto absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 ${
+                    selectedIds.includes(a.id) ? 'border-yellow-300 bg-yellow-300'
+                      : (() => { const j = instrJobOf(a, instrJobs); return !j ? 'border-orange-300 bg-orange-400' : j.active ? 'animate-pulse border-amber-200 bg-amber-400' : j.state === 'completed' ? 'border-emerald-300 bg-emerald-400' : 'border-red-300 bg-red-500'; })()
+                  }`}
+                  style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%` }}
+                  title={a.note || a.intent}
+                />
+              );
+            }
+            return null;
+          })}
+          {pendingAnnotation?.kind === 'rect' && isActiveAnnotation(pendingAnnotation) ? (
+            <div className="absolute border-2 border-orange-300 bg-orange-500/20" style={rectStyle(pendingAnnotation.data)} />
+          ) : null}
+          {pendingAnnotation?.kind === 'marker' && isActiveAnnotation(pendingAnnotation) && (pendingAnnotation.data.point as Point | undefined) ? (
+            <div
+              className="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-orange-300 bg-orange-400"
+              style={{
+                left: `${((pendingAnnotation.data.point as Point).x || 0) * 100}%`,
+                top: `${((pendingAnnotation.data.point as Point).y || 0) * 100}%`,
+              }}
+            />
+          ) : null}
+          <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+            {annotations
+              .filter((a) => a.kind === 'freehand')
+              .filter(isActiveAnnotation)
+              .map((a) => {
+                const points = (a.data.points as Point[] | undefined) || [];
+                const d = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ');
+                return (
+                  <path
+                    key={a.id}
+                    d={d}
+                    fill="none"
+                    stroke={selectedIds.includes(a.id) ? '#fde047' : '#38bdf8'}
+                    strokeWidth="0.7"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                );
+              })}
+            {draftPath && (
+              <path
+                d={draftPath.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ')}
+                fill="none"
+                stroke="#f97316"
+                strokeWidth="0.7"
+                vectorEffect="non-scaling-stroke"
+              />
+            )}
+            {pendingAnnotation?.kind === 'freehand' && isActiveAnnotation(pendingAnnotation) && (
+              <path
+                d={((pendingAnnotation.data.points as Point[] | undefined) || []).map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ')}
+                fill="none"
+                stroke="#fb923c"
+                strokeWidth="0.9"
+                vectorEffect="non-scaling-stroke"
+              />
+            )}
+            {typePicker?.kind === 'freehand' && (
+              <path
+                d={((typePicker.data.points as Point[] | undefined) || []).map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ')}
+                fill="none"
+                stroke="#fb923c"
+                strokeWidth="0.9"
+                strokeDasharray="2 1.5"
+                vectorEffect="non-scaling-stroke"
+              />
+            )}
+          </svg>
+          {draftRectStyle && (
+            <div className="absolute border-2 border-orange-400 bg-orange-500/15" style={draftRectStyle} />
+          )}
+          {typePicker ? (
+            <>
+              {typePicker.kind === 'rect' ? (
+                <div className="absolute border-2 border-dashed border-orange-300 bg-orange-500/15" style={rectStyle(typePicker.data)} />
+              ) : null}
+              <div
+                className="pointer-events-auto absolute z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-white/15 bg-neutral-900/95 p-1 shadow-xl"
+                style={{ left: `${clamp(typePicker.cx, 0.08, 0.92) * 100}%`, top: `${clamp(typePicker.cy, 0.04, 0.96) * 100}%` }}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                {RECT_INTENTS.map((it) => (
+                  <button
+                    key={it.value}
+                    type="button"
+                    className="rounded px-2 py-1 text-xs font-medium text-white hover:bg-white/20"
+                    onClick={() => {
+                      commitAnnotation({ kind: typePicker.kind, label: it.value, data: typePicker.data }, it.value);
+                      setTypePicker(null);
+                    }}
+                  >
+                    {it.label}
+                  </button>
+                ))}
+                <button type="button" className="px-1 text-white/50 hover:text-white" title="取消" onClick={() => setTypePicker(null)}>
+                  ✕
+                </button>
+              </div>
+            </>
+          ) : null}
+          {/* Captions are composited by TimelinePreview onto the canvas (matches the
+              final render); no separate HTML overlay needed here. */}
+        </div>
+      </div>
+  );
+
+  const phoneView = () => {
+    const [fa, fb] = (editSequence?.format || initialSequence?.format || '9:16').split(':').map(Number);
+    const ratio = fa && fb ? fa / fb : 9 / 16;
+    const HEAD = 44;
+    const CTRL = 48;
+    const below = phoneChatOpen ? Math.max(300, Math.round(phoneVp.h * 0.45)) : 132;
+    const videoH = Math.max(160, Math.round(Math.min(phoneVp.w / ratio, phoneVp.h - HEAD - CTRL - below)));
+    // 縦持ちのタイムラインは残りの高さを使う（段が太く見える）。下に使い方の一行
+    const stripH = Math.max(96, Math.min(300, phoneVp.h - HEAD - videoH - CTRL - 8 - 56));
+    const playIcon = (big: boolean) => (playing ? (
+      <svg viewBox="0 0 24 24" className={`${big ? 'h-9 w-9' : 'h-6 w-6'} fill-current`}><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
+    ) : (
+      <svg viewBox="0 0 24 24" className={`${big ? 'h-9 w-9' : 'h-6 w-6'} fill-current`}><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.4-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z" /></svg>
+    ));
+    const togglePlay = () => phoneSetPlaying(!playingRef.current);
+    const chatButton = phoneChat ? (
+      <button
+        type="button"
+        data-phone-chat-toggle
+        onClick={() => { setPhoneChatOpen((v) => !v); setPhoneControls(true); }}
+        className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium ${phoneChatOpen ? 'bg-primary text-primary-foreground' : phoneLandscape ? 'bg-white/15 text-white' : 'bg-muted text-foreground'}`}
+      >
+        <MessageSquare className="h-4 w-4" />
+        {phoneChatOpen && !phoneLandscape ? 'タイムライン' : 'チャット'}
+      </button>
+    ) : null;
+    const menuButton = (
+      <button type="button" data-phone-menu onClick={() => setPhoneMenuOpen(true)} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full" aria-label="メニュー">
+        <MoreVertical className="h-5 w-5" />
+      </button>
+    );
+    const backButton = onBack ? (
+      <button type="button" onClick={onBack} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full" aria-label="作品の一覧へ戻る">
+        <ArrowLeft className="h-5 w-5" />
+      </button>
+    ) : null;
+    return (
+      <div
+        ref={editorRootRef}
+        tabIndex={-1}
+        data-phone-editor={phoneLandscape ? 'landscape' : 'portrait'}
+        className="relative flex h-full min-h-0 w-full flex-col overflow-hidden bg-black text-foreground outline-none"
+      >
+        <style>{DAN_HANDS_CSS}</style>
+        {!phoneLandscape ? (
+          <div className="flex shrink-0 items-center gap-1 border-b border-border bg-background px-1" style={{ height: HEAD }}>
+            {backButton}
+            <div className="min-w-0 flex-1 truncate px-1 text-sm font-semibold">{title || '作品'}</div>
+            {menuButton}
+          </div>
+        ) : null}
+        <div
+          ref={previewAreaRef}
+          data-phone-preview
+          className={`flex items-center justify-center overflow-hidden bg-black ${phoneLandscape ? 'absolute inset-y-0 left-0' : 'relative w-full shrink-0'}`}
+          style={phoneLandscape ? { right: phoneChatOpen && phoneChat ? 'min(420px, 50vw)' : 0 } : { height: videoH }}
+        >
+          {stageNode}
+          <PhoneSwipeSurface
+            ctl={phoneScrub}
+            liveTimeRef={liveTimeRef}
+            duration={contentDuration || 0}
+            onSeek={seekTimeline}
+            playing={playing}
+            setPlaying={phoneSetPlaying}
+            onTap={() => { if (phoneLandscape) setPhoneControls((v) => !v); else togglePlay(); }}
+          />
+          {phoneLandscape && phoneControls ? (
+            <div className="pointer-events-none absolute inset-0 z-30 text-white" data-phone-overlay>
+              <div className="pointer-events-auto absolute inset-x-0 top-0 flex items-center gap-1 bg-gradient-to-b from-black/70 to-transparent px-2 pb-6 pt-2">
+                {backButton}
+                <div className="min-w-0 flex-1 truncate px-1 text-sm font-semibold">{title || '作品'}</div>
+                {chatButton}
+                {menuButton}
+              </div>
+              <button
+                type="button"
+                data-phone-play
+                onClick={togglePlay}
+                className="pointer-events-auto absolute left-1/2 top-1/2 flex h-16 w-16 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/45"
+                aria-label={playing ? '一時停止' : '再生'}
+              >
+                {playIcon(true)}
+              </button>
+              <div className="pointer-events-auto absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-3 pb-2 pt-6">
+                <PhoneTime ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} className="mb-1 block font-mono text-xs tabular-nums text-white/90" />
+                <PhoneTimeline lanes={phoneLanes} ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} height={56} dark />
+              </div>
+            </div>
+          ) : null}
+        </div>
+        {!phoneLandscape ? (
+          <div className="flex shrink-0 items-center gap-2 border-b border-border bg-background px-2" style={{ height: CTRL }}>
+            <button type="button" data-phone-play onClick={togglePlay} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-foreground" aria-label={playing ? '一時停止' : '再生'}>
+              {playIcon(false)}
+            </button>
+            <PhoneTime ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} className="min-w-0 flex-1 font-mono text-sm tabular-nums text-muted-foreground" />
+            {chatButton}
+          </div>
+        ) : null}
+        {!phoneLandscape && !phoneChatOpen ? (
+          <div className="min-h-0 flex-1 bg-background pt-2">
+            <PhoneTimeline lanes={phoneLanes} ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} height={stripH} maxLane={22} />
+            <div className="px-3 pt-2 text-[11px] text-muted-foreground">指で左右に送ると再生位置が動きます。映像の上をなぞっても動きます。2本指で広げると細かく見られます。</div>
+          </div>
+        ) : null}
+        {phoneChat ? (
+          <div
+            data-phone-chat
+            className={`${phoneChatOpen ? 'flex' : 'hidden'} min-h-0 flex-col bg-background ${phoneLandscape ? 'absolute bottom-0 right-0 top-0 z-40 border-l border-border' : 'flex-1'}`}
+            style={phoneLandscape ? { width: 'min(420px, 50vw)' } : undefined}
+          >
+            <div className="min-h-0 flex-1">{phoneChat}</div>
+          </div>
+        ) : null}
+        {phoneMenuOpen ? (
+          <div className="fixed inset-0 z-[70] flex items-end bg-black/50" onClick={() => setPhoneMenuOpen(false)} data-phone-menu-sheet>
+            <div className="max-h-[80%] w-full overflow-y-auto rounded-t-2xl bg-background p-3 text-foreground" onClick={(e) => e.stopPropagation()}>
+              <div className="mb-2 flex gap-2">
+                <Button variant="outline" className="flex-1" onClick={() => { undo(); }}>
+                  <Undo2 className="mr-1 h-4 w-4" />元に戻す
+                </Button>
+                <Button variant="outline" className="flex-1" onClick={() => { redo(); }}>
+                  <Redo2 className="mr-1 h-4 w-4" />やり直す
+                </Button>
+              </div>
+              {headerTools ? <div className="mb-2">{headerTools}</div> : null}
+              <Button variant="ghost" className="w-full" onClick={() => setPhoneMenuOpen(false)}>閉じる</Button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+  if (compact) return phoneView();
+
   return (
     <div
       ref={editorRootRef}
@@ -4513,6 +5011,7 @@ export function VideoReviewEditor({
             <div className="truncate text-sm font-semibold">{title || 'Dan Review Editor'}</div>
             {title ? null : <div className="truncate text-xs text-muted-foreground">{videoPath || videoUrl || 'No video selected'}</div>}
           </div>
+          {headerTools}
           <Button variant="ghost" size="sm" onClick={undo} title="元に戻す (Ctrl+Z)">
             <Undo2 className="h-4 w-4" />
           </Button>
@@ -4558,306 +5057,7 @@ export function VideoReviewEditor({
                   onSetPlaying={(p) => setPlaying(p)}
                 />
               ) : null}
-              {previewTopLeft && !previewFullscreen ? (
-                <div className="absolute left-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto">
-                  {previewTopLeft}
-                </div>
-              ) : null}
-              <div
-                ref={stageRef}
-                className={`relative h-full max-h-full max-w-full overflow-hidden ${nativeShell ? '' : 'bg-black'}`}
-                style={{ aspectRatio: previewAspect }}
-                onContextMenu={(event) => event.preventDefault()}
-              >
-                {nativeShell ? (
-                  // native engine composites the real video BELOW this transparent stage (the page
-                  // is transparent here so it shows through); the web CaptionLayer renders on top,
-                  // synced to the playhead. Anything opaque here would hide the video, so only the
-                  // (transparent) caption overlay is drawn.
-                  renderCaptions.length && stageCssW > 0 ? (
-                    <div className="pointer-events-none absolute inset-0 overflow-hidden">
-                      <div style={{ transformOrigin: 'top left', transform: `scale(${stageCssW / captionDims.w})` }}>
-                        <CaptionLayer outW={captionDims.w} outH={captionDims.h} captions={renderCaptions} time={currentTime} />
-                      </div>
-                    </div>
-                  ) : null
-                ) : (
-                  <TimelinePreview
-                    sequence={editSequence}
-                    assets={stableSequenceAssets || EMPTY_ASSETS}
-                    blurRegionsAt={blurRegionsAt}
-                    currentTime={currentTime}
-                    seekRev={seekRev}
-                    playing={playing}
-                    format={editSequence?.format || initialSequence?.format || '9:16'}
-                    onTimeChange={handlePreviewTime}
-                    onEnded={handlePreviewEnded}
-                    className="h-full w-full"
-                    selectedClipId={selectedSequenceClipId}
-                    onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
-                    onTransformChange={(clipId, transform) => {
-                      // 動き（キーフレーム）がある時は、再生位置のキーを動かす（無ければ足す）
-                      const c = allSequenceClips.find((x) => x.id === clipId);
-                      const ks = c ? sortedKeys(c) : [];
-                      if (c && ks.length) updateSequenceClip(clipId, { motion_keys: setKeyAt(ks, currentTime - c.timeline_start, transform, Number((editSequence as { frame_rate?: number } | null)?.frame_rate) || 30) });
-                      else updateSequenceClip(clipId, { transform });
-                    }}
-                    onPick={(clipId) => { if (clipId) selectSequenceClip(clipId); else clearSelection(); }}
-                    onCaptionMove={(clipId, nudge) => {
-                      const c = allSequenceClips.find((x) => x.id === clipId);
-                      updateSequenceClip(clipId, { style: { ...((c?.style || {}) as Record<string, unknown>), x: nudge.x, y: nudge.y } } as Partial<SequenceClip>);
-                    }}
-                    rate={playRate}
-                  />
-                )}
-                {playing && playRate !== 1 ? (
-                  <div className="pointer-events-none absolute right-2 top-2 z-30 rounded bg-black/70 px-2 py-0.5 text-sm font-semibold text-white" data-testid="play-rate">
-                    {playRate}倍速
-                  </div>
-                ) : null}
-                {/* Browser only: in the desktop app the NATIVE engine composites the pop-out
-                    (same clock = no drift, replaces the wipe). See project_production_native_rewrite_intent.
-                    Two hidden videos (color + matte-as-luma, both HW-decoded H.264) are merged on
-                    the canvas — see the draw effect above. */}
-                {!nativeShell && activePopout ? (
-                  <>
-                    <svg width="0" height="0" className="absolute" aria-hidden>
-                      <filter id="dan-popout-luma-alpha"><feColorMatrix type="luminanceToAlpha" /></filter>
-                    </svg>
-                    <video
-                      key={activePopout.url}
-                      ref={popoutVideoRef}
-                      src={activePopout.url}
-                      muted
-                      playsInline
-                      preload="auto"
-                      onCanPlay={() => {
-                        // prime a decoded frame (a never-played <video> has none for the canvas to
-                        // draw), then honor the current play state so it still stops with the main.
-                        const v = popoutVideoRef.current;
-                        if (v) v.play().then(() => { if (!playingRef.current) v.pause(); }).catch(() => {});
-                      }}
-                      className="pointer-events-none absolute h-px w-px opacity-0"
-                    />
-                    <video
-                      key={activePopout.alphaUrl}
-                      ref={popoutAlphaRef}
-                      src={activePopout.alphaUrl}
-                      muted
-                      playsInline
-                      preload="auto"
-                      onCanPlay={() => {
-                        const v = popoutAlphaRef.current;
-                        if (v) v.play().then(() => { if (!playingRef.current) v.pause(); }).catch(() => {});
-                      }}
-                      className="pointer-events-none absolute h-px w-px opacity-0"
-                    />
-                    <canvas
-                      ref={popoutCanvasRef}
-                      className="pointer-events-none absolute z-10"
-                      style={{
-                        left: `${activePopout.pos.x * 100}%`,
-                        top: `${activePopout.pos.y * 100}%`,
-                        width: `${activePopout.pos.width * 100}%`,
-                        height: `${activePopout.pos.height * 100}%`,
-                      }}
-                    />
-                  </>
-                ) : null}
-                {/* pop-out bake progress: 0→100% HUD over the card position while the person is
-                    being matted. This DOM layer sits above the native video in the app too, so
-                    the bar is visible in both. */}
-                {(() => {
-                  const entry = allSequenceClips
-                    .map((c) => ({ c, st: popoutPreviews[String(c.id)] }))
-                    .find(({ st }) => st?.preparing);
-                  if (!entry) return null;
-                  const box = popoutBox(entry.c);
-                  const pct = Math.max(0, Math.min(100, entry.st?.progress ?? 0));
-                  return (
-                    <div
-                      className="pointer-events-none absolute z-20 flex items-center justify-center"
-                      style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }}
-                    >
-                      <div className="w-3/4 max-w-[260px] rounded-md bg-black/70 px-3 py-2 text-center">
-                        <div className="mb-1 text-[10px] text-white">飛び出しを生成中… {pct}%</div>
-                        <div className="h-1.5 w-full overflow-hidden rounded bg-white/20">
-                          <div className="h-full rounded bg-sky-400 transition-[width] duration-500" style={{ width: `${pct}%` }} />
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                <div
-                  className={`absolute ${tool === 'select' ? 'pointer-events-none' : 'pointer-events-auto'}`}
-                  style={videoContentStyle}
-                  onPointerDown={handlePointerDown}
-                  onPointerMove={handlePointerMove}
-                  onPointerUp={handlePointerUp}
-                  onPointerLeave={handlePointerUp}
-                />
-                <div className="pointer-events-none absolute" style={videoContentStyle}>
-                  {annotations.filter(isActiveAnnotation).map((a) => {
-                    if (a.kind === 'rect') {
-                      const bd = (a.data || {}) as { track?: boolean; track_boxes?: Record<string, number[]>; keyframes?: Keyframe[]; kfMode?: boolean };
-                      // box position priority: manual keyframes > OCR track path > static box.
-                      const kf = a.intent === 'blur' && bd.keyframes && bd.keyframes.length ? keyframeBoxAt(bd.keyframes, currentTime) : null;
-                      const tracked = !kf && a.intent === 'blur' && bd.track ? trackedBoxAt(bd.track_boxes, currentTime) : null;
-                      const isKf = a.intent === 'blur' && !!bd.kfMode;
-                      const selectedThis = selectedIds.includes(a.id);
-                      const editable = isKf && selectedThis;
-                      return (
-                        <button
-                          key={a.id}
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            selectAnnotation(a.id, e.shiftKey || e.ctrlKey || e.metaKey);
-                          }}
-                          onPointerDown={editable ? (e) => startBlurBoxDrag(e, a, 'move') : undefined}
-                          className={`pointer-events-auto absolute ${
-                            // Only show the outline when SELECTED — an unselected region needs no
-                            // chrome (the blur itself is already painted on the canvas). Still
-                            // clickable (transparent) so it can be picked.
-                            selectedThis
-                              ? `border-2 border-yellow-300 ${a.intent === 'blur' ? '' : 'bg-red-500/15'}`
-                              : 'border-0 bg-transparent'
-                          } ${editable ? 'cursor-move' : ''}`}
-                          style={{
-                            // The blur itself is painted on the canvas (TimelinePreview blurRegions),
-                            // so this is just a thin selectable outline — NO backdrop-filter (which
-                            // flickered when the canvas repainted).
-                            ...rectStyle(kf || tracked || a.data),
-                          }}
-                          title={a.note || a.intent}
-                        >
-                          {editable ? (
-                            <span
-                              onPointerDown={(e) => startBlurBoxDrag(e, a, 'resize')}
-                              className="absolute -bottom-1 -right-1 h-3 w-3 cursor-nwse-resize rounded-sm border border-yellow-300 bg-yellow-300/80"
-                            />
-                          ) : null}
-                        </button>
-                      );
-                    }
-                    if (a.kind === 'marker') {
-                      const p = a.data.point as Point | undefined;
-                      if (!p) return null;
-                      return (
-                        <button
-                          key={a.id}
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            selectAnnotation(a.id, e.shiftKey || e.ctrlKey || e.metaKey);
-                          }}
-                          className={`pointer-events-auto absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 ${
-                            selectedIds.includes(a.id) ? 'border-yellow-300 bg-yellow-300'
-                              : (() => { const j = instrJobOf(a, instrJobs); return !j ? 'border-orange-300 bg-orange-400' : j.active ? 'animate-pulse border-amber-200 bg-amber-400' : j.state === 'completed' ? 'border-emerald-300 bg-emerald-400' : 'border-red-300 bg-red-500'; })()
-                          }`}
-                          style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%` }}
-                          title={a.note || a.intent}
-                        />
-                      );
-                    }
-                    return null;
-                  })}
-                  {pendingAnnotation?.kind === 'rect' && isActiveAnnotation(pendingAnnotation) ? (
-                    <div className="absolute border-2 border-orange-300 bg-orange-500/20" style={rectStyle(pendingAnnotation.data)} />
-                  ) : null}
-                  {pendingAnnotation?.kind === 'marker' && isActiveAnnotation(pendingAnnotation) && (pendingAnnotation.data.point as Point | undefined) ? (
-                    <div
-                      className="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-orange-300 bg-orange-400"
-                      style={{
-                        left: `${((pendingAnnotation.data.point as Point).x || 0) * 100}%`,
-                        top: `${((pendingAnnotation.data.point as Point).y || 0) * 100}%`,
-                      }}
-                    />
-                  ) : null}
-                  <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-                    {annotations
-                      .filter((a) => a.kind === 'freehand')
-                      .filter(isActiveAnnotation)
-                      .map((a) => {
-                        const points = (a.data.points as Point[] | undefined) || [];
-                        const d = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ');
-                        return (
-                          <path
-                            key={a.id}
-                            d={d}
-                            fill="none"
-                            stroke={selectedIds.includes(a.id) ? '#fde047' : '#38bdf8'}
-                            strokeWidth="0.7"
-                            vectorEffect="non-scaling-stroke"
-                          />
-                        );
-                      })}
-                    {draftPath && (
-                      <path
-                        d={draftPath.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ')}
-                        fill="none"
-                        stroke="#f97316"
-                        strokeWidth="0.7"
-                        vectorEffect="non-scaling-stroke"
-                      />
-                    )}
-                    {pendingAnnotation?.kind === 'freehand' && isActiveAnnotation(pendingAnnotation) && (
-                      <path
-                        d={((pendingAnnotation.data.points as Point[] | undefined) || []).map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ')}
-                        fill="none"
-                        stroke="#fb923c"
-                        strokeWidth="0.9"
-                        vectorEffect="non-scaling-stroke"
-                      />
-                    )}
-                    {typePicker?.kind === 'freehand' && (
-                      <path
-                        d={((typePicker.data.points as Point[] | undefined) || []).map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ')}
-                        fill="none"
-                        stroke="#fb923c"
-                        strokeWidth="0.9"
-                        strokeDasharray="2 1.5"
-                        vectorEffect="non-scaling-stroke"
-                      />
-                    )}
-                  </svg>
-                  {draftRectStyle && (
-                    <div className="absolute border-2 border-orange-400 bg-orange-500/15" style={draftRectStyle} />
-                  )}
-                  {typePicker ? (
-                    <>
-                      {typePicker.kind === 'rect' ? (
-                        <div className="absolute border-2 border-dashed border-orange-300 bg-orange-500/15" style={rectStyle(typePicker.data)} />
-                      ) : null}
-                      <div
-                        className="pointer-events-auto absolute z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-white/15 bg-neutral-900/95 p-1 shadow-xl"
-                        style={{ left: `${clamp(typePicker.cx, 0.08, 0.92) * 100}%`, top: `${clamp(typePicker.cy, 0.04, 0.96) * 100}%` }}
-                        onPointerDown={(e) => e.stopPropagation()}
-                      >
-                        {RECT_INTENTS.map((it) => (
-                          <button
-                            key={it.value}
-                            type="button"
-                            className="rounded px-2 py-1 text-xs font-medium text-white hover:bg-white/20"
-                            onClick={() => {
-                              commitAnnotation({ kind: typePicker.kind, label: it.value, data: typePicker.data }, it.value);
-                              setTypePicker(null);
-                            }}
-                          >
-                            {it.label}
-                          </button>
-                        ))}
-                        <button type="button" className="px-1 text-white/50 hover:text-white" title="取消" onClick={() => setTypePicker(null)}>
-                          ✕
-                        </button>
-                      </div>
-                    </>
-                  ) : null}
-                  {/* Captions are composited by TimelinePreview onto the canvas (matches the
-                      final render); no separate HTML overlay needed here. */}
-                </div>
-              </div>
+              {stageNode}
             </div>
             {showInspector && !compact ? (
             <aside className="flex w-[360px] shrink-0 flex-col overflow-y-auto border-l border-border bg-background" aria-label="選んだ物の調整">

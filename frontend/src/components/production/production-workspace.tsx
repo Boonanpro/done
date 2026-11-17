@@ -129,8 +129,11 @@ export function ProductionWorkspace({
   roomId,
   onContentChange,
   compact = false,
+  phoneChat,
 }: {
   roomId: string;
+  /** スマホの形のエディターで、タイムラインと入れ替えて出す会話の欄 */
+  phoneChat?: ReactNode;
   /** スマホの幅: ライブラリは作品の一覧だけを1列で、エディターは畳んだ形で出す */
   compact?: boolean;
   /** ライブラリの真ん中に大きく置く「ダンと制作」の会話（制作の窓だけが渡す） */
@@ -149,7 +152,17 @@ export function ProductionWorkspace({
   const [jobs, setJobs] = useState<ProductionJob[]>([]);
   const [jobEvents, setJobEvents] = useState<ProductionJobEvent[]>([]);
   const [activeVideoAssetId, setActiveVideoAssetId] = useState<string | null>(null);
-  const [assetsOpen, setAssetsOpen] = useState(false); // 使用素材（プレビュー左上）も折りたたみ既定
+  const [assetsOpen, setAssetsOpen] = useState(false); // 使用素材（上のボタンの並び・スマホはメニューの中）。折りたたみ既定
+  const assetsWrapRef = useRef<HTMLDivElement | null>(null);
+  // PC の使用素材の一覧は、外を押すと閉じる（素材をタイムラインへ引きずる間は閉じない）
+  useEffect(() => {
+    if (!assetsOpen || compact) return;
+    const onDown = (event: PointerEvent) => {
+      if (assetsWrapRef.current && !assetsWrapRef.current.contains(event.target as Node)) setAssetsOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown);
+    return () => document.removeEventListener('pointerdown', onDown);
+  }, [assetsOpen, compact]);
 
   const hasProcessing = useMemo(() => assets.some((a) => a.status === 'processing'), [assets]);
   const selectedContentAssets = useMemo(
@@ -690,71 +703,68 @@ export function ProductionWorkspace({
         initialAnnotations={(selectedContent.timeline?.annotations as ReviewAnnotation[] | undefined) || undefined}
         initialSequence={(selectedContent.timeline?.sequence as EditSequence | undefined) || undefined}
         sequenceAssets={sequencePictureAssets(selectedContent, assets).map(sequenceAssetForEditor)}
-        previewTopLeft={
-          assetsOpen ? (
-            <div className="w-72 rounded-md border border-border bg-background/95 shadow-lg backdrop-blur">
-              <button
-                type="button"
-                onClick={() => setAssetsOpen(false)}
-                className="flex w-full items-center justify-between px-3 py-2 text-sm font-medium text-foreground"
-              >
-                <span>使用素材（{selectedSourceAssets.length}）</span>
-                <span className="text-xs text-muted-foreground">▲</span>
-              </button>
-              <div className="max-h-[50vh] overflow-y-auto px-2 pb-2">
-                <div className="grid grid-cols-2 gap-2">
-                  {selectedSourceAssets.map((asset) => (
-                    <div
-                      key={asset.id}
-                      draggable={asset.kind === 'video'}
-                      onDragStart={(event) => {
-                        if (asset.kind !== 'video') return;
-                        // payload shape matches the editor's ASSET_DND_TYPE consumer
-                        const payload = {
-                          id: asset.id,
-                          kind: asset.kind,
-                          duration: asset.metadata?.duration,
-                          label: asset.filename || asset.original_uri,
-                        };
-                        event.dataTransfer.setData('application/x-dan-asset', JSON.stringify(payload));
-                        event.dataTransfer.effectAllowed = 'copy';
-                        // dataTransfer.getData is unreadable during dragover, so expose the asset
-                        // (for the timeline's live drop-preview ghost) via window until dragend.
-                        (window as unknown as { __danDragAsset?: typeof payload }).__danDragAsset = payload;
-                      }}
-                      onDragEnd={() => {
-                        delete (window as unknown as { __danDragAsset?: unknown }).__danDragAsset;
-                      }}
-                      title={asset.kind === 'video' ? 'ドラッグでタイムラインに追加' : undefined}
-                      className={`overflow-hidden rounded border border-border bg-muted/30 ${asset.kind === 'video' ? 'cursor-grab active:cursor-grabbing' : ''}`}
-                    >
-                      <div className="flex aspect-video items-center justify-center bg-muted">
-                        {asset.thumbnail_url || asset.kind === 'video' || asset.kind === 'image' ? (
-                          <img src={asset.thumbnail_url || assetThumbBase(asset)} alt="" loading="lazy" className="pointer-events-none h-full w-full object-cover" />
-                        ) : (
-                          <Film className="h-5 w-5 text-muted-foreground" />
-                        )}
-                      </div>
-                      <div className="p-1.5">
-                        <div className="truncate text-[11px] font-medium">{asset.filename || asset.original_uri}</div>
-                        <div className="mt-0.5 text-[10px] text-muted-foreground">{asset.kind} / {formatDuration(asset.metadata?.duration)}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : (
+        phoneChat={phoneChat}
+        headerTools={
+          <div ref={assetsWrapRef} className={compact ? '' : 'relative'}>
             <button
               type="button"
-              onClick={() => setAssetsOpen(true)}
-              className="flex items-center gap-1.5 rounded-md border border-border bg-background/90 px-3 py-1.5 text-xs font-medium text-foreground shadow backdrop-blur hover:bg-muted"
+              data-assets-toggle
+              onClick={() => setAssetsOpen((v) => !v)}
+              className={`flex items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium text-foreground hover:bg-muted ${compact ? 'h-10 w-full justify-between text-sm' : 'h-8'} ${assetsOpen ? 'bg-muted' : 'bg-background'}`}
             >
-              <Film className="h-3.5 w-3.5" />
-              使用素材（{selectedSourceAssets.length}）
-              <span className="text-muted-foreground">▼</span>
+              <span className="flex items-center gap-1.5"><Film className="h-3.5 w-3.5" />使用素材（{selectedSourceAssets.length}）</span>
+              <span className="text-muted-foreground">{assetsOpen ? '▲' : '▼'}</span>
             </button>
-          )
+            {assetsOpen ? (
+              <>
+                <div
+                  data-assets-panel
+                  className={compact ? 'mt-2 max-h-[45vh] overflow-y-auto' : 'absolute right-0 top-full z-50 mt-2 max-h-[60vh] w-80 overflow-y-auto rounded-md border border-border bg-background p-2 shadow-lg'}
+                >
+                <div className="grid grid-cols-2 gap-2">
+                    {selectedSourceAssets.map((asset) => (
+                      <div
+                        key={asset.id}
+                        draggable={asset.kind === 'video'}
+                        onDragStart={(event) => {
+                          if (asset.kind !== 'video') return;
+                          // payload shape matches the editor's ASSET_DND_TYPE consumer
+                          const payload = {
+                            id: asset.id,
+                            kind: asset.kind,
+                            duration: asset.metadata?.duration,
+                            label: asset.filename || asset.original_uri,
+                          };
+                          event.dataTransfer.setData('application/x-dan-asset', JSON.stringify(payload));
+                          event.dataTransfer.effectAllowed = 'copy';
+                          // dataTransfer.getData is unreadable during dragover, so expose the asset
+                          // (for the timeline's live drop-preview ghost) via window until dragend.
+                          (window as unknown as { __danDragAsset?: typeof payload }).__danDragAsset = payload;
+                        }}
+                        onDragEnd={() => {
+                          delete (window as unknown as { __danDragAsset?: unknown }).__danDragAsset;
+                        }}
+                        title={asset.kind === 'video' ? 'ドラッグでタイムラインに追加' : undefined}
+                        className={`overflow-hidden rounded border border-border bg-muted/30 ${asset.kind === 'video' ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                      >
+                        <div className="flex aspect-video items-center justify-center bg-muted">
+                          {asset.thumbnail_url || asset.kind === 'video' || asset.kind === 'image' ? (
+                            <img src={asset.thumbnail_url || assetThumbBase(asset)} alt="" loading="lazy" className="pointer-events-none h-full w-full object-cover" />
+                          ) : (
+                            <Film className="h-5 w-5 text-muted-foreground" />
+                          )}
+                        </div>
+                        <div className="p-1.5">
+                          <div className="truncate text-[11px] font-medium">{asset.filename || asset.original_uri}</div>
+                          <div className="mt-0.5 text-[10px] text-muted-foreground">{asset.kind} / {formatDuration(asset.metadata?.duration)}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : null}
+          </div>
         }
         sidePanelTop={
           latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') ? (
