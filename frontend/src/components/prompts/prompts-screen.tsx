@@ -5,7 +5,7 @@
 // 押すと全文がそのまま出て、その場で書き直せる。誰が読むか・いつ効くか・なぜある文か・履歴は全文の下にたたんである。
 // 使う所: /prompts（app/prompts/page.tsx）と、開発室のボードの「指示文」（artifacts/dev-lead）。
 // 裏側は app/api/prompts_screen.py、文の置き場所と履歴は app/services/prompt_store.py。
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -154,14 +154,14 @@ function Editor({ id, onBack, onSaved }: { id: string; onBack: () => void; onSav
   const [viewing, setViewing] = useState<PromptVersion | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
 
-  const load = useCallback(async () => {
-    setError('');
-    try {
-      const got = await promptsApi.item(id);
-      setItem(got); setDraft(got.text); setNote(''); setViewing(null);
-    } catch (err) { setError(errorText(err)); }
+  // 文が替わる時は呼ぶ側が key={id} で作り直すので、ここは開いた時に1回読むだけ
+  useEffect(() => {
+    let live = true;
+    promptsApi.item(id)
+      .then(got => { if (live) { setItem(got); setDraft(got.text); setNote(''); setViewing(null); } })
+      .catch(err => { if (live) setError(errorText(err)); });
+    return () => { live = false; };
   }, [id]);
-  useEffect(() => { setItem(null); void load(); }, [load]);
 
   // 欄の高さを中身に合わせる（全文がそのまま並び、欄の中で別にスクロールしない）
   useLayoutEffect(() => {
@@ -340,14 +340,16 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const detail = useRef<HTMLElement>(null);
   const list = useRef<HTMLElement>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const data = await promptsApi.list();
-      setPrompts(data.prompts); setError('');
-    } catch (err) { setError(errorText(err)); }
-    finally { setLoaded(true); }
-  }, []);
-  useEffect(() => { void load(); }, [load]);
+  const [round, setRound] = useState(0);   // 保存・戻すの後に一覧を読み直す
+  const load = () => setRound(n => n + 1);
+  useEffect(() => {
+    let live = true;
+    promptsApi.list()
+      .then(data => { if (live) { setPrompts(data.prompts); setError(''); } })
+      .catch(err => { if (live) setError(errorText(err)); })
+      .finally(() => { if (live) setLoaded(true); });
+    return () => { live = false; };
+  }, [round]);
 
   const byId = useMemo(() => new Map(prompts.map(p => [p.id, p])), [prompts]);
   const skills = useMemo(() => prompts.filter(p => p.id.startsWith('skill/')), [prompts]);
@@ -444,7 +446,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
         </aside>
         <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && 'hidden lg:block')}>
           {id ? (
-            <Editor id={id} onBack={() => onGo({ place })} onSaved={() => void load()} />
+            <Editor key={id} id={id} onBack={() => onGo({ place })} onSaved={load} />
           ) : (
             <p className="text-sm text-stone-500">左の一覧から文を選ぶと、ここに全文がそのまま出ます。</p>
           )}
