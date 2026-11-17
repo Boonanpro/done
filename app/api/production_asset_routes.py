@@ -9056,6 +9056,18 @@ def _content_cover(room_id: str, content_id: str) -> Path | None:
 async def content_cover(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
     """作品のタイムラインの頭の1コマ（JPEG）。中身が無い・描けない時は 404（画面は印を出す）。"""
     _room_dir(room_id)  # 400 on malformed room_id
+    from app.services import thumbnail_doc
+    content = next((c for c in _read_contents(room_id) if str(c.get("id")) == str(content_id)), None)
+    if thumbnail_doc.is_thumbnail(content):
+        # 部品で持つサムネは、その書き出しの絵（今の形を描いた物）
+        try:
+            tpath = await asyncio.get_running_loop().run_in_executor(None, thumbnail_doc.cover, room_id, content_id)
+        except Exception:
+            logger.exception("thumbnail cover failed %s", content_id)
+            tpath = None
+        if not tpath:
+            raise HTTPException(status_code=404, detail="no cover")
+        return FileResponse(tpath, media_type="image/png", headers={"Cache-Control": "private, max-age=604800"})
     try:
         path = await asyncio.get_running_loop().run_in_executor(None, _content_cover, room_id, content_id)
     except Exception:
@@ -9127,3 +9139,53 @@ def use_sfx_from_library(data: UseSfxRequest, current_user: TokenData = Depends(
         return editor_instructions.use_sfx(data.room_id, data.source_room_id, data.source_asset_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ── 部品で持つサムネ（app/services/thumbnail_doc.py）─────────────────────────────────────────
+
+class ThumbnailSaveRequest(BaseModel):
+    doc: dict[str, Any]
+
+
+@router.get("/contents/{content_id}/thumbnail")
+def get_thumbnail_doc(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        return {"doc": thumbnail_doc.get(room_id, content_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.put("/contents/{content_id}/thumbnail")
+def save_thumbnail_doc(content_id: str, data: ThumbnailSaveRequest, room_id: str = Query(...),
+                       current_user: TokenData = Depends(get_current_user)):
+    """エディターでの本人の手の直し（つかんで動かす・文字を打ち直す・色を変える）。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        doc = thumbnail_doc.save(room_id, content_id, data.doc, "owner")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"rev": doc["rev"]}
+
+
+@router.post("/contents/{content_id}/thumbnail/export")
+async def export_thumbnail(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    """1280×720 の PNG に書き出す（エディターと同じ描き方）。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, thumbnail_doc.export, room_id, content_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/contents/{content_id}/thumbnail/export.png")
+def thumbnail_export_file(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    p = _room_dir(room_id) / "thumbnails" / content_id / "export.png"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="まだ書き出していません")
+    return FileResponse(p, media_type="image/png", filename=f"thumbnail-{content_id[:8]}.png")

@@ -200,6 +200,9 @@ async def send(user_id: str, asset_room_id: str, content_id: str, ann: dict[str,
     if not content:
         raise ValueError('作品が見つかりません')
     room = await editor_rooms.ensure_room(user_id, asset_room_id, content_id)
+    from app.services import thumbnail_doc
+    if thumbnail_doc.is_thumbnail(content):
+        return await _send_thumbnail(user_id, asset_room_id, content_id, content, room, ann)
     # 長い作品では完成画面を1枚描くのに十数秒かかる。本人を待たせないよう、作業は先に始め、絵は裏で描く
     # （作業の側が Claude を立ち上げて読みに来るまでに、ほとんどの場合できている）
     dest = frame_path(asset_room_id, ann)
@@ -209,6 +212,85 @@ async def send(user_id: str, asset_room_id: str, content_id: str, ann: dict[str,
     task = build_task(ann, str(content.get('title') or content_id), str(dest) if dest else None, _previous(user_id, ann))
     job = await parallel_job_runner.start(room['room_id'], user_id, task, title=_title(ann), quiet=True)
     return {'job_id': job['id'], 'room_id': room['room_id'], 'state': job.get('state'), 'image': str(dest) if dest else None}
+
+
+# ── サムネへの書き込み指示（app/services/thumbnail_doc.py）──────────────────────────────────
+# 本人がサムネの上にペンで丸・矢印・落書きを描き、一言添えて送る。ダンは「動かす・大きさ・色・文字」の話なら部品の
+# 数値を直し、「絵を変える」話ならその範囲だけを描き直す。結果は指示の欄にだけ出す（チャットには出さない）。
+
+def thumb_marks_path(room_id: str, ann: dict[str, Any]) -> Path:
+    from app.api import production_asset_routes as par
+    safe = ''.join(ch for ch in str(ann.get('id') or uuid.uuid4().hex[:8]) if ch.isalnum() or ch in '-_')[:60]
+    return par._room_dir(room_id) / 'instructions' / f"{safe}.png"
+
+
+def _thumb_marks_image(room_id: str, content_id: str, ann: dict[str, Any], dest: Path) -> None:
+    from app.services import thumbnail_doc
+    data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
+    try:
+        tmp = dest.with_suffix('.tmp.png')
+        thumbnail_doc.render(room_id, content_id, tmp, marks=data.get('marks') or [], out_w=1920)
+        tmp.replace(dest)
+    except Exception:  # noqa: BLE001 — 絵が無くても指示は送る
+        logger.exception('thumbnail marks image failed')
+
+
+def build_thumb_task(ann: dict[str, Any], content: dict[str, Any], asset_room_id: str, image: str,
+                     previous: dict[str, Any] | None = None) -> str:
+    data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
+    note = str(ann.get('note') or '').strip()
+    box = data.get('box') or []
+    cid = str(content.get('id'))
+    parts = data.get('parts_under') or []
+    lines = [
+        f"本人がエディターでサムネ「{content.get('title') or cid}」の上にペンで書き込んで送った直しの指示（チャットには書いていない）。",
+        f"- 指示の言葉: 「{note}」" if note else "- 指示の言葉: （無し。書き込みの形から読み取る）",
+        f"- 書き込みを描いたサムネの絵: {image}（Read で開ける。赤い線が本人の書き込み。裏で描いているので、無ければ数秒待つ）",
+    ]
+    if len(box) == 4:
+        lines.append(f"- 書き込みの範囲（サムネの画素、幅{content.get('timeline', {}).get('thumbnail', {}).get('width', 1920)}基準）: "
+                     f"x={box[0]:.0f} y={box[1]:.0f} 幅={box[2]:.0f} 高さ={box[3]:.0f}")
+    if parts:
+        lines.append(f"- 書き込みの下にある部品（手前から）: {', '.join(str(p) for p in parts)}")
+    if data.get('selected'):
+        lines.append(f"- 本人がその時に選んでいた部品: {data.get('selected')}")
+    lines += [
+        "",
+        "このサムネは部品（背景・人物・文字・矢印など）で持っている。直すのは scripts/thumb.py（mcp__timeline は使わない）:",
+        f"- 部品の一覧: python scripts/thumb.py show {asset_room_id} {cid}",
+        f"- 数値を直す（位置・大きさ・色・文字・縁・書体・順番・隠す）: python scripts/thumb.py set {asset_room_id} {cid} <部品id> x=… size=… fill=#ffe400 text=…",
+        f"- 絵の中身を変える頼み（顔の表情・物を足す・消す）は、その絵の部品の範囲だけを描き直す: "
+        f"python scripts/thumb.py repaint {asset_room_id} {cid} <絵の部品id> --box x,y,w,h --prompt \"…\"（範囲の外は変わらない）",
+        f"- 直した結果を見る: python scripts/thumb.py render {asset_room_id} {cid}（PNG の場所が出る。Read で開いて確かめる）",
+        "本人のエディターは保存した瞬間に読み直すので、数値の直しはすぐ本人の目の前で変わる。動かす・大きさ・色・文字の話は、"
+        "描き直しを使わずに数値で直す（速く、ほかの所が変わらない）。指示の範囲の外は触らない。",
+        "最後の返事は、本人に見せる言葉で1〜2文（何をどう直したか）。返事はエディターのこの指示の欄にだけ出て、チャットには出ない。",
+    ]
+    if previous:
+        lines[1:1] = [
+            "- この指示は、前に送った指示の書き直し。前の回の直しでは本人が満足していない。前の回の結果を土台に、足りない所を直す。",
+            f"- 前の回の指示: 「{previous.get('note') or '（読めなかった）'}」",
+            f"- 前の回の結果: {previous.get('result') or '（記録なし）'}",
+        ]
+    return '\n'.join(lines)
+
+
+async def _send_thumbnail(user_id: str, asset_room_id: str, content_id: str, content: dict[str, Any],
+                          room: dict[str, Any], ann: dict[str, Any]) -> dict[str, Any]:
+    import asyncio
+    from app.services import parallel_job_runner
+    dest = thumb_marks_path(asset_room_id, ann)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.unlink(missing_ok=True)
+    asyncio.get_running_loop().run_in_executor(None, _thumb_marks_image, asset_room_id, content_id, dict(ann), dest)
+    task = build_thumb_task(ann, content, asset_room_id, str(dest), _previous_thumb(user_id, ann))
+    note = str(ann.get('note') or '').strip().replace('\n', ' ')
+    job = await parallel_job_runner.start(room['room_id'], user_id, task, title=f"サムネ {note}"[:40], quiet=True)
+    return {'job_id': job['id'], 'room_id': room['room_id'], 'state': job.get('state'), 'image': str(dest)}
+
+
+def _previous_thumb(user_id: str, ann: dict[str, Any]) -> dict[str, Any] | None:
+    return _previous(user_id, ann)
 
 
 def states(user_id: str, job_ids: list[str]) -> list[dict[str, Any]]:
