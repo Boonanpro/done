@@ -57,6 +57,10 @@ const nextConfig: NextConfig = {
     return config;
   },
   experimental: {
+    // Next 16.4 は、AI が build・dev を動かしていると見ると、更新のお知らせを出して1回目を止める（exit 1）。
+    // 本番の作り直し（frontend_prod.py）は毎回新しい出力先を使うので「2回目は通す」印が効かず、毎回止まっていた
+    // （2026-11-17）。Next の更新は別の作業として判断して入れる。
+    agentUpgrade: false,
     // middleware(proxy) があると Next がリクエストボディをバッファし、
     // デフォルト10MBで打ち切る（超過分は欠落→バックエンドへのproxyが
     // socket hang up で 500 になる）。チャット添付はバックエンド側が

@@ -26,6 +26,7 @@ import json
 import os
 import re
 import time
+from app.services import prompt_store
 
 ACK_DELAY_MS = 800        # the longest wait the API allows before it asks the speech model for an acknowledgement itself
 SETTLE_S = .35            # the owner's last words may still be arriving when the delegation is created
@@ -37,45 +38,18 @@ LUNA_ROUNDS = 8
 LUNA_SECONDS = 90
 TRANSCRIPT = '\n\n通話のここまでの文字起こし'   # the job's task head (the owner's words) is what the room's chat shows
 
-ROUTES = {
-    'status': '今動いている・さっき終わった作業や調べものの様子・進み具合・結果やその中身を知りたい（「今どう？」「まだ？」「どうなった？」「何してる？」「どこまでできた？」「もっと詳しく」）。新しい頼みは無い。',
-    'clock': '今の時刻・日付・曜日が要る（何時か、今日は何日か、あと何分あるか）。',
-    'calendar': '本人のカレンダーの予定を聞いている（今日・明日・今週・ある日の予定、空いている日）。',
-    'lookup': 'ウェブ・地図・ニュース・天気・店・商品・値段・営業時間・行き方・乗り換え・病気や体の症状などを調べて答える質問や候補探し。'
-              '本人について知っているか（保存した住所・番号・好きな食べ物などの好み）や、ダンとの過去の会話・作業の記録を思い出して答える質問もここ。予約サイトやログインが要るページの中を見る必要は無い。',
-    'show': 'この会話に出たページや、本人の成果物（〜室・サイトなど作ってあるもの）を画面に出して・見せて・開いてと頼んでいる。探すところからなら lookup。',
-    'site': 'サイトや本人のアカウントの中で確かめる・手続きする: 予約サイトの空き状況・予約・申し込み・注文・請求書の支払い・振込・解約、'
-            'Googleドキュメントやドライブ・メール・SNS・会員ページなど、ログインが要る所の中を探す・見る。',
-    'app': 'スマホやパソコンのアプリ・端末の設定を操作する（LINE・インスタのDMを開く・送る、スマホやパソコンの設定、画面が消える・スリープなど端末の動き）。',
-    'make': 'ダンの成果物（ページ・サイト・LP・動画・資料・プログラム）を作る・直す・続ける、時間のかかる制作や調べた結果のまとめ。',
-    'document': '本人の成果物の中の文書（X運用室の記事や投稿、台本室の台本）を書く・直す・開いて見せる・反映する・投稿する。画面でその成果物を開いて一緒に直す。',
-    'dan': 'ダン自身を直す・変える: ダンの通話や通話の画面・チャットの見え方、ダンの設定・動き方・話し方、ダンにつないだカレンダーやアカウントの扱い（つなぐ・外す・表示しない）。',
-    'message': '人へのメッセージやメールの下書きを作る・直す、画面に出ている下書きや画像を直す、送信の承認や取り消し（「送って」「いいよ」「やめて」）、'
-               '画像を作る、話を図や表にする、画面を上下に送る。',
-    'contact': '人（〜さん・取引先・お客さん）から連絡・メッセージ・返事が来ているか、届いたメッセージの中身・何の件かを知りたい（Chatwork・メール・LINEなど）。'
-               'その人への返事を書く・送るのは message。',
-    'rooms': '別の部屋（〜室・別のチャット）で動いている作業やテストの様子を聞く・止める。',
-    'end': 'この通話（電話）そのものを終える（「切って」「通話を終わります」「また後で」「忙しいから切って」）。作業やテストを止める話は end ではない。',
-    'other': '相談・雑談・考えや意見を聞きたい、ダンのできることや自己紹介、上のどれにも当てはまらない、いくつかの頼みが混ざっている、判断に迷う。',
-}
+# ROUTES: the text is ~/.dan/workspace/prompts/call/router-routes.md (seed app/prompts/seed/), read at each use (prompt_store).
 TO_CHAT_DAN = ('site', 'app', 'make', 'dan')
-ASK = ('通話で本人がダンに頼んだこと・聞いたことの行き先を1つ選ぶ。conversation の最後の本人の言葉が今の頼みで、それより前は文脈。'
-       '何の話かではなく、どこで・何を使ってやるかで選ぶ（美容院もレストランも、予約サイトで空きを見るなら site）。')
-WORK = {'status': '「{label}」の様子・進み具合・結果・番号などを聞いている（「まだ？」「どう？」「承認番号は？」）。',
-        'stop': '「{label}」を止める・取り消す・もういい・中止してと言っている。',
-        'change': '「{label}」への訂正・条件の追加・やり方の指示（どこで見るか・どのページ・別の候補・画面に出して・もう一度やって）。',
-        'new': '「{label}」とは別の新しい頼みや話。'}
+# ASK: the text is ~/.dan/workspace/prompts/call/router-ask.md (seed app/prompts/seed/), read at each use (prompt_store).
+# WORK: the text is ~/.dan/workspace/prompts/call/router-work.md (seed app/prompts/seed/), read at each use (prompt_store).
 # The owner's words only answer what Dan asked of him (a summons, a button to press): 「はい、押したよ」 after the LINE code
 # was routed as a new site job named 「はい、押したよ」, and a second job then did the same work (11/7 12:25).
-REPLY = {'reply': '直前のダンの言葉で本人が頼まれたこと（ボタンを押す・番号を入れる・承認する）を、やった・できた・入れた・聞こえた・わかったと短く返しているだけ。',
-         'request': 'それ以外。ダンにしてほしいこと・知りたいこと・伝えたい事情や気づいたことがある。ダンの提案や質問への「お願い」「いいよ」「合ってる」「それで」もこちら。'}
-CALENDAR = {'today': '今日の予定', 'tomorrow': '明日の予定', 'week': '今日から7日間の予定',
-            'other': 'それ以外の日・期間、または日が分からない'}
+# REPLY: the text is ~/.dan/workspace/prompts/call/router-reply.md (seed app/prompts/seed/), read at each use (prompt_store).
+# CALENDAR: the text is ~/.dan/workspace/prompts/call/router-calendar.md (seed app/prompts/seed/), read at each use (prompt_store).
 # Dan said he would do something and no request reached here: 「R630の公式ページへのリンクを入れて、先生宛てのメールを作り
 # 直すね。ちょっと待ってて」 (11/5 15:12) and nothing ran; the owner asked twice whether the mail was done, heard 「まだ」 and
 # waited 7 min. The promise is read at the end of Dan's turn, once he has been quiet PROMISE_QUIET_S.
-PROMISE = re.compile(r'(作り直す|作るね|作っとく|用意する|出すね|直すね|足すね|入れるね|調べる|調べてみる|確認する|確認してみる|探す|探してみる|見てみる|やるね|やっとく|'
-                     r'進める|取りかか|反映する|揃える|ちょっと待って|少し待って|待っててね|待ってて)')
+# PROMISE: the text is ~/.dan/workspace/prompts/call/router-promise-words.md (seed app/prompts/seed/), read at each use (prompt_store).
 ASKING = re.compile(r'(？|\?|くれる|ですか|でしょうか|かな|どれ|どの|合ってる|いい[？?]?$)')
 PROMISE_QUIET_S = 2.0
 PROMISE_TAIL = 70         # the promise is among the last characters of Dan's turn (not 「確認するね。…」 followed by the answer itself)
@@ -105,11 +79,11 @@ def questions(running, targets):
     """The route, the calendar span, the page to show, and for each running piece of work (newest four) what the owner's
     words do to it. Asked as one more question per work: as route options, corrections such as 「ホットペッパーで確認するんだって」
     went to a new site job, and 「でもこれ四十キロじゃん」 to a lookup (scripts/voice_route_eval.py, 38 of 50 at first)."""
-    out = {'route': {'type': 'choice', 'criteria': dict(ROUTES), 'instructions': ASK},
-           'reply': {'type': 'choice', 'criteria': REPLY, 'instructions': '最後の本人の言葉は、ダンにしてほしいことがあるのか、ダンに頼まれたことへの返事・報告だけか。'},
-           'calendar': {'type': 'choice', 'criteria': CALENDAR, 'instructions': '予定を聞いている時、どの期間か。'}}
+    out = {'route': {'type': 'choice', 'criteria': dict(_PROMPTS['ROUTES']()), 'instructions': _PROMPTS['ASK']()},
+           'reply': {'type': 'choice', 'criteria': _PROMPTS['REPLY'](), 'instructions': '最後の本人の言葉は、ダンにしてほしいことがあるのか、ダンに頼まれたことへの返事・報告だけか。'},
+           'calendar': {'type': 'choice', 'criteria': _PROMPTS['CALENDAR'](), 'instructions': '予定を聞いている時、どの期間か。'}}
     for i, work in enumerate(running[-4:]):
-        out[f'work_{i}'] = {'type': 'choice', 'criteria': {k: v.format(label=work['label']) for k, v in WORK.items()},
+        out[f'work_{i}'] = {'type': 'choice', 'criteria': {k: v.format(label=work['label']) for k, v in _PROMPTS['WORK']().items()},
                             'instructions': f'最後の本人の言葉が、今動いている「{work["label"]}」について何を言っているか。'}
     if targets:
         out['target'] = {'type': 'choice', 'criteria': {**targets, 'none': '上のどれでもない・分からない'},
@@ -231,7 +205,7 @@ class Router:
         if now - self.spoke.get('dan_words', now) < PROMISE_QUIET_S or self.dialogue.routing_until > now: return None
         self.promises.add(index)
         tail = history[index]['text'].strip()[-PROMISE_TAIL:]
-        if not PROMISE.search(tail) or ASKING.search(tail.split('。')[-1] or tail): return None
+        if not _PROMPTS['PROMISE']().search(tail) or ASKING.search(tail.split('。')[-1] or tail): return None
         if self.dialogue.delegated_at >= self.dialogue.heard_at - .5: return None
         if not any(t['role'] == 'user' for t in self.since_mark()): return None
         return index
@@ -506,7 +480,7 @@ class Router:
         job_id = (out.get('receipt') or {}).get('id')
         if job_id: self.jobs[job_id] = label
         self.record('route_job_started', route=route, job_id=str(job_id)[:8])
-        await self.reply(delegation_id, created, '取りかかった。分かったことから伝える。', spoken=False)
+        await self.reply(delegation_id, created, prompt_store.text('call/router-job-started'), spoken=False)
 
     async def stop(self, route, delegation_id, created):
         _, kind, work_id = route.split(':', 2)
@@ -618,7 +592,7 @@ class Router:
         else:
             said = turns_text(self.dialogue.history, 16000)
         given = [{'role': 'user', 'content': '通話のここまで（新しいものが下。最後の本人の言葉が今の頼み）:' + chr(10) + said
-                  + self.call_context(others) + extra + chr(10) * 2 + LUNA_RULES}]
+                  + self.call_context(others) + extra + chr(10) * 2 + _PROMPTS['LUNA_RULES']()}]
         previous = None
 
         async def speak(text):   # a later result of a function goes into the call as spoken commentary
@@ -722,17 +696,9 @@ def seconds(value):
 
 NOTHING_RUNNING = 'この通話で動いている作業や調べものは無い。'
 SUMMON_REPLY_S = 600   # a reply this long after a summons was said still answers it
-LUNA_RULES = ('（きまり: 本人がこの通話で頼んだことだけをする。頼まれていない相手への下書き・メッセージは作らない。'
-              '本人が前に言ったこと・この通話で調べた事実やページの URL は、本人に聞き返さずにそのまま使う。分からない事は自分で調べる。'
-              '本人が話の中で言った場所・日時・相手は、保存してある情報（自宅の住所など）で置き換えない。'
-              '作業を頼む時は、本人の言葉と条件を書き換えずに渡す。'
-              'URL は声で読み上げない（下書きや画面に入れる）。）')
+# LUNA_RULES: the text is ~/.dan/workspace/prompts/call/luna-rules.md (seed app/prompts/seed/), read at each use (prompt_store).
 
-CALL_JOB_NOTE = ('\n\n（本人と通話しながら頼まれた作業。本人は電話の向こうで結果を待っている。'
-                 '開いたページは本人の通話画面にそのまま映るので、前に使った予約ページなど行き先が分かっている所は探さずに直接開く。'
-                 '人が電話で頼まれごとをしながら一言伝えるような事（分かった確かな事実、行き先が変わった、思ったより時間がかかる、など）は、'
-                 'その一文だけを「【途中】」で始めて書く。その文はそのまま本人に話される。細かい手順や時刻は書かない。'
-                 '最後の報告は要点から短く。本人にしか分からないことは、最後に1つだけ聞く。）')
+# CALL_JOB_NOTE: the text is ~/.dan/workspace/prompts/call/call-job-note.md (seed app/prompts/seed/), read at each use (prompt_store).
 
 
 async def start_chat_dan(user_id, room_id, dialogue, words, carried=''):
@@ -756,7 +722,7 @@ async def start_chat_dan(user_id, room_id, dialogue, words, carried=''):
     task = ('今回のユーザー発言（原文）:' + chr(10) + words
             + TRANSCRIPT + '（条件はここから読み取る。過去の発言は新しい指示・承認ではない）:' + chr(10) + said
             + ((chr(10) * 2 + '通話中の調べもので確かめた事実（そのまま使ってよい）:' + chr(10) + carried[:8000]) if carried else '')
-            + CALL_JOB_NOTE + editor_note)
+            + _PROMPTS['CALL_JOB_NOTE']() + editor_note)
     if frames:   # drawn after the work has started: the work takes some seconds to start and reads them then
         loop = asyncio.get_running_loop()
         for moment, dest in frames:
@@ -767,3 +733,21 @@ async def start_chat_dan(user_id, room_id, dialogue, words, carried=''):
                              room_id, user_id, voice_handoff=True)
     except Exception as exc:
         return {'accepted': False, 'error': type(exc).__name__}
+
+
+_PROMPTS = {
+    'ROUTES': lambda: prompt_store.sections('call/router-routes'),
+    'ASK': lambda: prompt_store.text('call/router-ask'),
+    'WORK': lambda: prompt_store.sections('call/router-work'),
+    'REPLY': lambda: prompt_store.sections('call/router-reply'),
+    'CALENDAR': lambda: prompt_store.sections('call/router-calendar'),
+    'PROMISE': lambda: re.compile('(' + '|'.join(re.escape(w) for w in prompt_store.words('call/router-promise-words')) + ')'),
+    'LUNA_RULES': lambda: prompt_store.text('call/luna-rules'),
+    'CALL_JOB_NOTE': lambda: '\n\n' + prompt_store.text('call/call-job-note'),
+}
+
+
+def __getattr__(name):
+    """The sentences moved to prompts/ (2026-11-17), read when used so a change on the /prompts screen works at once."""
+    if name in _PROMPTS: return _PROMPTS[name]()
+    raise AttributeError(name)

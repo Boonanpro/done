@@ -5,12 +5,11 @@ the backend model chose the tools itself (Responses delegation).
 """
 import asyncio
 import re
+from app.services import prompt_store
 
 HERE = '__current_place__'
 BAR = .6
-VOICE_TASK = ('\n音声通話からの依頼です。報告は声で読み上げられるので、短く、新しく分かった事実だけを書く（同じ説明や謝罪をくり返さない）。'
-              '見るだけの操作（ログイン、履歴・明細・状況の表示）は承認を求めずに進める。承認が要るのは購入・取消・送信など取り返しのつかない確定だけ。'
-              '新規登録をする時は、使うメールアドレス（lookup の source=addresses で本人のアドレス一覧を出す）とパスワードの決め方を、始める前に本人に確認する。')
+# VOICE_TASK: the text is ~/.dan/workspace/prompts/call/voice-task.md (seed app/prompts/seed/), read at each use (prompt_store).
 
 STATE_WORDS = {'queued': 'これから始める', 'running': '作業中', 'paused': '一時停止中', 'awaiting_confirmation': '本人の承認待ち',
                'completed': '完了', 'failed': '失敗', 'cancelled': '中止'}
@@ -217,3 +216,14 @@ async def values(user_id, keys):
         found = await service.get(user_id, key)
         if found and found.get('value'): facts.append({'label': found.get('label') or key, 'value': str(found['value'])[:500]})
     return annotate(facts)
+
+
+_PROMPTS = {
+    'VOICE_TASK': lambda: '\n' + prompt_store.text('call/voice-task'),
+}
+
+
+def __getattr__(name):
+    """The sentences moved to prompts/ (2026-11-17), read when used so a change on the /prompts screen works at once."""
+    if name in _PROMPTS: return _PROMPTS[name]()
+    raise AttributeError(name)

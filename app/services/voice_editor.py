@@ -23,13 +23,10 @@ POINTER_FRESH_S = 6.0  # a spot the mouse left this long ago is no longer what h
 MOMENTS_PER_TURN = 4
 FRAMES = 2             # frames drawn for the work (the latest moments of the request)
 
-NOTE = ('\n\n（エディターの作品の部屋からの通話。本人はエディターで動画を見ながら話している。上の文字起こしで本人の発言の後ろにある'
-        '〔エディター: …〕は、その言葉を言っていた時に本人の画面に出ていた物（再生位置・選んでいたクリップ・プレビューで指していた所）。'
-        '「ここ」「これ」「このテロップ」はそれを指す。作業が始まった今の再生位置とは違うことがある。{frames}'
-        '直す前に、直す場所と中身を「【途中】」で始まる一文で言う（例:「【途中】12秒のテロップ『ここが大事』を赤にするね」。時刻は話す言葉で「〜分〜秒」）。'
-        'その一文は本人に話されるので、違えば本人が言い直せる。'
-        '口で頼む時は、変える所だけを言うことが多い（字幕「今朝は駅まで歩いて行きました」を指して「『走って行きました』に直して」は、'
-        '『歩いて行きました』の所の言い換え。字幕を言われた言葉だけにしない）。声では漢字とかなの書き分けが伝わらないので、書き方は元の字幕に合わせる。言葉と画面から、どこを何にするかが決められない時は、直さずに最後に1つだけ聞く。）')
+def note_text(frames: str) -> str:
+    """What the work is told about a call from the editor (the owner can rewrite it on /prompts: call/editor-call-note)."""
+    from app.services import prompt_store
+    return chr(10) * 2 + prompt_store.fill('call/editor-call-note', frames=frames)
 
 
 def call_editor(room_id: str) -> dict[str, str] | None:
@@ -94,8 +91,8 @@ class Moments:
                 title = str((content or {}).get('title') or '')
             except Exception:  # noqa: BLE001
                 pass
-            self._place = (f'本人はダンの動画エディターで作品「{title}」のタイムラインとプレビューを開いて、見ながら話している'
-                           '（この通話はそのエディターの「話す」から）。「ここ」「この〜」は、その作品の中の映像・字幕・音のこと。')
+            from app.services import prompt_store
+            self._place = prompt_store.fill('call/editor-place', title=title)
         return self._place
 
     def now_moment(self) -> dict[str, Any] | None:
@@ -259,4 +256,4 @@ def note_for(asset_room_id: str, content_id: str, turns: list[dict[str, Any]]) -
     if todo:
         frames = ('その時の完成画面の絵（指していた所は赤い丸。裏で描いているので、まだ無ければ少し待つ。描けなかった時は render_frame で'
                   'その再生位置を見る）: ' + '、'.join(f"{_fmt(m.get('playhead'))} → {p}" for m, p in todo) + '（Read で開ける）。')
-    return NOTE.format(frames=frames), todo
+    return note_text(frames), todo

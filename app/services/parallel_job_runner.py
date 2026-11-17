@@ -23,6 +23,7 @@ from pathlib import Path
 
 from app.services import command_job_state as state
 from app.services import work_locks
+from app.services import prompt_store
 
 def _dan_ws():
     from app.paths import DAN_WORKSPACE
@@ -45,15 +46,7 @@ class _Labels(dict):
 LABELS = _Labels({'opus': 'Opus', 'fable': 'Fable'})
 _procs: dict[str, subprocess.Popen] = {}
 
-JOB_RULES = """
-## この会話について
-これは本人とのチャットの部屋から枝分かれした「並行作業」の1つ。部屋では本人とダンの会話が別に続いている。
-ここでは頼まれた作業だけを最後までやる。最後の返事がそのまま部屋に「並行作業の結果」として届くので、結果・作ったもの・残っていることを本人向けに書く。
-報告は日本語で書く。部屋のダンがこれを読んで本人に短く伝え、本人も開けば読めるので、仕組みの中の言葉（版・入れ替え・モデル名・試しの部屋など）は避け、何ができて何が残っているかを書く。
-途中で本人から追加の指示が届くことがある（追加の発言として届く）。
-同じファイルや、PCの画面操作・スマホ操作を別の作業が使っている時は、その部分だけ自動で順番待ちになる。待ちが長いと書き込みが断られることがあるので、その時はほかの部分を先に進めてから試し直す。
-担当（Agent）を使う時は run_in_background: false を付けて前面で1つずつ起こす（省くと裏で起きる。裏の担当は使えない。返事を終えた時点でこの作業は終わった扱いになり、裏に残した担当は10分で切られる）。ScheduleWakeup で眠って何かを待たない（眠った時点で終わった扱いになる）。待つ物は wait_until や Monitor でこのターンの中で待つ。担当が終わったかをファイルの更新時刻で推測しない（担当の返事で判断する）。
-"""
+# JOB_RULES: the text is ~/.dan/workspace/prompts/work/parallel-job-rules.md (seed app/prompts/seed/), read at each use (prompt_store).
 # Seconds after the worker's input is closed (its answer is in): silence this long, or this much time in all, and the
 # leftover background work is cut so the answer reaches the room. 2026-10-29: a job whose worker had slept with
 # ScheduleWakeup never exited, and the room showed it as running for 40 minutes.
@@ -281,7 +274,7 @@ async def _launch(job_id, s):
         title=project.get('title', ''), description=project.get('description') or '', status=project.get('status') or 'in_progress',
         user_messages='', latest_user_message=task, room_id=room, user_id=user))
     from app.services.command_center import CONFIRMATION_RULE
-    system_prompt += '\n' + JOB_RULES + '\n' + CONFIRMATION_RULE + (s.get('origin_note') or '')
+    system_prompt += '\n' + _PROMPTS['JOB_RULES']() + '\n' + CONFIRMATION_RULE + (s.get('origin_note') or '')
     work_dir = f'{_dan_ws()}/jobs/{job_id[:8]}'
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     cfg = json.loads(Path(room_mcp).read_text(encoding='utf-8'))
@@ -583,3 +576,14 @@ async def control(room_id, user_id, job_id, operation, text='', model=''):
             work_locks.release_owner('job:' + job_id)
         return out
     raise ValueError('未対応の操作です')
+
+
+_PROMPTS = {
+    'JOB_RULES': lambda: '\n' + prompt_store.text('work/parallel-job-rules') + '\n',
+}
+
+
+def __getattr__(name):
+    """The sentences moved to prompts/ (2026-11-17), read when used so a change on the /prompts screen works at once."""
+    if name in _PROMPTS: return _PROMPTS[name]()
+    raise AttributeError(name)

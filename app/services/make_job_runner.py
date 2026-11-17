@@ -9,9 +9,9 @@ Why parallel (2026-10-08): it used to run as a turn of the room itself and waite
 be free, then held the room. Now it branches off the room's conversation and the chat stays free.
 """
 from app.services import command_job_state as state
+from app.services import prompt_store
 
-ORIGIN_NOTE = ('\n\n（通話で本人から頼まれた制作です。結果は通話でも読み上げられるので、最後の報告は要点から短く。'
-               '取り返しのつかない確定（公開・送信・購入・削除）の前は、内容を示して本人の返事を待つ。）')
+# ORIGIN_NOTE: the text is ~/.dan/workspace/prompts/call/make-origin-note.md (seed app/prompts/seed/), read at each use (prompt_store).
 
 
 def words(task):
@@ -30,5 +30,16 @@ async def note_request(row):
     asked = words(s['task'])
     from app.services.voice_router import TRANSCRIPT
     said = asked.split(TRANSCRIPT)[0].strip()
-    return state.change(job_id, lambda x: x.update(voice_noted=True, origin_note=ORIGIN_NOTE, task=asked,
+    return state.change(job_id, lambda x: x.update(voice_noted=True, origin_note=_PROMPTS['ORIGIN_NOTE'](), task=asked,
                                                    title=x.get('title') or said[:58]))
+
+
+_PROMPTS = {
+    'ORIGIN_NOTE': lambda: '\n\n' + prompt_store.text('call/make-origin-note'),
+}
+
+
+def __getattr__(name):
+    """The sentences moved to prompts/ (2026-11-17), read when used so a change on the /prompts screen works at once."""
+    if name in _PROMPTS: return _PROMPTS[name]()
+    raise AttributeError(name)
