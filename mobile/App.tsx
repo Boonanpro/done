@@ -1397,6 +1397,18 @@ function useKeyboardShown() {
   return shown;
 }
 
+// エディターの全画面（帯を隠した edge-to-edge）では、Android は中の画面を縮めないので、入力欄がキーボードの下に
+// 隠れる。キーボードの高さだけ下を空ける（2026-11-18）。
+function useKeyboardHeight() {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', (e) => setH(Math.max(0, e.endCoordinates?.height || 0)));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setH(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+  return h;
+}
+
 function AppMain() {
   const language = useUiLanguage();
   const voice = useVoice();
@@ -1450,6 +1462,7 @@ function AppMain() {
   const [projectQuery, setProjectQuery] = useState('');
   const safeInsets = useSafeAreaInsets();
   const keyboardShown = useKeyboardShown();
+  const keyboardHeight = useKeyboardHeight();
   const insets = {...safeInsets, top: voice.minimized ? 0 : safeInsets.top};
   const [auth, setAuth] = useState<AuthState>({ status: 'checking' });
   useEffect(() => { if (auth.status === 'signed_out') voice.stop(); }, [auth.status]);
@@ -4268,6 +4281,7 @@ function AppMain() {
       paddingTop: safeInsets.top,
       paddingLeft: safeInsets.left,
       paddingRight: safeInsets.right,
+      paddingBottom: keyboardHeight,
     };
     return (
       <View style={[styles.screen, artifactView.editor ? editorFrame : null]}>
