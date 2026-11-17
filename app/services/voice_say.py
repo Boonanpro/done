@@ -11,6 +11,7 @@ work is doing step by step, the clock, a report's full text, page addresses) is 
 through its backend when it wants it (voice_router: 'status' reads the work and its full results, 'clock' the time).
 How the speech model words and times what it is given is its own (voice_plain); nothing here tells it what to say.
 """
+import asyncio
 import re
 import time
 
@@ -27,6 +28,10 @@ KINDS = {
     'heard': 'the owner\'s own words the speech model did not hear itself (a whisper the server heard, voice_whisper)',
     'unheard': 'the owner said something neither the speech model nor the server could make out (voice_whisper)',
 }
+# Nothing is given while the owner is speaking: what is given is said at once, over his words. On 11/16 11:18 the answer to
+# a delegation made 4 s into 「2本目の編集も始めたいですね」 was given while he went on talking (the owner: 話し終わる前に
+# 割り込まない). The call (voice_sideband) puts `owner_speaking` on its send; it is held until he has been quiet a moment.
+HOLD_MAX_S = 15.0
 SHORT = 300    # one append is limited to 500 tokens; Japanese runs at about a token a character
 LONG = 1200    # an answer to the owner's own question may say more, in several appends
 LONG_KINDS = ('answer', 'chat')
@@ -90,6 +95,13 @@ async def say(send, kind, text, record=None, delegation_id=None, quiet=False):
     except Exception:
         pass
     said = speakable(kind, text)
+    speaking = getattr(send, 'owner_speaking', None)
+    if callable(speaking):
+        held = time.monotonic()
+        while speaking() and time.monotonic() - held < HOLD_MAX_S:
+            await asyncio.sleep(.1)
+        if record is not None and time.monotonic() - held > .15:
+            record('call_given_held', kind=kind, ms=round((time.monotonic() - held) * 1000))
     channel = 'session.thinking.append' if quiet else 'session.commentary.append'
     parts = list(pieces(said)) or ([''] if delegation_id else [])   # a delegation is answered even with nothing to say
     for part in parts:

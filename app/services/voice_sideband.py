@@ -23,6 +23,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 URL = 'wss://api.openai.com/v1/live/sessions/{session_id}/attach'
 MAX_SECONDS = 3 * 3600
+OWNER_QUIET_S = 1.0     # no word of the owner for this long: he has stopped speaking (voice_say holds until then)
 CHUNK = 300             # an append is limited to 500 tokens; Japanese runs at about a token a character
 _tasks = {}
 _after_tasks = set()  # strong references: hanging up/cancelling the socket must not cancel handoff
@@ -100,6 +101,7 @@ class Dialogue:
         self.routing_until = 0.0  # a delegation is being routed (voice_router): silent state waits, so it cancels no acknowledgement
         self.began_iso = ''
         self.summons = []         # the summonses said in this call (summon_feed): what the owner's short replies answer
+        self.editor = None        # voice_editor.Moments when the call is from one work's room in the editor
 
     def add(self, role, delta):
         if not delta: return
@@ -107,6 +109,9 @@ class Dialogue:
         self.history_chars += len(delta)
         if self.history and self.history[-1]['role'] == role: self.history[-1]['text'] += delta
         else: self.history.append({'role': role, 'text': delta})
+        if role == 'user' and self.editor is not None:   # where he was in the editor while saying it (voice_editor)
+            try: self.editor.heard(self.history[-1])
+            except Exception: pass
         if self.turns and self.turns[-1]['role'] == role: self.turns[-1]['text'] += delta
         else: self.turns.append({'role': role, 'text': delta})
         del self.turns[:-24]
@@ -713,6 +718,10 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
     counts, dialogue, working, spoke, stage = {}, Dialogue(), set(), {}, None
     dialogue.began_iso = began.isoformat()
     stop_control = hangup = background = router = whisper = None
+    if own and room_id:
+        from app.services import voice_editor
+        place = await asyncio.to_thread(voice_editor.call_editor, room_id)
+        if place: dialogue.editor = voice_editor.Moments(place['asset_room_id'], place['content_id'])
     try:
         transport = connection if connection is not None else websockets.connect(
             URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
@@ -722,6 +731,8 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
             lock = asyncio.Lock()
             async def send(event):
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
+            # the owner's words are still arriving: voice_say holds what it gives until he has been quiet OWNER_QUIET_S
+            send.owner_speaking = lambda: time.monotonic() - spoke.get('owner', 0) < OWNER_QUIET_S
             pending = {}
             from app.services.voice_interruption import Interruption
             from app.services import voice_plain

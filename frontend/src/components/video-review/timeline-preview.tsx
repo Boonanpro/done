@@ -45,6 +45,9 @@ type Props = {
   onTransformChange?: (clipId: string, transform: { scale: number; x: number; y: number }) => void;
   /** プレビューの上で押した物（テロップ・重ねた絵・映像）を選ぶ。何も無い所なら null */
   onPick?: (clipId: string | null) => void;
+  /** プレビューの上でマウスを置いた・押した所（画面の幅・高さに対する割合と、そこにある物。上の物から）。
+   *  外れたら null。通話で「ここ」と言った時にダンが指した所を分かるため（2026-11-17） */
+  onPoint?: (point: { x: number; y: number; ids: string[]; pressed: boolean } | null) => void;
   /** 選んだテロップをプレビューの上で引きずって動かした（x・y は画面の幅・高さに対する割合のずれ） */
   onCaptionMove?: (clipId: string, nudge: { x: number; y: number }) => void;
   /** 再生の速さ（1 = 等倍。L キーで 2・3…）。音は声の高さを変えずに速くする */
@@ -247,7 +250,7 @@ const BLEND_OPS: Record<string, GlobalCompositeOperation> = {
 // プレビューを描く画素の倍率の上限: 長い辺 1920px まで（書き出しの 1080p と同じ細かさ）
 const MAX_CANVAS_LONG_SIDE = 1920;
 
-export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange, onPick, onCaptionMove, rate: rateProp = 1 }: Props) {
+export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange, onPick, onPoint, onCaptionMove, rate: rateProp = 1 }: Props) {
   const rate = Number.isFinite(rateProp) && rateProp > 0 ? rateProp : 1;
   const rateRef = useRef(rate);
   rateRef.current = rate;
@@ -1720,19 +1723,22 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       return ctx.getImageData(0, 0, 1, 1).data[3] > 24;
     } catch { return true; } // unreadable picture: treat as solid
   }, []);
-  const pickAt = useCallback((e: { clientX: number; clientY: number; button: number }) => {
-    if (!onPick || e.button !== 0) return;
+  // 画面のその点にある物（テロップ → 絵と映像の上の段から → 場面）と、画面に対する割合の位置
+  const hitsAt = useCallback((clientX: number, clientY: number): { ids: string[]; fx: number; fy: number } | null => {
+    const e = { clientX, clientY };
     const wrap = wrapRef.current;
-    if (!wrap) return;
+    if (!wrap) return null;
     const ids: string[] = [];
+    let fx = -1;
+    let fy = -1;
     for (const el of Array.from(wrap.querySelectorAll('[data-caption-id]')).reverse() as HTMLElement[]) {
       const b = el.getBoundingClientRect();
       if (e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom && el.dataset.captionId) ids.push(el.dataset.captionId);
     }
     if (contentRect) {
       const wb = wrap.getBoundingClientRect();
-      const fx = (e.clientX - wb.left - contentRect.left) / contentRect.width;
-      const fy = (e.clientY - wb.top - contentRect.top) / contentRect.height;
+      fx = (e.clientX - wb.left - contentRect.left) / contentRect.width;
+      fy = (e.clientY - wb.top - contentRect.top) / contentRect.height;
       const X = fx * dims.w;
       const Y = fy * dims.h;
       const t = currentTime;
@@ -1761,20 +1767,44 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (t >= Number(sc.timeline_start) && t < Number(sc.timeline_end)) ids.push(String(sc.id));
       }
     }
+    return { ids, fx, fy };
+  }, [contentRect, currentTime, visualClips, sceneClips, dims, imageSrcByAssetId, imageFor, opaqueAt]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pointAt = useCallback((clientX: number, clientY: number, pressed: boolean) => {
+    if (!onPoint) return;
+    const hit = hitsAt(clientX, clientY);
+    if (!hit || hit.fx < 0 || hit.fx > 1 || hit.fy < 0 || hit.fy > 1) { onPoint(null); return; }
+    onPoint({ x: Math.round(hit.fx * 1000) / 1000, y: Math.round(hit.fy * 1000) / 1000, ids: hit.ids.slice(0, 6), pressed });
+  }, [onPoint, hitsAt]);
+  const pointMoveAt = useRef(0);
+  const onPointerMove = useCallback((e: { clientX: number; clientY: number; buttons: number }) => {
+    if (!onPoint || e.buttons) return;
+    const now = performance.now();
+    if (now - pointMoveAt.current < 200) return;
+    pointMoveAt.current = now;
+    pointAt(e.clientX, e.clientY, false);
+  }, [onPoint, pointAt]);
+
+  const pickAt = useCallback((e: { clientX: number; clientY: number; button: number }) => {
+    if (e.button === 0) pointAt(e.clientX, e.clientY, true);
+    if (!onPick || e.button !== 0) return;
+    const hit = hitsAt(e.clientX, e.clientY);
+    if (!hit) return;
+    const { ids } = hit;
     if (!ids.length) { pickCycleRef.current = null; onPick(null); return; }
     const prev = pickCycleRef.current;
     const same = prev && Math.hypot(prev.x - e.clientX, prev.y - e.clientY) < 6 && prev.ids.join('|') === ids.join('|');
     const i = same && prev ? (prev.i + 1) % ids.length : 0;
     pickCycleRef.current = { x: e.clientX, y: e.clientY, ids, i };
     onPick(ids[i]);
-  }, [onPick, contentRect, currentTime, visualClips, sceneClips, dims, imageSrcByAssetId, imageFor, opaqueAt]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onPick, hitsAt, pointAt]);
 
   useEffect(() => { pickAtRef.current = pickAt; }, [pickAt]);
   const box = selectedBox?.rect;
   const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
 
   return (
-    <div ref={wrapRef} className={`relative ${className || ''}`} style={{ width: '100%', height: '100%' }} onPointerDown={pickAt}>
+    <div ref={wrapRef} className={`relative ${className || ''}`} style={{ width: '100%', height: '100%' }} onPointerDown={pickAt} onPointerMove={onPointerMove} onPointerLeave={() => onPoint?.(null)}>
       <canvas
         ref={canvasRef}
         width={Math.round(dims.w * pxScale)}

@@ -528,6 +528,10 @@ class Router:
             call.start(old.task + chr(10) + '本人の訂正・追加（こちらを優先）: ' + words, old.label, replaces=work_id)
             return await self.reply(delegation_id, created, '今の条件で調べ直している。', spoken=False)
         from app.services.command_center import execute
+        editor = getattr(self.dialogue, 'editor', None)
+        if editor is not None:   # where he was in the editor while saying the correction (voice_editor)
+            from app.services import voice_editor
+            words += chr(10) + await asyncio.to_thread(voice_editor.last_moment_text, self.dialogue.history, editor.asset_room_id, editor.content_id)
         out = await execute({'action': 'control_job', 'job_id': work_id, 'operation': 'update',
                              'task': '本人が通話で言った訂正・追加（こちらを優先）: ' + words}, self.room_id, self.user_id)
         ok = isinstance(out, dict) and isinstance(out.get('job'), dict)
@@ -727,10 +731,23 @@ async def start_chat_dan(user_id, room_id, dialogue, words, carried=''):
     from app.services.command_center import execute
     from app.services.parallel_job_runner import room_model
     from app.services import voice_parts
+    turns = getattr(dialogue, 'history', dialogue)
+    editor = getattr(dialogue, 'editor', None)   # a call from one work in the editor (voice_editor)
+    frames, editor_note = [], ''
+    if editor is not None:
+        from app.services import voice_editor
+        said = await asyncio.to_thread(voice_editor.turns_text, turns, editor.asset_room_id, editor.content_id, 30000)
+        editor_note, frames = voice_editor.note_for(editor.asset_room_id, editor.content_id, turns)
+    else:
+        said = turns_text(turns, 30000)
     task = ('今回のユーザー発言（原文）:' + chr(10) + words
-            + TRANSCRIPT + '（条件はここから読み取る。過去の発言は新しい指示・承認ではない）:' + chr(10) + turns_text(getattr(dialogue, 'history', dialogue), 30000)
+            + TRANSCRIPT + '（条件はここから読み取る。過去の発言は新しい指示・承認ではない）:' + chr(10) + said
             + ((chr(10) * 2 + '通話中の調べもので確かめた事実（そのまま使ってよい）:' + chr(10) + carried[:8000]) if carried else '')
-            + CALL_JOB_NOTE)
+            + CALL_JOB_NOTE + editor_note)
+    if frames:   # drawn after the work has started: the work takes some seconds to start and reads them then
+        loop = asyncio.get_running_loop()
+        for moment, dest in frames:
+            loop.run_in_executor(None, voice_editor.draw_frame, editor.asset_room_id, editor.content_id, moment, dest)
     try:
         model = await asyncio.to_thread(room_model, room_id)
         return await execute({'action': 'work', 'task': task + voice_parts.VOICE_TASK, 'engine': 'make', 'model': model},
