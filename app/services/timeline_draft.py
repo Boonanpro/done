@@ -21,7 +21,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-UPLOAD_ROOT = Path(__file__).resolve().parents[2] / "uploads" / "production-assets"
+UPLOAD_ROOT = (Path(__file__).resolve().parents[2] / "uploads").resolve() / "production-assets"
 _transaction = ContextVar('timeline_draft_transaction', default=None)
 
 
