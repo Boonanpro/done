@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { aiDurationFor, aiModelFor } from '@/lib/ai-video-models';
 import { type EditSequence, type ReviewAnnotation, type SessionPayload, VideoReviewEditor } from '@/components/video-review/video-review-editor';
+import { ThumbnailEditor } from '@/components/thumbnail/thumbnail-editor';
 
 type AssetStatus = 'registered' | 'processing' | 'proxy_ready' | 'failed' | 'missing';
 
@@ -651,6 +652,25 @@ export function ProductionWorkspace({
     toast.success('制作物を削除しました');
   };
 
+  // 部品で持つサムネ（背景・人物・文字・矢印が別々）。同じ制作の窓の中で、右の「ダンと制作」と一緒に開く
+  if (selectedContent && (selectedContent.format === 'thumbnail' || !!(selectedContent.timeline as { thumbnail?: unknown } | undefined)?.thumbnail)) {
+    return (
+      <ThumbnailEditor
+        key={selectedContent.id}
+        roomId={roomId}
+        contentId={selectedContent.id}
+        title={selectedContent.title}
+        compact={compact}
+        phoneChat={phoneChat}
+        onBack={() => {
+          setSelectedContent(null);
+          setUrlContentId(null);
+          void loadAll();
+        }}
+      />
+    );
+  }
+
   if (selectedContent && primaryVideo && primaryVideo.status === 'processing') {
     return (
       <div className="flex h-full min-h-0 flex-col bg-background">
@@ -920,7 +940,7 @@ export function ProductionWorkspace({
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-[13px] font-medium">{content.title}</span>
                         <span className="block text-[11px] text-muted-foreground">
-                          {content.format}・{new Date(content.updated_at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}
+                          {content.format === 'thumbnail' ? 'サムネ' : content.format}・{new Date(content.updated_at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}
                           {content.status === 'running' ? '・作成中' : ''}
                         </span>
                       </span>
@@ -1018,7 +1038,7 @@ export function ProductionWorkspace({
                 </span>
                 <span className="block truncate px-2.5 pt-2 text-[13px] font-medium">{content.title}</span>
                 <span className="block px-2.5 pb-2 text-[11px] text-muted-foreground">
-                  {content.format}・{new Date(content.updated_at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}
+                  {content.format === 'thumbnail' ? 'サムネ' : content.format}・{new Date(content.updated_at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}
                 </span>
               </button>
             );

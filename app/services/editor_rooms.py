@@ -162,6 +162,15 @@ def children(asset_room_id: str, sb=None) -> list[dict[str, Any]]:
     return out
 
 
+def _is_thumbnail(asset_room_id: str, content_id: str) -> bool:
+    try:
+        from app.services import timeline_draft as td
+        from app.services.thumbnail_doc import is_thumbnail
+        return is_thumbnail(td._find_content(td._read_contents_raw(asset_room_id), content_id))
+    except Exception:
+        return False
+
+
 def context_lines(room_id: str) -> list[str]:
     """前置き <place> に足す行。制作の部屋なら本体の部屋とつながり、本体の部屋なら制作の部屋の一覧。"""
     info = room_info(room_id)
@@ -172,7 +181,14 @@ def context_lines(room_id: str) -> list[str]:
                      f"本体の部屋は「{info['parent_title']}」(room_id={a})。素材と作品は本体の部屋の物"
                      f"（uploads/production-assets/{a}）を使う。")
         if info["content_id"]:
-            lines.append(f"この部屋の作品: content_id={info['content_id']}。タイムラインは mcp__timeline__* で直す。")
+            if _is_thumbnail(a, info["content_id"]):
+                from app.services.thumbnail_doc import cli
+                lines.append(f"この部屋の作品はサムネ（content_id={info['content_id']}）。背景・人物・文字・矢印を別々の部品で持つ。"
+                             f"直すのは {cli()}（show {a} {info['content_id']} で部品の一覧、set で位置・大きさ・色・文字、"
+                             "repaint で絵の部品の範囲だけ描き直し、render で今の形を PNG にして確かめる、undo で1つ前に戻す）。"
+                             "mcp__timeline は使わない。保存するとエディターの画面がすぐ変わる。")
+            else:
+                lines.append(f"この部屋の作品: content_id={info['content_id']}。タイムラインは mcp__timeline__* で直す。")
         lines.append(f"本体の部屋の話（決まったこと・台本・素材の場所）は lookup(source=messages, room_id={a}) で読む。"
                      "記憶・ルールは本体の部屋と同じ。ほかの制作の部屋は下の一覧。")
         sibs = [c for c in children(a) if c["room_id"] != room_id]
