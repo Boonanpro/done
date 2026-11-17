@@ -909,14 +909,43 @@ def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any
     return sorted(clips, key=lambda c: float(c.get("timeline_start") or 0))
 
 
+def _clip_speed(clip: dict[str, Any]) -> float:
+    """The clip's playback speed (1.08 = the source plays 1.08x: 1 timeline second = 1.08 source
+    seconds, voice pitch kept). Missing/invalid = 1. Same rule as the editor preview's clipSpeed."""
+    try:
+        sp = float(clip.get("speed") or 1.0)
+    except Exception:
+        return 1.0
+    if not (sp > 0) or abs(sp - 1.0) < 1e-4:
+        return 1.0
+    return max(0.25, min(4.0, sp))
+
+
+def _setpts0(sp: float) -> str:
+    """Reset a video chain to 0 and play it at the clip's speed."""
+    return "setpts=PTS-STARTPTS" if sp == 1.0 else f"setpts=(PTS-STARTPTS)/{sp:.6f}"
+
+
+def _atempo(sp: float) -> str:
+    """Audio filter for the clip's speed (pitch kept). '' at 1x; atempo takes 0.5..100 per stage."""
+    if sp == 1.0:
+        return ""
+    parts, r = [], sp
+    while r < 0.5:
+        parts.append("atempo=0.5")
+        r /= 0.5
+    parts.append(f"atempo={r:.6f}")
+    return "," + ",".join(parts)
+
+
 def _clip_source_range(clip: dict[str, Any], metadata: dict[str, Any]) -> tuple[float, float, float, float, bool]:
     """Return (source_start, source_end, out_duration, source_duration, is_freeze).
 
     The clip's TIMELINE duration (timeline_end - timeline_start) is authoritative
     for how long it occupies the output: out_duration = timeline duration. Playback
-    is always 1x (NO time-warp): if the source span is longer than the slot it is
-    trimmed (the head is shown at normal speed); if shorter, the caller freeze-pads
-    the last frame. This avoids fast-forward/slow-motion.
+    is at the clip's own `speed` (1 when absent; the slot then holds out_duration × speed
+    source seconds): if the source span is longer than that it is trimmed; if shorter, the
+    caller freeze-pads the last frame. source_duration is in SOURCE seconds.
     A clip with source_start >= source_end is a freeze-frame held for out_duration."""
     asset_duration = float(metadata.get("duration") or clip.get("source_duration") or 0)
     source_start = max(0.0, float(clip.get("source_start") or 0))
@@ -928,10 +957,11 @@ def _clip_source_range(clip: dict[str, Any], metadata: dict[str, Any]) -> tuple[
         if asset_duration > 0:
             source_end = min(source_end, asset_duration)
         src_dur = max(0.05, source_end - source_start)
-        out_dur = tl_dur if tl_dur > 0 else src_dur
-        if src_dur > out_dur:  # source longer than slot: trim tail, keep 1x speed
-            source_end = source_start + out_dur
-            src_dur = out_dur
+        sp = _clip_speed(clip)
+        out_dur = tl_dur if tl_dur > 0 else src_dur / sp
+        if src_dur > out_dur * sp:  # source longer than slot: trim tail, keep the clip's speed
+            source_end = source_start + out_dur * sp
+            src_dur = out_dur * sp
         return source_start, source_end, out_dur, src_dur, False
     # freeze-frame: one frame held for the timeline duration
     return source_start, source_start + 0.04, max(0.05, tl_dur or 2.0), 0.0, True
@@ -2068,9 +2098,11 @@ def _render_audio_window(room_id: str, sequence: dict[str, Any], w0: float, w1: 
         if au_freeze:
             continue
         source_path = decoded.get(str(source_path), source_path)
+        sp = _clip_speed(clip)
         ts, te = max(a, w0), min(b, w1)
-        s0 = round((source_start + ts - a) * sr)
-        n = min(round((te - ts) * sr), round(source_end * sr) - s0)
+        s0 = round((source_start + (ts - a) * sp) * sr)
+        # n = samples heard on the timeline; the source span it takes is n × sp
+        n = min(round((te - ts) * sr), round((round(source_end * sr) - s0) / sp))
         if n <= 0:
             continue
         delay = max(0, round(ts * sr) - round(w0 * sr))
@@ -2084,7 +2116,9 @@ def _render_audio_window(room_id: str, sequence: dict[str, Any], w0: float, w1: 
             # atrim start_sample counts samples from wherever the seek landed; seconds follow the
             # timestamps. So: cut by time, reset to 0, then trim to the exact sample count.
             _movie_input(source_path, max(0.0, s0 / sr - 0.5), audio=True) + f",aresample={sr},"
-            f"atrim=start={s0 / sr:.7f},asetpts=PTS-STARTPTS,atrim=end_sample={n},"
+            f"atrim=start={s0 / sr:.7f},asetpts=PTS-STARTPTS"
+            + (f",atrim=end_sample={round(n * sp) + 64}{_atempo(sp)},aresample={sr},asetpts=PTS-STARTPTS" if sp != 1.0 else "")
+            + f",atrim=end_sample={n},"
             f"aformat=channel_layouts=stereo{vol_filt},"
             f"adelay=delays={delay}S:all=1[{label}]"
         )
@@ -2289,11 +2323,18 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
         a_ss, a_se = source_start, source_end  # the clip's own sound keeps its source seconds
         nfr = _clip_frame_count(clip, timeline_fps)
         out_dur = nfr / timeline_fps
-        if not is_freeze:
+        sp = 1.0 if is_freeze else _clip_speed(clip)
+        if not is_freeze and sp == 1.0:
             first = _frame_index(float(clip.get("timeline_start") or 0), timeline_fps)
             sframe = round((source_start + first / timeline_fps - float(clip.get("timeline_start") or 0)) * timeline_fps)
             source_start = max(0.0, (sframe - 0.5) / timeline_fps)
             source_end = (sframe + nfr - 0.5) / timeline_fps
+        elif not is_freeze:
+            # speed ≠ 1: the first output frame shows the source at s_first; nfr frames take nfr/fps × sp
+            first = _frame_index(float(clip.get("timeline_start") or 0), timeline_fps)
+            s_first = source_start + (first / timeline_fps - float(clip.get("timeline_start") or 0)) * sp
+            source_start = max(0.0, s_first - 0.5 / timeline_fps * sp)
+            source_end = s_first + (nfr - 0.5) / timeline_fps * sp
         pad_needed = 0.0  # every base chain ends padded/trimmed to exactly nfr frames (norm_tail)
         bpos = clip.get("position") if isinstance(clip.get("position"), dict) else None
         bkeys = _clip_box_keys(clip)
@@ -2332,7 +2373,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             layer_lines, layer = _moving_video_layer(
                 _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.4f}:end={source_end:.4f},"
-                f"setpts=PTS-STARTPTS,fps={fps_filter}{tpad}{grade}",
+                f"{_setpts0(sp)},fps={fps_filter}{tpad}{grade}",
                 rendered_count, bkeys,
                 (bx0 * output_width, by0 * output_height, bw0 * output_width, bh0 * output_height),
                 sw, sh, output_width, output_height, fps_filter, out_dur,
@@ -2350,7 +2391,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
                 setpts = f"setpts=PTS-STARTPTS,{_scale},tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
             else:
                 _pad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}" if pad_needed > 0.02 else ""
-                setpts = f"setpts=PTS-STARTPTS,{_scale}{_pad}"
+                setpts = f"{_setpts0(sp)},{_scale}{_pad}"
             filters.append(
                 _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.4f}:end={source_end:.4f},"
@@ -2394,7 +2435,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
                 filters.append(
                     _movie_input(source_path, source_start) + ","
                     f"trim=start={source_start:.4f}:end={source_end:.4f},"
-                    f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps={fps_filter},{crop_filt}setsar=1{tpad}{grade},format=yuv444p"
+                    f"{_setpts0(sp)},scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps={fps_filter},{crop_filt}setsar=1{tpad}{grade},format=yuv444p"
                     f"[src{rendered_count}]"
                 )
                 filters.append(
@@ -2410,7 +2451,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
                 filters.append(
                     _movie_input(source_path, a_ss, audio=True) + ","
                     f"atrim=start={a_ss:.4f}:end={a_se:.4f},"
-                    f"asetpts=PTS-STARTPTS,aresample=48000,apad,atrim=duration={out_dur:.6f},aformat=channel_layouts=stereo{vol_filt}"
+                    f"asetpts=PTS-STARTPTS{_atempo(_clip_speed(clip))},aresample=48000,apad,atrim=duration={out_dur:.6f},aformat=channel_layouts=stereo{vol_filt}"
                     f"[a{rendered_count}]"
                 )
             else:
@@ -2728,11 +2769,12 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
                 )
                 video_out = f"vov{oi}"
                 continue
-        ov_pad = 0.0 if ov_freeze else max(0.0, ov_dur - ov_src)
+        ov_sp = 1.0 if ov_freeze else _clip_speed(clip)
+        ov_pad = 0.0 if ov_freeze else max(0.0, ov_dur - ov_src / ov_sp)
         if ov_freeze:
             ov_pre = f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={ov_dur:.3f},"
         else:
-            ov_pre = "setpts=PTS-STARTPTS," + (f"tpad=stop_mode=clone:stop_duration={ov_pad:.3f}," if ov_pad > 0.02 else "")
+            ov_pre = _setpts0(ov_sp) + "," + (f"tpad=stop_mode=clone:stop_duration={ov_pad:.3f}," if ov_pad > 0.02 else "")
         # Wipe shape: clip the PiP to a circle / rounded frame via a transparent alpha mask.
         # the cut sits on what shows: the box after the crop mask (the preview's rule)
         shape_filt = _shape_cut_filter(clip.get("shape"), _mask[2] if _mask else ow, _mask[3] if _mask else oh, alpha=True)
@@ -2888,7 +2930,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             filters.append(
                 _movie_input(source_path, source_start, audio=True) + ","
                 f"atrim=start={source_start:.3f}:end={source_end:.3f},"
-                f"asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo{avol_filt},adelay={ts_ms}|{ts_ms}"
+                f"asetpts=PTS-STARTPTS{_atempo(_clip_speed(clip))},aresample=48000,aformat=channel_layouts=stereo{avol_filt},adelay={ts_ms}|{ts_ms}"
                 f"[{label}]"
             )
             audio_labels.append(label)
