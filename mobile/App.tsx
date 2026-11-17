@@ -23,6 +23,7 @@ import { ShimmerLine } from './shimmer-line';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import Svg, { Circle } from 'react-native-svg';
 import { Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
@@ -50,6 +51,7 @@ import {
   type StyleProp,
   type ViewStyle,
   DeviceEventEmitter,
+  useWindowDimensions,
 } from 'react-native';
 import { animateNextLayout, pressedScale } from './motion';
 import { MediaGrid } from './media-grid';
@@ -2951,6 +2953,17 @@ function AppMain() {
     };
   }, [loadInitialData]);
 
+  // 制作エディターを開いている間だけ、スマホを横にすると横の画面になる（2026-11-17 本人「横画面のときも同じように
+  // 動かしたい」）。ほかの画面は今までどおり縦に固定。
+  const editorOpen = screen === 'artifact' && !!artifactView?.editor;
+  useEffect(() => {
+    if (Platform.OS !== 'android' && Platform.OS !== 'ios') return;
+    if (editorOpen) void ScreenOrientation.unlockAsync().catch(() => {});
+    else void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+  }, [editorOpen]);
+  const screenSize = useWindowDimensions();
+  const landscape = screenSize.width > screenSize.height;
+
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
       if (screen === 'artifact') {
@@ -4226,8 +4239,10 @@ function AppMain() {
 
   if (screen === 'artifact' && artifactView) {
     return (
-      <View style={styles.screen}>
-        <StatusBar style="dark" />
+      <View style={[styles.screen, artifactView.editor && landscape ? { backgroundColor: '#000' } : null]}>
+        <StatusBar style="dark" hidden={!!artifactView.editor && landscape} />
+        {/* エディターを横で見ている間は、上の帯を出さず映像を画面いっぱいにする（戻るはスマホの戻る操作か縦に戻す） */}
+        {artifactView.editor && landscape ? null : (
         <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
           <Pressable
             onPress={() => setScreen(currentProject ? 'chat' : 'projects')}
@@ -4252,6 +4267,7 @@ function AppMain() {
             <Ionicons name="open-outline" size={22} color="#162e27" />
           </Pressable>
         </View>
+        )}
         <WebView
           source={{ uri: artifactView.url }}
           startInLoadingState
