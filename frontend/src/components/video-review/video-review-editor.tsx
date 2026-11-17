@@ -132,6 +132,8 @@ export type SequenceClip = {
   crop?: { top: number; bottom: number; left: number; right: number } | null;
   // Per-clip audio volume multiplier (1 = unchanged).
   volume?: number | null;
+  /** 素材を流す速さ（1.08 なら1.08倍速。タイムラインの1秒＝素材の speed 秒）。無ければ 1 */
+  speed?: number | null;
   // Opt-in special effects applied to this clip (NLE-style: pick a clip, add an effect).
   // First effect: 'popout' (人物を切り抜いてカードの上辺から飛び出させる). Empty/absent = none.
   effects?: ClipEffect[] | null;
@@ -1790,6 +1792,11 @@ export function VideoReviewEditor({
     },
     [duration, timelineDuration, nativeShell, nativeSend, snapEnabled, playheadSnapPoints, placePlayhead]
   );
+  // 確かめの道具（?previewdiag=1 の時だけ）: 再生位置を秒で動かす
+  useEffect(() => {
+    if (typeof window === 'undefined' || new URLSearchParams(window.location.search).get('previewdiag') !== '1') return;
+    (window as unknown as { __seekTimeline?: (t: number) => void }).__seekTimeline = seekTimeline;
+  }, [seekTimeline]);
 
   // P キーの全画面: プレビューの欄（映像と字幕・ぼかしの枠）を画面いっぱいに出す
   const previewAreaRef = useRef<HTMLDivElement | null>(null);

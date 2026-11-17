@@ -77,7 +77,7 @@ def trim_sequence(sequence: dict[str, Any], assets: dict[str, dict[str, Any]],
 
 def _shift_source(cut: dict[str, Any], clip: dict[str, Any], asset: dict[str, Any] | None,
                   rel: float, fps: float) -> None:
-    """Start the clip `rel` seconds later in its source (the export plays sources at 1x)."""
+    """Start the clip `rel` timeline seconds later in its source (× the clip's speed)."""
     from app.api import production_asset_routes as par
 
     if not asset or asset.get("kind") != "video" or par._asset_is_image_kind(asset):
@@ -95,7 +95,7 @@ def _shift_source(cut: dict[str, Any], clip: dict[str, Any], asset: dict[str, An
             params["bake_start"], params["bake_end"] = par._popout_bake_range(asset, ss, se)
         cut["effects"] = [dict(e, params=params) if e is popout else e
                           for e in (clip.get("effects") or [])]
-    start = ss + rel
+    start = ss + rel * par._clip_speed(clip)
     if start >= se - 0.5 / fps:
         # past the end of a source shorter than its slot: the export holds the last frame
         cut["source_start"] = cut["source_end"] = round(max(ss, se - 1 / fps), 6)
