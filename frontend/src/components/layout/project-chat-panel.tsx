@@ -87,6 +87,8 @@ interface ProjectChatPanelProps {
   commandCenter?: boolean;
   /** エディターの中の「ダンと制作」の欄（app/services/editor_rooms.py の部屋）。上の帯を細くし、部屋の操作を出さない */
   editorChat?: boolean;
+  /** エディターの欄の上の帯の左に置く物（スマホのタイムライン／チャットの切り替え） */
+  editorHeaderLead?: ReactNode;
 }
 
 const INITIAL_CHAT_RENDER_COUNT = 80;
@@ -2309,7 +2311,7 @@ function mergeFreshMessages(
   return { messages: merged };
 }
 
-export function ProjectChatPanel({ projectId, commandCenter = false, editorChat = false }: ProjectChatPanelProps) {
+export function ProjectChatPanel({ projectId, commandCenter = false, editorChat = false, editorHeaderLead }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const router = useRouter();
   const isMobile = useIsMobile();
@@ -3118,14 +3120,11 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
       }`}
       style={!isMobile && isPreviewOpenForProject ? { width: chatWidth } : undefined}
     >
-      <div className={`flex shrink-0 items-center border-b border-border ${editorChat ? 'gap-2 px-3 py-2' : commandCenter ? 'flex-wrap gap-2 px-4 py-3 [&>button]:min-h-11' : 'gap-3 py-3 pl-12 pr-16 md:pl-4 md:pr-16'}`}>
+      <div className={`flex shrink-0 items-center border-b border-border ${editorChat ? 'gap-2 px-2 py-1.5' : commandCenter ? 'flex-wrap gap-2 px-4 py-3 [&>button]:min-h-11' : 'gap-3 py-3 pl-12 pr-16 md:pl-4 md:pr-16'}`}>
         {!commandCenter && !editorChat && <FolderKanban className="h-5 w-5 shrink-0 text-primary" />}
-        {editorChat && (
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-semibold">ダンと制作</div>
-            <div className="truncate text-[11px] text-muted-foreground">{project?.title?.replace(/^制作(ライブラリ)?: /, '') || '読み込み中…'}</div>
-          </div>
-        )}
+        {/* 題（「ダンと制作」・作品名）は出さない（2026-11-17 本人「チャットして作るのは分かりきっている」）。
+            スマホではここにタイムラインへ戻るボタンが入る */}
+        {editorChat && <div className="flex min-w-0 flex-1 items-center">{editorHeaderLead}</div>}
         {artifacts.length > 0 && !editorChat && (
           <div className="relative shrink-0">
             <button
@@ -3327,7 +3326,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
           />
         </div>
       ) : (
-      <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto overflow-x-hidden">
         {projectId && !isBooting ? <ParallelJobsBar projectId={projectId} onShowMessage={highlightAndScroll} /> : null}
         {/* 新着が無くても、上へスクロール中は常に「最新へ」ジャンプを出す */}
         {(hasNewMessages || isAwayFromBottom) && (

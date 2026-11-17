@@ -9,7 +9,24 @@
 
 import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
 
-export type PhoneLaneItem = { s: number; e: number; color: string };
+/** img: 絵（frame があれば 30コマの絵の帯のそのコマ。PC のタイムラインと同じ絵） */
+export type PhoneLaneItem = { s: number; e: number; color: string; img?: string; frame?: number };
+
+// 帯に描く絵。読み終わるたびに imgRev を進めて、次のコマで描き直す。
+const STRIP_FRAMES = 30;
+const imgCache = new Map<string, HTMLImageElement | null>();
+let imgRev = 0;
+function phoneImg(url: string): HTMLImageElement | null {
+  const got = imgCache.get(url);
+  if (got !== undefined) return got && got.complete && got.naturalWidth ? got : null;
+  const im = new Image();
+  im.decoding = 'async';
+  im.onload = () => { imgRev += 1; };
+  im.onerror = () => { imgCache.set(url, null); };
+  im.src = url;
+  imgCache.set(url, im);
+  return null;
+}
 export type PhoneLane = { key: string; zone: 'visual' | 'audio'; items: PhoneLaneItem[]; maxLen: number };
 
 /** 帯と映像の面が分け合う状態: 1秒が何px か、なぞっている間の時刻、なぞっているか */
@@ -285,7 +302,7 @@ export function PhoneTimeline({
       const h = host.clientHeight;
       const dpr = Math.min(3, window.devicePixelRatio || 1);
       const t = ctl.dragT ?? Number(liveTimeRef.current || 0);
-      const key = `${maxLaneRef.current}|${w}x${h}@${dpr}|${t.toFixed(4)}|${ctl.pps.toFixed(4)}|${lanesRev.current}|${durationRef.current}`;
+      const key = `${maxLaneRef.current}|${w}x${h}@${dpr}|${t.toFixed(4)}|${ctl.pps.toFixed(4)}|${lanesRev.current}|${durationRef.current}|${imgRev}`;
       if (key === last) return;
       last = key;
       if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
@@ -345,6 +362,23 @@ export function PhoneTimeline({
           const cw = Math.max(1, x2 - x - (x2 - x > 3 ? 1 : 0));
           g.fillStyle = it.color;
           g.fillRect(x, y, cw, lh);
+          // 絵は段が 10px 以上・クリップが 14px 以上ある時だけ、クリップの頭に置く（はみ出す分は切る）
+          if (it.img && lh >= 10 && cw >= 14) {
+            const im = phoneImg(it.img);
+            if (im) {
+              const strip = it.frame != null;
+              const fw = strip ? im.naturalWidth / STRIP_FRAMES : im.naturalWidth;
+              const fh = im.naturalHeight;
+              const sx = strip ? Math.max(0, Math.min(STRIP_FRAMES - 1, it.frame || 0)) * fw : 0;
+              const dh = lh - 2;
+              const dw = Math.min(cw - 2, dh * (fw / Math.max(1, fh)));
+              if (dw > 4) {
+                // 縦横比を保ったまま、置ける幅に合わせて左右を切る
+                const sw = Math.min(fw, fw * (dw / (dh * (fw / Math.max(1, fh)))));
+                g.drawImage(im, sx, 0, sw, fh, x + 1, y + 1, dw, dh);
+              }
+            }
+          }
         }
         y += lh + gap;
         if (y > h) break;

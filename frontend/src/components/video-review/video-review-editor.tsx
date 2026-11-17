@@ -14,8 +14,12 @@ import {
 import {
   ArrowLeft,
   Check,
+  ChevronDown,
+  ChevronRight,
   MapPin,
+  Maximize,
   Maximize2,
+  Minimize,
   MessageSquare,
   MoreVertical,
   Music2,
@@ -593,6 +597,28 @@ export function computeClipLanes(tracks: Array<{ type?: string | null; clips?: S
   return out;
 }
 
+/** まとめて動かすクリップの新しい段。shift の段（zone）にあるクリップを、段の並び（layers は小さい順）の中で
+ *  同じ段数だけずらす。並びの外へ出る分は上（下）に新しい段を足す。下は一番下の段で止め、まとめた形を崩さない。
+ *  ずらさないクリップは null。 */
+export function blockLaneShift(
+  lanes: Array<ClipLane | undefined>,
+  shift?: { zone: 'visual' | 'audio'; steps: number; layers: number[] },
+): Array<number | null> {
+  if (!shift || !shift.steps || !shift.layers.length) return lanes.map(() => null);
+  const L = shift.layers;
+  const idxs = lanes.map((l) => (l && l.zone === shift.zone ? L.indexOf(l.layer) : -1));
+  const present = idxs.filter((i) => i >= 0);
+  if (!present.length) return lanes.map(() => null);
+  const steps = Math.max(shift.steps, -Math.min(...present));
+  if (!steps) return lanes.map(() => null);
+  const top = L[L.length - 1];
+  return idxs.map((i) => {
+    if (i < 0) return null;
+    const j = i + steps;
+    return j < L.length ? L[j] : top + (j - (L.length - 1));
+  });
+}
+
 const laneKeyOf = (lanes: Map<string, ClipLane>, id: string, layer?: number) => {
   const l = lanes.get(String(id));
   return `${l?.zone || 'visual'}#${layer ?? l?.layer ?? 0}`;
@@ -794,7 +820,7 @@ export function VideoReviewEditor({
   /** 上のボタンの並びに置く物（例: 使用素材）。スマホではメニューの中に出す（2026-11-17 本人「使用素材はプレビューに被せると邪魔」）。 */
   headerTools?: ReactNode;
   /** スマホの形で、タイムラインと入れ替えて（横持ちでは右に重ねて）出す会話の欄 */
-  phoneChat?: ReactNode;
+  phoneChat?: ((lead: ReactNode) => ReactNode) | null;
 }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -3801,7 +3827,10 @@ export function VideoReviewEditor({
   // neighbours the block now overlaps get trimmed/deleted/split just like a single-clip move.
   // Computed from the drag-start snapshot (non-cumulative); clamped so the earliest clip
   // never crosses 0.
-  const applyBlockMove = useCallback((delta: number, ids: string[]) => {
+  // 段の上下（2026-11-17 本人「複数選んだ状態でレーンの上下に移動できるように」）: laneShift は、つかんだ
+  // クリップの段（zone）で何段動かすか（+ = 上の段＝前へ）。その段にあるクリップだけを同じ段数だけずらし、
+  // 並びの外へ出る分は新しい段になる。別の段（映像をつかんだ時の音声など）のクリップは時刻だけ動く。
+  const applyBlockMove = useCallback((delta: number, ids: string[], laneShift?: { zone: 'visual' | 'audio'; steps: number; layers: number[] }) => {
     const snap = dragSnapshotRef.current;
     if (!snap) return;
     const r = (v: number) => Number(v.toFixed(2));
@@ -3815,8 +3844,15 @@ export function VideoReviewEditor({
     if (inSet.length === 0) return;
     const minStart = Math.min(...inSet.map((c) => c.timeline_start));
     const eff = Math.max(delta, -minStart); // keep the block at/after t=0
+    const lanes = computeClipLanes(snap.tracks || []);
+    const shiftOf = blockLaneShift(inSet.map((c) => lanes.get(String(c.id))), laneShift);
     const moved = new Map<string, Partial<SequenceClip>>();
-    for (const c of inSet) moved.set(c.id, { timeline_start: r(c.timeline_start + eff), timeline_end: r(c.timeline_end + eff) });
+    inSet.forEach((c, i) => {
+      const f: Partial<SequenceClip> = { timeline_start: r(c.timeline_start + eff), timeline_end: r(c.timeline_end + eff) };
+      const layer = shiftOf[i];
+      if (layer !== null) f.layer = layer;
+      moved.set(c.id, f);
+    });
     commitMovedSet(snap, moved);
   }, [linkAV, commitMovedSet]);
 
@@ -3953,7 +3989,7 @@ export function VideoReviewEditor({
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
       } else if (dragSelectionRef.current.length > 1) {
-        // Block move: shift the whole selection together (no lane change, no overwrite). Magnet:
+        // Block move: shift the whole selection together (time + lane steps). Magnet:
         // snap the BLOCK's leading or trailing edge (whichever is closer) to a neighbour/playhead/
         // end, using the original block bounds from the drag-start snapshot.
         let blockDelta = delta;
@@ -3970,7 +4006,19 @@ export function VideoReviewEditor({
             blockDelta = delta + (Math.abs(adjStart) <= Math.abs(adjEnd) ? adjStart : adjEnd);
           }
         }
-        applyBlockMove(blockDelta, dragSelectionRef.current);
+        // 縦: カーソルが同じ種類（映像／音声）の別の段の中ほどに入ったら、その段数だけまとめて上下に動かす
+        // （1つだけ動かす時と同じく、境目の近くでは切り替えない）
+        const yWithinB = event.clientY - rect.top;
+        const geomB = dragLaneGeomRef.current || laneGeomRef.current;
+        const candB = geomB.find(
+          (g) => g.zone === sequenceClipDrag.zone && yWithinB >= g.top + 8 && yWithinB < g.bottom - 8
+        );
+        if (candB) dragLayerRef.current = candB.layer;
+        const zoneLayers = Array.from(new Set(geomB.filter((g) => g.zone === sequenceClipDrag.zone).map((g) => g.layer))).sort((a, b) => a - b);
+        const fromIdx = zoneLayers.indexOf(sequenceClipDrag.originalLayer);
+        const toIdx = dragLayerRef.current !== null ? zoneLayers.indexOf(dragLayerRef.current) : fromIdx;
+        const steps = fromIdx >= 0 && toIdx >= 0 ? toIdx - fromIdx : 0;
+        applyBlockMove(blockDelta, dragSelectionRef.current, steps ? { zone: sequenceClipDrag.zone, steps, layers: zoneLayers } : undefined);
       } else {
         const length = sequenceClipDrag.originalTimelineEnd - sequenceClipDrag.originalTimelineStart;
         const rawStart = sequenceClipDrag.originalTimelineStart + delta;
@@ -4473,12 +4521,44 @@ export function VideoReviewEditor({
     };
   }, [compact]);
   const phoneLandscape = compact && phoneVp.w > phoneVp.h;
-  // 横持ちで再生中は、押してから3秒で再生のボタンを隠す（YouTube と同じ）
+  // 再生中は、押してから3秒で映像の上のボタンを隠す（縦も横も YouTube と同じ。止めている間は出したまま）
   useEffect(() => {
-    if (!phoneLandscape || !phoneControls || !playing || phoneChatOpen || phoneMenuOpen) return;
+    if (!compact || !phoneControls || !playing || phoneMenuOpen || (phoneLandscape && phoneChatOpen)) return;
     const id = window.setTimeout(() => setPhoneControls(false), 3000);
     return () => window.clearTimeout(id);
-  }, [phoneLandscape, phoneControls, playing, phoneChatOpen, phoneMenuOpen]);
+  }, [compact, phoneLandscape, phoneControls, playing, phoneChatOpen, phoneMenuOpen]);
+  // ブラウザで開いた時は、最初に触った所で全画面にする（Chrome の住所の欄・タブの帯の分だけ狭くなるため。
+  // 2026-11-17 本人）。全画面は人が触った時にしか入れないので、最初の指を離した時に入れる。
+  // 抜けた後は映像の右下の全画面のボタンで戻る。アプリの中（?phone=1）は元から全面なので何もしない。
+  const [phoneFull, setPhoneFull] = useState(false);
+  const phoneCanFull = useMemo(() => {
+    if (!compact || typeof document === 'undefined') return false;
+    const inApp = new URLSearchParams(window.location.search).get('phone') === '1' || !!(window as unknown as { ReactNativeWebView?: unknown }).ReactNativeWebView;
+    const standalone = window.matchMedia?.('(display-mode: standalone)').matches || window.matchMedia?.('(display-mode: fullscreen)').matches;
+    return !inApp && !standalone && !!document.fullscreenEnabled;
+  }, [compact]);
+  const phoneToggleFull = useCallback(() => {
+    if (document.fullscreenElement) { document.exitFullscreen?.().catch(() => {}); return; }
+    document.documentElement.requestFullscreen?.({ navigationUI: 'hide' } as FullscreenOptions).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!phoneCanFull) return;
+    const sync = () => setPhoneFull(!!document.fullscreenElement);
+    sync();
+    document.addEventListener('fullscreenchange', sync);
+    let tried = false;
+    const first = () => {
+      if (tried) return;
+      tried = true;
+      window.removeEventListener('pointerup', first, true);
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen?.({ navigationUI: 'hide' } as FullscreenOptions).catch(() => {});
+    };
+    window.addEventListener('pointerup', first, true);
+    return () => {
+      document.removeEventListener('fullscreenchange', sync);
+      window.removeEventListener('pointerup', first, true);
+    };
+  }, [phoneCanFull]);
   const phoneLanes = useMemo<PhoneLane[]>(() => {
     if (!compact) return [];
     const out: PhoneLane[] = [];
@@ -4492,14 +4572,28 @@ export function VideoReviewEditor({
               : it.itemType === 'caption' ? '#a855f7'
                 : it.itemType === 'effect' ? '#f59e0b'
                   : kind === 'image' ? '#14b8a6' : '#3b82f6';
-          return { s: Number(it.start) || 0, e: Number(it.end) || 0, color };
+          // 絵: PC のタイムラインと同じ（動画はクリップが使っている所の1分の絵の帯の1コマ、画像はその画像）
+          let img: string | undefined;
+          let frame: number | undefined;
+          const clip = it.clip;
+          if (clip && it.itemType === 'video' && !isSceneClip(clip)) {
+            const asset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
+            const isImg = kind === 'image' || asset?.kind === 'image';
+            if (isImg) img = asset?.thumb_base || asset?.thumbnail_url || undefined;
+            else if (asset?.filmstrip_base) {
+              const sec = Math.max(0, Number(clip.source_start || 0) + 0.5);
+              img = `${asset.filmstrip_base}&m=${Math.floor(sec / 60)}`;
+              frame = Math.floor((sec % 60) / 2);
+            } else img = asset?.thumbnail_url || undefined;
+          }
+          return { s: Number(it.start) || 0, e: Number(it.end) || 0, color, img, frame };
         })
         .sort((a, b) => a.s - b.s);
       const maxLen = items.reduce((m, it) => Math.max(m, it.e - it.s), 0);
       out.push({ key: lane.key, zone: lane.zone, items, maxLen });
     }
     return out;
-  }, [compact, timelineLanes]);
+  }, [compact, timelineLanes, sequenceAssetMap]);
   const phoneSetPlaying = useCallback((p: boolean) => { if (p) setPlayRate(1); setPlaying(p); }, []);
   const phonePrimeScale = useRef(false);
   useEffect(() => {
@@ -4813,29 +4907,20 @@ export function VideoReviewEditor({
   const phoneView = () => {
     const [fa, fb] = (editSequence?.format || initialSequence?.format || '9:16').split(':').map(Number);
     const ratio = fa && fb ? fa / fb : 9 / 16;
-    const HEAD = 44;
-    const CTRL = 48;
-    const below = phoneChatOpen ? Math.max(300, Math.round(phoneVp.h * 0.45)) : 132;
-    const videoH = Math.max(160, Math.round(Math.min(phoneVp.w / ratio, phoneVp.h - HEAD - CTRL - below)));
-    // 縦持ちのタイムラインは残りの高さを使う（段が太く見える）。下に使い方の一行
-    const stripH = Math.max(96, Math.min(300, phoneVp.h - HEAD - videoH - CTRL - 8 - 56));
+    // 縦持ち: 映像の上にも下にも帯を置かない（戻る・題・メニュー・再生・時刻は映像の中。2026-11-17 本人
+    // 「プレビューとチャットの間の物を減らす。再生ボタンと時刻は YouTube みたいにプレビューの中に」）。
+    // 下はタイムラインかチャットで、チャットは画面の半分以上を使う。
+    const below = phoneChatOpen ? Math.max(320, Math.round(phoneVp.h * 0.55)) : 170;
+    const videoH = Math.max(160, Math.round(Math.min(phoneVp.w / ratio, phoneVp.h - below)));
+    const stripH = Math.max(110, phoneVp.h - videoH - 8);
     const playIcon = (big: boolean) => (playing ? (
       <svg viewBox="0 0 24 24" className={`${big ? 'h-9 w-9' : 'h-6 w-6'} fill-current`}><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
     ) : (
       <svg viewBox="0 0 24 24" className={`${big ? 'h-9 w-9' : 'h-6 w-6'} fill-current`}><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.4-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z" /></svg>
     ));
-    const togglePlay = () => phoneSetPlaying(!playingRef.current);
-    const chatButton = phoneChat ? (
-      <button
-        type="button"
-        data-phone-chat-toggle
-        onClick={() => { setPhoneChatOpen((v) => !v); setPhoneControls(true); }}
-        className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium ${phoneChatOpen ? 'bg-primary text-primary-foreground' : phoneLandscape ? 'bg-white/15 text-white' : 'bg-muted text-foreground'}`}
-      >
-        <MessageSquare className="h-4 w-4" />
-        {phoneChatOpen && !phoneLandscape ? 'タイムライン' : 'チャット'}
-      </button>
-    ) : null;
+    const togglePlay = () => { phoneSetPlaying(!playingRef.current); setPhoneControls(true); };
+    const openChat = () => { setPhoneChatOpen(true); setPhoneControls(true); };
+    const closeChat = () => { setPhoneChatOpen(false); setPhoneControls(true); };
     const menuButton = (
       <button type="button" data-phone-menu onClick={() => setPhoneMenuOpen(true)} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full" aria-label="メニュー">
         <MoreVertical className="h-5 w-5" />
@@ -4846,6 +4931,32 @@ export function VideoReviewEditor({
         <ArrowLeft className="h-5 w-5" />
       </button>
     ) : null;
+    const fullButton = phoneCanFull ? (
+      <button type="button" data-phone-full onClick={phoneToggleFull} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full" aria-label={phoneFull ? '全画面をやめる' : '全画面'}>
+        {phoneFull ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
+      </button>
+    ) : null;
+    // 横持ちの右上のチャットのボタン（縦持ちはタイムラインの右下の丸いボタンとチャットの帯の左の ⌄）
+    const landChatButton = phoneChat ? (
+      <button
+        type="button"
+        data-phone-chat-toggle
+        onClick={() => (phoneChatOpen ? closeChat() : openChat())}
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${phoneChatOpen ? 'bg-white text-black' : ''}`}
+        aria-label={phoneChatOpen ? 'チャットを閉じる' : 'チャット'}
+      >
+        <MessageSquare className="h-5 w-5" />
+      </button>
+    ) : null;
+    const chatLead = !phoneLandscape ? (
+      <button type="button" data-phone-chat-close onClick={closeChat} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-foreground hover:bg-muted" aria-label="タイムラインに戻る">
+        <ChevronDown className="h-5 w-5" />
+      </button>
+    ) : (
+      <button type="button" data-phone-chat-close onClick={closeChat} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-foreground hover:bg-muted" aria-label="チャットを閉じる">
+        <ChevronRight className="h-5 w-5" />
+      </button>
+    );
     return (
       <div
         ref={editorRootRef}
@@ -4854,13 +4965,6 @@ export function VideoReviewEditor({
         className="relative flex h-full min-h-0 w-full flex-col overflow-hidden bg-black text-foreground outline-none"
       >
         <style>{DAN_HANDS_CSS}</style>
-        {!phoneLandscape ? (
-          <div className="flex shrink-0 items-center gap-1 border-b border-border bg-background px-1" style={{ height: HEAD }}>
-            {backButton}
-            <div className="min-w-0 flex-1 truncate px-1 text-sm font-semibold">{title || '作品'}</div>
-            {menuButton}
-          </div>
-        ) : null}
         <div
           ref={previewAreaRef}
           data-phone-preview
@@ -4875,54 +4979,60 @@ export function VideoReviewEditor({
             onSeek={seekTimeline}
             playing={playing}
             setPlaying={phoneSetPlaying}
-            onTap={() => { if (phoneLandscape) setPhoneControls((v) => !v); else togglePlay(); }}
+            onTap={() => setPhoneControls((v) => !v)}
           />
-          {phoneLandscape && phoneControls ? (
+          {phoneControls ? (
             <div className="pointer-events-none absolute inset-0 z-30 text-white" data-phone-overlay>
-              <div className="pointer-events-auto absolute inset-x-0 top-0 flex items-center gap-1 bg-gradient-to-b from-black/70 to-transparent px-2 pb-6 pt-2">
+              <div className="pointer-events-auto absolute inset-x-0 top-0 flex items-center gap-1 bg-gradient-to-b from-black/70 to-transparent px-1 pb-5 pt-1">
                 {backButton}
-                <div className="min-w-0 flex-1 truncate px-1 text-sm font-semibold">{title || '作品'}</div>
-                {chatButton}
+                <div className="min-w-0 flex-1 truncate px-1 text-sm font-semibold drop-shadow">{title || '作品'}</div>
+                {phoneLandscape ? landChatButton : null}
                 {menuButton}
               </div>
               <button
                 type="button"
                 data-phone-play
                 onClick={togglePlay}
-                className="pointer-events-auto absolute left-1/2 top-1/2 flex h-16 w-16 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/45"
+                className="pointer-events-auto absolute left-1/2 top-1/2 flex h-14 w-14 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/45"
                 aria-label={playing ? '一時停止' : '再生'}
               >
                 {playIcon(true)}
               </button>
-              <div className="pointer-events-auto absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-3 pb-2 pt-6">
-                <PhoneTime ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} className="mb-1 block font-mono text-xs tabular-nums text-white/90" />
-                <PhoneTimeline lanes={phoneLanes} ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} height={56} dark />
+              <div className="pointer-events-auto absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1 pt-5">
+                {phoneLandscape ? (
+                  <PhoneTimeline lanes={phoneLanes} ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} height={56} dark />
+                ) : null}
+                <div className="flex items-center">
+                  <PhoneTime ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} className="min-w-0 flex-1 px-1 font-mono text-xs tabular-nums text-white/90 drop-shadow" />
+                  {fullButton}
+                </div>
               </div>
             </div>
           ) : null}
         </div>
-        {!phoneLandscape ? (
-          <div className="flex shrink-0 items-center gap-2 border-b border-border bg-background px-2" style={{ height: CTRL }}>
-            <button type="button" data-phone-play onClick={togglePlay} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-foreground" aria-label={playing ? '一時停止' : '再生'}>
-              {playIcon(false)}
-            </button>
-            <PhoneTime ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} className="min-w-0 flex-1 font-mono text-sm tabular-nums text-muted-foreground" />
-            {chatButton}
-          </div>
-        ) : null}
         {!phoneLandscape && !phoneChatOpen ? (
-          <div className="min-h-0 flex-1 bg-background pt-2">
-            <PhoneTimeline lanes={phoneLanes} ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} height={stripH} maxLane={22} />
-            <div className="px-3 pt-2 text-[11px] text-muted-foreground">指で左右に送ると再生位置が動きます。映像の上をなぞっても動きます。2本指で広げると細かく見られます。</div>
+          <div className="relative min-h-0 flex-1 bg-background pt-2">
+            <PhoneTimeline lanes={phoneLanes} ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} height={stripH} maxLane={40} />
+            {phoneChat ? (
+              <button
+                type="button"
+                data-phone-chat-toggle
+                onClick={openChat}
+                className="absolute bottom-4 right-4 z-10 flex h-14 w-14 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg"
+                aria-label="チャット"
+              >
+                <MessageSquare className="h-6 w-6" />
+              </button>
+            ) : null}
           </div>
         ) : null}
         {phoneChat ? (
           <div
             data-phone-chat
-            className={`${phoneChatOpen ? 'flex' : 'hidden'} min-h-0 flex-col bg-background ${phoneLandscape ? 'absolute bottom-0 right-0 top-0 z-40 border-l border-border' : 'flex-1'}`}
+            className={`${phoneChatOpen ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-col overflow-hidden bg-background ${phoneLandscape ? 'absolute bottom-0 right-0 top-0 z-40 border-l border-border' : 'flex-1'}`}
             style={phoneLandscape ? { width: 'min(420px, 50vw)' } : undefined}
           >
-            <div className="min-h-0 flex-1">{phoneChat}</div>
+            <div className="min-h-0 min-w-0 flex-1">{phoneChat(chatLead)}</div>
           </div>
         ) : null}
         {phoneMenuOpen ? (

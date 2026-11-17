@@ -5,7 +5,7 @@
 // （文字・音声・画像や動画の貼り付け）。部屋は本体のチャットと分かれ、ダンは本体の部屋の話と記憶を読める
 // （app/services/editor_rooms.py）。
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronRight, Loader2, MessageSquare } from 'lucide-react';
 
 import { ProjectChatPanel } from '@/components/layout/project-chat-panel';
@@ -56,7 +56,7 @@ export function EditorSplash() {
   );
 }
 
-function EditorDanChat({ roomId, contentId }: { roomId: string; contentId: string | null }) {
+function EditorDanChat({ roomId, contentId, headerLead }: { roomId: string; contentId: string | null; headerLead?: ReactNode }) {
   const key = `${roomId}:${contentId || ''}`;
   const [projectId, setProjectId] = useState<string | null>(roomCache.get(key) || null);
   const [failed, setFailed] = useState(false);
@@ -98,7 +98,7 @@ function EditorDanChat({ roomId, contentId }: { roomId: string; contentId: strin
       </div>
     );
   }
-  return <ProjectChatPanel key={projectId} projectId={projectId} editorChat />;
+  return <ProjectChatPanel key={projectId} projectId={projectId} editorChat editorHeaderLead={headerLead} />;
 }
 
 const OPEN_KEY = 'dan-editor-chat-open';
@@ -187,7 +187,7 @@ export function ProductionStudio({ roomId }: { roomId: string }) {
             roomId={roomId}
             onContentChange={setContentId}
             compact
-            phoneChat={contentId ? <EditorDanChat roomId={roomId} contentId={contentId} /> : null}
+            phoneChat={contentId ? (lead: ReactNode) => <EditorDanChat roomId={roomId} contentId={contentId} headerLead={lead} /> : null}
           />
         </div>
       </div>
