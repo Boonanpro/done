@@ -284,7 +284,8 @@ def history(prompt_id):
 def revert(prompt_id, version_sha, by='owner'):
     for record in _read_history(prompt_id):
         if record.get('sha') == version_sha:
-            when = record['at'][:16].replace('T', ' ')
+            from zoneinfo import ZoneInfo
+            when = datetime.fromisoformat(record['at']).astimezone(ZoneInfo('Asia/Tokyo')).strftime('%-m/%-d %H:%M')
             return save(prompt_id, record['text'], by=by, note=f'{when} の版（{WHO.get(record.get("by"), "")}）に戻した')
     raise KeyError(version_sha)
 

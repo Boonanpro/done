@@ -22,9 +22,9 @@ const SPOTS: Record<string, { x: number; y: number }> = {
   backend: { x: 65, y: 70 },
   lookup: { x: 20, y: 31 },
   stage: { x: 42, y: 26 },
-  work: { x: 64, y: 30 },
-  editor: { x: 80, y: 33 },
-  chat: { x: 91, y: 62 },
+  work: { x: 62, y: 25 },
+  editor: { x: 84, y: 38 },
+  chat: { x: 86, y: 68 },
 };
 
 const WHO: Record<string, string> = { owner: 'みきさん', dan: 'ダン', seed: '元の文' };
@@ -62,7 +62,7 @@ function House({ places, counts, active, onPick }: {
   places: PromptPlace[]; counts: Record<string, number>; active: string; onPick: (id: string) => void;
 }) {
   return (
-    <div className="relative w-full overflow-hidden rounded-xl border border-stone-200 bg-stone-100 shadow-sm">
+    <div className="relative mx-auto w-full max-w-[calc(56vh*1.5)] overflow-hidden rounded-xl border border-stone-200 bg-stone-100 shadow-sm">
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src="/prompts/dan-house.jpg" alt="ダンの中の場所" className="block w-full select-none" draggable={false} />
       {places.map(place => {
@@ -82,7 +82,7 @@ function House({ places, counts, active, onPick }: {
             )}
           >
             {place.name}
-            {counts[place.id] ? <span className="ml-1 font-normal text-stone-500">{counts[place.id]}</span> : null}
+            {counts[place.id] ? <span className="ml-1 hidden font-normal text-stone-500 sm:inline">{counts[place.id]}</span> : null}
           </button>
         );
       })}
@@ -265,6 +265,12 @@ function PromptsInner() {
     } catch (err) { setError(errorText(err)); }
   }, []);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    // スマホの幅では全文が絵の下に出るので、選んだら全文の所まで送る
+    if (id && typeof window !== 'undefined' && window.innerWidth < 1024) {
+      document.getElementById('prompt-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [id]);
 
   const counts = useMemo(() => {
     const out: Record<string, number> = {};
@@ -314,6 +320,10 @@ function PromptsInner() {
           </p>
         ) : null}
         <House places={places} counts={counts} active={place} onPick={p => go({ place: p })} />
+        <p className="mx-auto max-w-3xl text-center text-xs leading-relaxed text-stone-500">
+          みきさんの声は受付の「通話のダン」が聞き、仕分け机の「振り分け」が行き先を選びます。調べものは2階の「調べもの係」、
+          下書きや迷う頼みは「判断役」、作る・直す・手続きは「作業の部屋」へ回り、そこで働くのは右の「チャットのダン」と同じダンです。
+        </p>
 
         <div className="grid gap-4 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
           <aside className={cn('space-y-3', id && 'hidden lg:block')}>
@@ -334,7 +344,7 @@ function PromptsInner() {
               <p className="text-sm text-stone-500">{place === 'owner' ? 'ここはみきさん自身です。ダンが読む指示文はありません。' : '読んでいます…'}</p>
             ) : null}
           </aside>
-          <main className={cn('min-w-0 rounded-xl border border-stone-200 bg-white p-4', !id && 'hidden lg:block')}>
+          <main id="prompt-detail" className={cn('scroll-mt-2 min-w-0 rounded-xl border border-stone-200 bg-white p-4', !id && 'hidden lg:block')}>
             {id ? (
               <Editor id={id} onBack={() => go({})} onSaved={() => void load()} />
             ) : (
