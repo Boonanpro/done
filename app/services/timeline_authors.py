@@ -29,7 +29,7 @@ _KEY_WORDS = [
     ({"source_start", "source_end"}, "使う範囲"),
     ({"track"}, "段"),
     ({"volume", "muted", "fade_in", "fade_out", "audio_keys"}, "音量"),
-    ({"position", "transform_keys", "crop", "fit", "scale", "rotation"}, "画面での大きさ・位置"),
+    ({"position", "transform", "motion_keys", "transform_keys", "crop", "fit", "scale", "rotation"}, "画面での大きさ・位置"),
     ({"text", "words"}, "文字"),
     ({"style"}, "字の見た目"),
     ({"asset_id"}, "素材"),
@@ -126,7 +126,8 @@ def diff(before: dict[str, Any] | None, after: dict[str, Any] | None) -> list[di
         keys = {k for k in (a.keys() | b.keys()) - {"_lane"} if not _close(a.get(k), b.get(k))}
         if not keys:
             continue
-        small = {k for k in keys if k in ("timeline_start", "timeline_end", "source_start", "source_end", "volume", "track")}
+        small = {k for k in keys if k in ("timeline_start", "timeline_end", "source_start", "source_end", "volume", "track",
+                                          "transform", "position", "crop", "opacity")}
         rows.append({"clip_id": cid, "what": _what(a, b, keys), "lane": b["_lane"],
                      "start": b.get("timeline_start"), "end": b.get("timeline_end"),
                      "before": {k: a.get(k) for k in sorted(small)}, "after": {k: b.get(k) for k in sorted(small)}})

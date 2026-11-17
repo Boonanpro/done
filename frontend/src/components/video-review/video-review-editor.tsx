@@ -55,6 +55,17 @@ import { isOneForm, motionAt, setKeyAt, sortedKeys, type MotionKey } from './pla
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
 
+/** A form control whose value is a timeline setting (slider, number box, select, checkbox…), not
+ *  free text. `typing` = only the ones still being typed into (number boxes). */
+function isValueControl(el: Element | EventTarget | null, typing = false): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el instanceof HTMLSelectElement) return !typing;
+  if (!(el instanceof HTMLInputElement)) return false;
+  const t = el.type;
+  if (typing) return t === 'number';
+  return ['range', 'number', 'checkbox', 'radio', 'color'].includes(t);
+}
+
 type Tool = 'select' | 'rect' | 'freehand' | 'marker';
 type Intent = 'blur' | 'cut_keep' | 'cut_remove' | 'caption' | 'replace' | 'generate' | 'motion' | 'audio' | 'comment';
 
@@ -1916,11 +1927,33 @@ export function VideoReviewEditor({
     if (histCheckpointRef.current === null) histCheckpointRef.current = prev;
     histPrevRef.current = cur;
     if (histTimerRef.current) clearTimeout(histTimerRef.current);
-    histTimerRef.current = setTimeout(() => {
+    const closeWhenIdle = () => {
+      // A slider held down (even paused mid-drag) or a number box still being typed in is one
+      // gesture: it becomes one undo step when the pointer is released / the box is left.
+      if (pointerHeldRef.current || isValueControl(document.activeElement, true)) {
+        histTimerRef.current = setTimeout(closeWhenIdle, 300);
+        return;
+      }
       histTimerRef.current = null;
       closeOwnBurst();
-    }, 300);
+    };
+    histTimerRef.current = setTimeout(closeWhenIdle, 300);
   }, [annotations, editSequence]);
+  const pointerHeldRef = useRef(false);
+  useEffect(() => {
+    const down = () => { pointerHeldRef.current = true; };
+    const up = () => { pointerHeldRef.current = false; };
+    window.addEventListener('pointerdown', down, true);
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', up, true);
+    window.addEventListener('blur', up);
+    return () => {
+      window.removeEventListener('pointerdown', down, true);
+      window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', up, true);
+      window.removeEventListener('blur', up);
+    };
+  }, []);
 
   const getPoint = useCallback((event: React.PointerEvent): Point | null => {
     const stage = stageRef.current;
@@ -2498,6 +2531,18 @@ export function VideoReviewEditor({
     if (clipIds.size > 0 || annIds.size === 0) splitClipAtTime(currentTime, clipIds);
   }, [currentTime, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds, splitAnnotationAtTime, splitClipAtTime]);
 
+  // After undo/redo the selection stays on what still exists, so the side panel (サイズ・位置 etc.)
+  // stays open on the clip being adjusted (11/17 本人: 位置・サイズを直して Ctrl+Z で戻したい).
+  const keepLiveSelection = useCallback((restored: HistSnapshot) => {
+    const clipIds = new Set<string>();
+    for (const track of restored.sequence?.tracks || []) for (const c of track.clips || []) clipIds.add(String(c.id));
+    const annIds = new Set(restored.annotations.map((a) => a.id));
+    setSelectedSequenceClipId((id) => (id && clipIds.has(id) ? id : null));
+    setSelectedSequenceClipIds((ids) => ids.filter((id) => clipIds.has(id)));
+    setSelectedId((id) => (id && annIds.has(id) ? id : null));
+    setSelectedIds((ids) => ids.filter((id) => annIds.has(id)));
+  }, []);
+
   const undo = useCallback(() => {
     flushHistory();
     const step = histPastRef.current.pop();
@@ -2507,8 +2552,9 @@ export function VideoReviewEditor({
     histPrevRef.current = restored; // pre-sync so restoring doesn't record a new entry
     setAnnotations(restored.annotations);
     setEditSequence(restored.sequence);
-    clearSelection();
-  }, [annotations, editSequence, flushHistory, clearSelection]);
+    setDragCrop(null);
+    keepLiveSelection(restored);
+  }, [annotations, editSequence, flushHistory, keepLiveSelection]);
 
   const redo = useCallback(() => {
     flushHistory();
@@ -2519,8 +2565,9 @@ export function VideoReviewEditor({
     histPrevRef.current = restored;
     setAnnotations(restored.annotations);
     setEditSequence(restored.sequence);
-    clearSelection();
-  }, [annotations, editSequence, flushHistory, clearSelection]);
+    setDragCrop(null);
+    keepLiveSelection(restored);
+  }, [annotations, editSequence, flushHistory, keepLiveSelection]);
 
   // キーボードは最後に押した所に効かせる（2026-11-13 本人）: チャットの入力欄に文字を打った後に
   // タイムラインやプレビューを押したら、入力欄から外してエディターで受ける。タイムラインの部品は
@@ -2551,8 +2598,14 @@ export function VideoReviewEditor({
       // Don't steal keys while typing, but DO allow Space/Delete/arrows when a button
       // has focus (e.g. right after clicking Play or a tool) — Space/etc. handlers
       // below call preventDefault so the focused button isn't also triggered.
-      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
       const modKey = event.ctrlKey || event.metaKey;
+      const undoKey = modKey && !event.altKey && (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y');
+      // Value controls (sliders, number boxes, selects, checkboxes) write straight into the timeline, so
+      // Ctrl/Cmd+Z there is the editor's undo, not the box's own text undo (11/17 本人: 位置・サイズを
+      // 直して Ctrl+Z が効かなかった). Text boxes (clip name, caption text, chat) keep their own undo.
+      if (undoKey && isValueControl(target) && editorRootRef.current?.contains(target)) {
+        (target as HTMLElement).blur();
+      } else if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
       if (modKey && event.key.toLowerCase() === 'z') {
         event.preventDefault();
         if (event.shiftKey) redo();

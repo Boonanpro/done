@@ -61,3 +61,13 @@ def test_commit_draft_records_dan(tmp_path, monkeypatch):
     last = ta.last_by(room, "w2")
     assert last["c1"]["label"] == "ダン（会話）" and last["c1"]["tool"] == "move_clip"
     assert last["c1"]["what"] == ["位置"]
+
+
+def test_transform_change_is_named_with_values():
+    # 11/17: the owner's サイズ・位置 change showed as その他の設定 with empty before/after.
+    def seq(tf):
+        return {"tracks": [{"id": "V1", "clips": [{"id": "c1", "timeline_start": 0, "timeline_end": 5, "transform": tf}]}]}
+    rows = ta.diff(seq({"scale": 1.01, "x": 0.13, "y": 0}), seq({"scale": 1.16, "x": 0.075, "y": 0}))
+    assert rows[0]["what"] == ["画面での大きさ・位置"]
+    assert rows[0]["before"] == {"transform": {"scale": 1.01, "x": 0.13, "y": 0}}
+    assert rows[0]["after"] == {"transform": {"scale": 1.16, "x": 0.075, "y": 0}}
