@@ -319,6 +319,18 @@ def remove_clip(seq: dict[str, Any], *, clip_id: str, linked: bool = True) -> di
     return {"ok": True, "removed": sorted(doomed)}
 
 
+def _source_rate(c: dict[str, Any]) -> float:
+    """Source seconds played per timeline second. A clip with speed_keys has no single
+    speed; its current average (source span / timeline span) keeps the trim proportional."""
+    spd = _f(c.get("speed"), 1.0) or 1.0
+    if c.get("speed_keys"):
+        span_t = _f(c.get("timeline_end")) - _f(c.get("timeline_start"))
+        span_s = _f(c.get("source_end")) - _f(c.get("source_start"))
+        if span_t > 1e-6 and span_s > 1e-6:
+            spd = span_s / span_t
+    return spd if spd > 0 else 1.0
+
+
 def trim_clip(seq: dict[str, Any], assets: dict, *, clip_id: str, edge: str, new_time: float) -> dict[str, Any]:
     """Move one edge (left|right) of a clip (and its A/V twin) to `new_time`."""
     _, _, clip = _find_clip(seq, clip_id)
@@ -333,15 +345,16 @@ def trim_clip(seq: dict[str, Any], assets: dict, *, clip_id: str, edge: str, new
         ts, te = _f(c.get("timeline_start")), _f(c.get("timeline_end"))
         ss = _f(c.get("source_start"))
         has_src = c.get("source_end") is not None and not c.get("freeze") and str(c.get("kind")) != "image"
+        spd = _source_rate(c)   # source seconds per timeline second (2026-11-18: speed 1.08/0.7 clips broke)
         if edge == "left":
             nt = min(max(0.0, _f(new_time)), te - MIN_CLIP)
             d = nt - ts
-            if has_src and ss + d < 0:
-                d = -ss
+            if has_src and ss + d * spd < 0:
+                d = -ss / spd
                 nt = ts + d
             c["timeline_start"] = round(nt, 3)
             if has_src:
-                c["source_start"] = round(ss + d, 3)
+                c["source_start"] = round(max(0.0, ss + d * spd), 3)
             if isinstance(c.get("motion_keys"), list) and c["motion_keys"]:
                 c["motion_keys"] = _shift_motion(c["motion_keys"], d)  # the move stays where it was on screen
         else:
@@ -349,10 +362,10 @@ def trim_clip(seq: dict[str, Any], assets: dict, *, clip_id: str, edge: str, new
             if has_src:
                 a = _asset(assets, str(c.get("asset_id")))
                 adur = _asset_duration(a)
-                se = ss + (nt - ts)
+                se = ss + (nt - ts) * spd
                 if adur > 0 and se > adur:
                     se = adur
-                    nt = ts + (se - ss)
+                    nt = ts + (se - ss) / spd
                 c["source_end"] = round(se, 3)
             c["timeline_end"] = round(nt, 3)
     _recompute_duration(seq)
