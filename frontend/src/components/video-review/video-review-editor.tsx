@@ -39,7 +39,7 @@ import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipKind } from './time
 import { perfLog } from '@/lib/perf-log';
 import { TimelineRuler } from './timeline-ruler';
 import { FullscreenBar } from './fullscreen-bar';
-import { PhoneSwipeSurface, PhoneTime, PhoneTimeline, createPhoneScrub, type PhoneLane } from './phone-timeline';
+import { PhoneSeekBar, PhoneSwipeSurface, PhoneTime, PhoneTimeline, createPhoneScrub, type PhoneLane } from './phone-timeline';
 import { SfxPanel, SFX_DND_TYPE, type SfxItem } from './sfx-panel';
 
 import { Button } from '@/components/ui/button';
@@ -4527,10 +4527,13 @@ export function VideoReviewEditor({
     const id = window.setTimeout(() => setPhoneControls(false), 3000);
     return () => window.clearTimeout(id);
   }, [compact, phoneLandscape, phoneControls, playing, phoneChatOpen, phoneMenuOpen]);
-  // ブラウザで開いた時は、最初に触った所で全画面にする（Chrome の住所の欄・タブの帯の分だけ狭くなるため。
-  // 2026-11-17 本人）。全画面は人が触った時にしか入れないので、最初の指を離した時に入れる。
-  // 抜けた後は映像の右下の全画面のボタンで戻る。アプリの中（?phone=1）は元から全面なので何もしない。
+  // ブラウザで開いた時は、触った所で全画面にする（Chrome の住所の欄・タブの帯の分だけ狭くなるため。
+  // 2026-11-17 本人）。全画面は人が触った時にしか入れないので、指を離した時に入れる。
+  // Android では全画面の時に画面の端からなぞると「戻る」になって全画面が解ける（帯を左右に送る時に起きやすい）。
+  // なので解けた後も、次に触った時にまた入れる。本人が映像の右下のボタンで全画面をやめた時だけ、もう入れない
+  // （同じボタンでまた全画面に戻せる）。アプリの中（?phone=1）は元から全面なので何もしない。
   const [phoneFull, setPhoneFull] = useState(false);
+  const phoneFullOff = useRef(false);
   const phoneCanFull = useMemo(() => {
     if (!compact || typeof document === 'undefined') return false;
     const inApp = new URLSearchParams(window.location.search).get('phone') === '1' || !!(window as unknown as { ReactNativeWebView?: unknown }).ReactNativeWebView;
@@ -4538,7 +4541,12 @@ export function VideoReviewEditor({
     return !inApp && !standalone && !!document.fullscreenEnabled;
   }, [compact]);
   const phoneToggleFull = useCallback(() => {
-    if (document.fullscreenElement) { document.exitFullscreen?.().catch(() => {}); return; }
+    if (document.fullscreenElement) {
+      phoneFullOff.current = true;
+      document.exitFullscreen?.().catch(() => {});
+      return;
+    }
+    phoneFullOff.current = false;
     document.documentElement.requestFullscreen?.({ navigationUI: 'hide' } as FullscreenOptions).catch(() => {});
   }, []);
   useEffect(() => {
@@ -4546,17 +4554,21 @@ export function VideoReviewEditor({
     const sync = () => setPhoneFull(!!document.fullscreenElement);
     sync();
     document.addEventListener('fullscreenchange', sync);
-    let tried = false;
-    const first = () => {
-      if (tried) return;
-      tried = true;
-      window.removeEventListener('pointerup', first, true);
-      if (!document.fullscreenElement) document.documentElement.requestFullscreen?.({ navigationUI: 'hide' } as FullscreenOptions).catch(() => {});
+    let busy = false;
+    const tryFull = (ev: Event) => {
+      if (phoneFullOff.current || busy || document.fullscreenElement) return;
+      // 全画面のボタンそのものを押した時は、ボタンの方に任せる
+      if ((ev.target as Element | null)?.closest?.('[data-phone-full]')) return;
+      const req = document.documentElement.requestFullscreen?.({ navigationUI: 'hide' } as FullscreenOptions);
+      if (!req) return;
+      busy = true;
+      req.catch(() => {}).finally(() => { busy = false; });
     };
-    window.addEventListener('pointerup', first, true);
+    const evs = ['pointerup', 'click'] as const;
+    for (const e of evs) window.addEventListener(e, tryFull, true);
     return () => {
       document.removeEventListener('fullscreenchange', sync);
-      window.removeEventListener('pointerup', first, true);
+      for (const e of evs) window.removeEventListener(e, tryFull, true);
     };
   }, [phoneCanFull]);
   const phoneLanes = useMemo<PhoneLane[]>(() => {
@@ -5006,9 +5018,12 @@ export function VideoReviewEditor({
                   <PhoneTime ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} className="min-w-0 flex-1 px-1 font-mono text-xs tabular-nums text-white/90 drop-shadow" />
                   {fullButton}
                 </div>
+                <PhoneSeekBar ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} />
               </div>
             </div>
-          ) : null}
+          ) : (
+            <PhoneSeekBar thin ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} />
+          )}
         </div>
         {!phoneLandscape && !phoneChatOpen ? (
           <div className="relative min-h-0 flex-1 bg-background pt-2">

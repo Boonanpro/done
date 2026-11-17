@@ -454,3 +454,170 @@ export function PhoneTime({ ctl, liveTimeRef, duration, className }: { ctl: Phon
   }, [ctl, liveTimeRef, duration]);
   return <span ref={ref} data-phone-time className={className}>0:00 / {fmtPhoneTime(duration)}</span>;
 }
+
+/**
+ * 作品の頭から終わりまでを横幅に並べたつまみ（YouTube の赤い線と同じ。2026-11-17 本人「左右に送るしか無く、
+ * 一番最後の方へ一気に飛べない。スライドで動かせるシーケンスを足したい」）。
+ * 押した所へ飛び、つかんだまま左右に動かすとその位置へ動く。動かしている間は再生を止め、離したら元に戻す。
+ * thin: ボタンを隠している時の、映像の下の端の細い線（触れない）。
+ */
+export function PhoneSeekBar({
+  ctl,
+  liveTimeRef,
+  duration,
+  onSeek,
+  playing,
+  setPlaying,
+  thin = false,
+}: {
+  ctl: PhoneScrub;
+  liveTimeRef: RefObject<number>;
+  duration: number;
+  onSeek: (t: number) => void;
+  playing: boolean;
+  setPlaying: (p: boolean) => void;
+  thin?: boolean;
+}) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const fillRef = useRef<HTMLDivElement | null>(null);
+  const knobRef = useRef<HTMLDivElement | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
+  const durationRef = useRef(duration);
+  useLayoutEffect(() => { durationRef.current = duration; });
+  const playingRef = useRef(playing);
+  useLayoutEffect(() => { playingRef.current = playing; });
+  const seekRef = useRef(onSeek);
+  useLayoutEffect(() => { seekRef.current = onSeek; });
+  const setPlayingRef = useRef(setPlaying);
+  useLayoutEffect(() => { setPlayingRef.current = setPlaying; });
+  const grabbing = useRef(false);
+
+  // 位置の線とつまみは毎コマ動かす（React の描き直しをしない）
+  useEffect(() => {
+    let raf = 0;
+    let last = '';
+    const loop = () => {
+      raf = requestAnimationFrame(loop);
+      const d = durationRef.current;
+      const t = ctl.dragT ?? Number(liveTimeRef.current || 0);
+      const p = d > 0 ? clamp(t / d, 0, 1) : 0;
+      const key = `${p.toFixed(5)}|${grabbing.current ? 1 : 0}`;
+      if (key === last) return;
+      last = key;
+      if (fillRef.current) fillRef.current.style.transform = `scaleX(${p})`;
+      if (knobRef.current) knobRef.current.style.left = `${p * 100}%`;
+      const tip = tipRef.current;
+      if (tip) {
+        tip.style.display = grabbing.current ? 'block' : 'none';
+        if (grabbing.current) {
+          tip.textContent = fmtPhoneTime(t);
+          const w = hostRef.current?.clientWidth || 0;
+          const tw = tip.offsetWidth || 0;
+          tip.style.left = `${clamp(p * w - tw / 2, 0, Math.max(0, w - tw))}px`;
+        }
+      }
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [ctl, liveTimeRef]);
+
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el || thin) return;
+    let pid: number | null = null;
+    let raf = 0;
+    let lastAt = 0;
+    let pending: number | null = null;
+    const flush = () => {
+      raf = 0;
+      if (pending == null) return;
+      const now = performance.now();
+      if (now - lastAt < SEEK_GAP_MS) { raf = requestAnimationFrame(flush); return; }
+      lastAt = now;
+      const t = pending;
+      pending = null;
+      seekRef.current(t);
+    };
+    const at = (x: number) => {
+      const r = el.getBoundingClientRect();
+      const d = durationRef.current;
+      const t = r.width > 0 && d > 0 ? clamp((x - r.left) / r.width, 0, 1) * d : 0;
+      ctl.dragT = t;
+      pending = t;
+      if (!raf) raf = requestAnimationFrame(flush);
+    };
+    const down = (ev: PointerEvent) => {
+      if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+      if (pid != null) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      pid = ev.pointerId;
+      try { el.setPointerCapture(ev.pointerId); } catch {}
+      grabbing.current = true;
+      el.dataset.grab = '1';
+      if (!ctl.active) {
+        ctl.active = true;
+        if (playingRef.current) { ctl.resume = true; setPlayingRef.current(false); }
+      }
+      at(ev.clientX);
+    };
+    const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return;
+      at(ev.clientX);
+    };
+    const up = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return;
+      pid = null;
+      try { el.releasePointerCapture(ev.pointerId); } catch {}
+      if (ev.type !== 'pointercancel') at(ev.clientX);
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      if (pending != null) { const t = pending; pending = null; seekRef.current(t); }
+      grabbing.current = false;
+      delete el.dataset.grab;
+      ctl.active = false;
+      ctl.dragT = null;
+      if (ctl.resume) { ctl.resume = false; setPlayingRef.current(true); }
+    };
+    el.addEventListener('pointerdown', down);
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      el.removeEventListener('pointerdown', down);
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+    };
+  }, [ctl, thin]);
+
+  if (thin) {
+    return (
+      <div ref={hostRef} data-phone-seek-thin className="pointer-events-none absolute inset-x-0 bottom-0 z-[26] h-[3px] bg-white/25">
+        <div ref={fillRef} className="absolute inset-0 origin-left bg-red-500" style={{ transform: 'scaleX(0)' }} />
+      </div>
+    );
+  }
+  return (
+    <div
+      ref={hostRef}
+      data-phone-seek
+      role="slider"
+      aria-label="再生位置"
+      aria-valuemin={0}
+      aria-valuemax={Math.round(duration)}
+      className="group relative h-7 w-full select-none"
+      style={{ touchAction: 'none' }}
+    >
+      <div ref={tipRef} className="pointer-events-none absolute -top-7 hidden rounded bg-black/80 px-1.5 py-0.5 font-mono text-xs tabular-nums text-white" />
+      <div className="pointer-events-none absolute inset-x-0 top-1/2 h-[3px] -translate-y-1/2 rounded-full bg-white/30 transition-[height] group-data-[grab]:h-[5px]">
+        <div ref={fillRef} className="absolute inset-0 origin-left rounded-full bg-red-500" style={{ transform: 'scaleX(0)' }} />
+      </div>
+      <div
+        ref={knobRef}
+        className="pointer-events-none absolute top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-red-500 shadow transition-[width,height] group-data-[grab]:h-5 group-data-[grab]:w-5"
+        style={{ left: '0%' }}
+      />
+    </div>
+  );
+}
