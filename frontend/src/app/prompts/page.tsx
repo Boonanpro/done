@@ -193,7 +193,7 @@ function Editor({ id, onBack, onSaved }: { id: string; onBack: () => void; onSav
             onChange={e => setDraft(e.target.value)}
             readOnly={item.readonly}
             spellCheck={false}
-            className={cn('min-h-[45vh] font-[inherit] text-[13px] leading-relaxed', item.readonly && 'bg-stone-50')}
+            className={cn(item.text.length < 400 ? 'min-h-[9rem]' : 'min-h-[45vh]', 'font-[inherit] text-[13px] leading-relaxed', item.readonly && 'bg-stone-50')}
           />
           {item.readonly ? (
             <p className="text-xs text-stone-500">この文はまだプログラムの中にあるので、ここでは読むだけです。直したい時はダンに言ってください。この画面で直せる形に移します。</p>
