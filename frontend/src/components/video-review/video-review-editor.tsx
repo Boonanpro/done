@@ -29,7 +29,6 @@ import {
   Trash2,
   Redo2,
   Undo2,
-  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipKind } from './timeline-clip';
@@ -4802,6 +4801,8 @@ export function VideoReviewEditor({
     const CTRL = 48;
     const below = phoneChatOpen ? Math.max(300, Math.round(phoneVp.h * 0.45)) : 132;
     const videoH = Math.max(160, Math.round(Math.min(phoneVp.w / ratio, phoneVp.h - HEAD - CTRL - below)));
+    // 縦持ちのタイムラインは残りの高さを使う（段が太く見える）。下に使い方の一行
+    const stripH = Math.max(96, Math.min(300, phoneVp.h - HEAD - videoH - CTRL - 8 - 56));
     const playIcon = (big: boolean) => (playing ? (
       <svg viewBox="0 0 24 24" className={`${big ? 'h-9 w-9' : 'h-6 w-6'} fill-current`}><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
     ) : (
@@ -4847,8 +4848,8 @@ export function VideoReviewEditor({
         <div
           ref={previewAreaRef}
           data-phone-preview
-          className={`flex items-center justify-center overflow-hidden bg-black ${phoneLandscape ? 'absolute inset-0' : 'relative w-full shrink-0'}`}
-          style={phoneLandscape ? undefined : { height: videoH }}
+          className={`flex items-center justify-center overflow-hidden bg-black ${phoneLandscape ? 'absolute inset-y-0 left-0' : 'relative w-full shrink-0'}`}
+          style={phoneLandscape ? { right: phoneChatOpen && phoneChat ? 'min(420px, 50vw)' : 0 } : { height: videoH }}
         >
           {stageNode}
           <PhoneSwipeSurface
@@ -4877,7 +4878,7 @@ export function VideoReviewEditor({
               >
                 {playIcon(true)}
               </button>
-              <div className="pointer-events-auto absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-3 pb-2 pt-6" style={{ right: phoneChatOpen ? 'min(380px, 46vw)' : 0 }}>
+              <div className="pointer-events-auto absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-3 pb-2 pt-6">
                 <PhoneTime ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} className="mb-1 block font-mono text-xs tabular-nums text-white/90" />
                 <PhoneTimeline lanes={phoneLanes} ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} height={56} dark />
               </div>
@@ -4895,24 +4896,16 @@ export function VideoReviewEditor({
         ) : null}
         {!phoneLandscape && !phoneChatOpen ? (
           <div className="min-h-0 flex-1 bg-background pt-2">
-            <PhoneTimeline lanes={phoneLanes} ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} height={96} />
+            <PhoneTimeline lanes={phoneLanes} ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} height={stripH} maxLane={22} />
             <div className="px-3 pt-2 text-[11px] text-muted-foreground">指で左右に送ると再生位置が動きます。映像の上をなぞっても動きます。2本指で広げると細かく見られます。</div>
           </div>
         ) : null}
         {phoneChat ? (
           <div
             data-phone-chat
-            className={`${phoneChatOpen ? 'flex' : 'hidden'} min-h-0 flex-col bg-background ${phoneLandscape ? 'absolute bottom-0 right-0 top-0 z-40 border-l border-border shadow-2xl' : 'flex-1'}`}
-            style={phoneLandscape ? { width: 'min(380px, 46vw)' } : undefined}
+            className={`${phoneChatOpen ? 'flex' : 'hidden'} min-h-0 flex-col bg-background ${phoneLandscape ? 'absolute bottom-0 right-0 top-0 z-40 border-l border-border' : 'flex-1'}`}
+            style={phoneLandscape ? { width: 'min(420px, 50vw)' } : undefined}
           >
-            {phoneLandscape ? (
-              <div className="flex h-10 shrink-0 items-center border-b border-border px-3 text-sm font-medium">
-                <span className="flex-1">ダンと制作</span>
-                <button type="button" onClick={() => setPhoneChatOpen(false)} className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-muted" aria-label="チャットを閉じる">
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-            ) : null}
             <div className="min-h-0 flex-1">{phoneChat}</div>
           </div>
         ) : null}

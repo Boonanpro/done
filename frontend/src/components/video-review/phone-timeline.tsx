@@ -36,6 +36,7 @@ type ScrubOpts = {
 };
 
 const MIN_PPS = 0.05;
+const SEEK_GAP_MS = 40;
 const MAX_PPS = 400;
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 
@@ -53,9 +54,15 @@ function bindScrub(el: HTMLElement, get: () => ScrubOpts) {
   let inertiaRaf = 0;
   let pending: number | null = null;
 
+  // 帯の絵は毎コマ動かし、映像の頭出し（エディター全体の描き直しを伴う）は 1秒に約25回までにする。
+  // 毎コマ頭出しすると、クリップの多い作品で指についてこなくなる。
+  let lastSeekAt = 0;
   const flushSeek = () => {
     seekRaf = 0;
     if (pending == null) return;
+    const now = performance.now();
+    if (now - lastSeekAt < SEEK_GAP_MS) { seekRaf = requestAnimationFrame(flushSeek); return; }
+    lastSeekAt = now;
     const t = pending;
     pending = null;
     get().onSeek(t);
@@ -109,7 +116,7 @@ function bindScrub(el: HTMLElement, get: () => ScrubOpts) {
       y0 = ev.clientY;
       downAt = performance.now();
       moved = wasCoasting; // 流れている途中に押したら、止めるだけ（押した扱いにしない）
-      samples = [{ x: ev.clientX, at: downAt }];
+      samples = [{ x: ev.clientX, at: ev.timeStamp }];
     } else if (pts.size === 2 && get().pinch) {
       const [a, b] = Array.from(pts.values());
       pinchD0 = Math.hypot(a.x - b.x, a.y - b.y) || 1;
@@ -138,7 +145,7 @@ function bindScrub(el: HTMLElement, get: () => ScrubOpts) {
     }
     if (!o.ctl.active) begin();
     setT(t0 - (ev.clientX - x0) / o.ctl.pps);
-    const now = performance.now();
+    const now = ev.timeStamp;
     samples.push({ x: ev.clientX, at: now });
     while (samples.length > 2 && now - samples[0].at > 90) samples.shift();
   };
@@ -151,7 +158,7 @@ function bindScrub(el: HTMLElement, get: () => ScrubOpts) {
       // 2本指の片方を離した: 残った指で続きをなぞれるように付け直す
       const [rest] = Array.from(pts.values());
       anchor(rest.x);
-      samples = [{ x: rest.x, at: performance.now() }];
+      samples = [{ x: rest.x, at: ev.timeStamp }];
       return;
     }
     if (pts.size > 0) return;
@@ -163,7 +170,7 @@ function bindScrub(el: HTMLElement, get: () => ScrubOpts) {
     const last = samples[samples.length - 1];
     const first = samples[0];
     const dt = last && first ? last.at - first.at : 0;
-    let v = dt > 8 && performance.now() - last.at < 80 ? (last.x - first.x) / dt : 0; // px/ms
+    let v = dt > 8 && ev.timeStamp - last.at < 100 ? (last.x - first.x) / dt : 0; // px/ms（指を止めてから離したら流さない）
     if (Math.abs(v) < 0.25 || ev.type === 'pointercancel') { end(); return; }
     v = clamp(v, -6, 6);
     let t = o.ctl.dragT ?? Number(o.liveTimeRef.current || 0);
@@ -228,6 +235,7 @@ export function PhoneTimeline({
   playing,
   setPlaying,
   height = 96,
+  maxLane = 14,
   dark = false,
 }: {
   lanes: PhoneLane[];
@@ -238,6 +246,8 @@ export function PhoneTimeline({
   playing: boolean;
   setPlaying: (p: boolean) => void;
   height?: number;
+  /** 1段の高さの上限（縦持ちは大きく） */
+  maxLane?: number;
   dark?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -248,6 +258,8 @@ export function PhoneTimeline({
   useLayoutEffect(() => { playingRef.current = playing; });
   const durationRef = useRef(duration);
   useLayoutEffect(() => { durationRef.current = duration; });
+  const maxLaneRef = useRef(maxLane);
+  useLayoutEffect(() => { maxLaneRef.current = maxLane; });
   const lanesRev = useRef(0);
   useEffect(() => { lanesRev.current += 1; }, [lanes]);
 
@@ -273,7 +285,7 @@ export function PhoneTimeline({
       const h = host.clientHeight;
       const dpr = Math.min(3, window.devicePixelRatio || 1);
       const t = ctl.dragT ?? Number(liveTimeRef.current || 0);
-      const key = `${w}x${h}@${dpr}|${t.toFixed(4)}|${ctl.pps.toFixed(4)}|${lanesRev.current}|${durationRef.current}`;
+      const key = `${maxLaneRef.current}|${w}x${h}@${dpr}|${t.toFixed(4)}|${ctl.pps.toFixed(4)}|${lanesRev.current}|${durationRef.current}`;
       if (key === last) return;
       last = key;
       if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
@@ -315,7 +327,7 @@ export function PhoneTimeline({
       const n = ls.length || 1;
       const avail = h - RULER - 4;
       const gap = 2;
-      const lh = clamp(Math.floor((avail - gap * (n - 1)) / n), 3, 14);
+      const lh = clamp(Math.floor((avail - gap * (n - 1)) / n), 3, maxLaneRef.current);
       let y = RULER + 3;
       for (const lane of ls) {
         const items = lane.items;
