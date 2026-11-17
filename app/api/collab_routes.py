@@ -2,6 +2,7 @@
 Collaboration Room API Routes
 Supports owner auth (JWT) and guest auth (invite-based JWT)
 """
+from app.paths import real_dir
 from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Request, UploadFile, File
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
@@ -33,7 +34,7 @@ ACCESS_TOKEN_COOKIE = "done_access_token"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 from app.workspace import resolve_cli_workspace
 CLI_WORKSPACE = resolve_cli_workspace()
-UPLOAD_DIR = PROJECT_ROOT / "uploads" / "collab"
+UPLOAD_DIR = real_dir(PROJECT_ROOT / "uploads") / "collab"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 

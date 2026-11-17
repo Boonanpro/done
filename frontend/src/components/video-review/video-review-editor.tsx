@@ -14,6 +14,10 @@ import {
 import {
   ArrowLeft,
   Check,
+  Eye,
+  EyeOff,
+  Volume2,
+  VolumeX,
   ChevronDown,
   ChevronRight,
   MapPin,
@@ -332,6 +336,8 @@ export type EditSequence = {
   version?: number;
   format?: string;
   duration?: number;
+  /** 段の頭のスイッチ。段の名前（visual-3・audio-0、computeClipLanes の zone-layer）→ 非表示・消音 */
+  lane_switches?: LaneSwitches;
   tracks?: Array<{
     id: string;
     type: string;
@@ -606,6 +612,28 @@ export function computeClipLanes(tracks: Array<{ type?: string | null; clips?: S
     out.set(String(clip.id), { zone: 'audio', layer });
   }
   return out;
+}
+
+export type LaneSwitches = Record<string, { hidden?: boolean; muted?: boolean }>;
+
+/** その段が切ってあるか（映像の段は非表示、音声の段は消音）。 */
+export function laneSwitchedOff(sw: LaneSwitches | null | undefined, key: string): boolean {
+  const v = sw?.[key];
+  if (!v) return false;
+  return key.startsWith('visual-') ? !!v.hidden : key.startsWith('audio-') ? !!v.muted : false;
+}
+
+/** 切った段のクリップを抜いた写し（プレビューに渡す）。書き出しも同じ決め方で抜く（app/services/lane_switches.py）。
+ *  2026-11-17 本人「プレミアやダヴィンチのように、段ごとに表示・非表示、音を出す・出さないのボタンを」。 */
+export function dropSwitchedOff<T extends EditSequence | null | undefined>(seq: T): T {
+  const sw = seq?.lane_switches;
+  if (!seq || !sw || !Object.keys(sw).some((k) => laneSwitchedOff(sw, k))) return seq;
+  const lanes = computeClipLanes(seq.tracks || []);
+  const off = (c: SequenceClip) => {
+    const lane = c.id != null ? lanes.get(String(c.id)) : undefined;
+    return !!lane && laneSwitchedOff(sw, `${lane.zone}-${lane.layer}`);
+  };
+  return { ...seq, tracks: (seq.tracks || []).map((t) => ({ ...t, clips: (t.clips || []).filter((c) => !off(c)) })) } as T;
 }
 
 /** まとめて動かすクリップの新しい段。shift の段（zone）にあるクリップを、段の並び（layers は小さい順）の中で
@@ -1136,6 +1164,24 @@ export function VideoReviewEditor({
     [editSequence]
   );
   const clipLanes = useMemo(() => computeClipLanes(editSequence?.tracks || []), [editSequence]);
+  // プレビューには、段の頭で切った段（非表示・消音）のクリップを渡さない
+  const previewSequence = useMemo(() => dropSwitchedOff(editSequence), [editSequence]);
+  const laneSwitches = editSequence?.lane_switches;
+  const toggleLaneSwitch = useCallback((key: string) => {
+    const field = key.startsWith('visual-') ? 'hidden' : 'muted';
+    setEditSequence((current) => {
+      if (!current) return current;
+      const sw: LaneSwitches = { ...(current.lane_switches || {}) };
+      const now = { ...(sw[key] || {}) };
+      if (now[field]) delete now[field];
+      else now[field] = true;
+      if (Object.keys(now).length) sw[key] = now;
+      else delete sw[key];
+      const next: EditSequence = { ...current, lane_switches: sw };
+      if (!Object.keys(sw).length) delete next.lane_switches;
+      return next;
+    });
+  }, []);
 
   // NLE-style ordered lanes derived from the sequence tracks + annotations.
   // Order top→bottom: visual instructions, captions, effects, overlay video
@@ -4350,6 +4396,10 @@ export function VideoReviewEditor({
                             onDrop={(event) => laneFns.current.handleLaneDrop(event, lane)}
                           >
                             <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
+                            {/* 段の頭で切った段は、クリップの上に薄い幕をかけて分かるようにする（押す・動かすはそのままできる） */}
+                            {laneSwitchedOff(laneSwitches, lane.key) ? (
+                              <div data-lane-off className="pointer-events-none absolute inset-0 z-[15] bg-background/55 bg-[repeating-linear-gradient(135deg,transparent_0,transparent_6px,rgba(127,127,127,0.18)_6px,rgba(127,127,127,0.18)_8px)]" />
+                            ) : null}
                             {dropPreview && dropPreview.zone === lane.zone && dropPreview.layer === lane.layer && timelineDuration ? (
                               <div
                                 className="pointer-events-none absolute top-0.5 bottom-0.5 z-10 rounded border-2 border-dashed border-sky-300 bg-sky-400/25"
@@ -4552,7 +4602,7 @@ export function VideoReviewEditor({
                           </div>
                         );
                       })
-  ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedClipSet, highlightedClipIds, danTouch, viewWin, trackPx, pxPerSec, instrJobs]);
+  ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedClipSet, highlightedClipIds, danTouch, viewWin, trackPx, pxPerSec, instrJobs, laneSwitches]);
 
 
   // ── スマホの形（2026-11-17 本人「縦持ちは横幅いっぱい・YouTube やショート動画の感覚で左右に動かして移動・
@@ -4691,7 +4741,7 @@ export function VideoReviewEditor({
           ) : null
         ) : (
           <TimelinePreview
-            sequence={editSequence}
+            sequence={previewSequence}
             assets={stableSequenceAssets || EMPTY_ASSETS}
             blurRegionsAt={blurRegionsAt}
             currentTime={currentTime}
@@ -6207,10 +6257,29 @@ export function VideoReviewEditor({
                     {timelineLanes.map((lane, i) => (
                       <div
                         key={lane.key}
-                        className="flex items-center justify-end pr-1 text-right font-medium text-muted-foreground"
+                        className="flex items-center justify-end gap-1 pr-1 text-right font-medium text-muted-foreground"
                         style={{ height: lane.height, marginTop: i === 0 ? 0 : timelineLanes[i - 1].zone !== lane.zone ? 14 : 4 }}
                       >
-                        <span className="truncate">{lane.label}</span>
+                        <span className={`truncate ${laneSwitchedOff(laneSwitches, lane.key) ? 'opacity-40' : ''}`}>{lane.label}</span>
+                        {(() => {
+                          const off = laneSwitchedOff(laneSwitches, lane.key);
+                          const visual = lane.zone === 'visual';
+                          const Icon = visual ? (off ? EyeOff : Eye) : (off ? VolumeX : Volume2);
+                          const title = visual ? (off ? 'この段を表示する' : 'この段を隠す（プレビュー・書き出しに出さない）') : (off ? 'この段の音を出す' : 'この段の音を消す');
+                          return (
+                            <button
+                              type="button"
+                              data-lane-switch={lane.key}
+                              aria-pressed={off}
+                              title={title}
+                              aria-label={title}
+                              onClick={() => toggleLaneSwitch(lane.key)}
+                              className={`flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted ${off ? 'text-destructive' : 'text-muted-foreground/70 hover:text-foreground'}`}
+                            >
+                              <Icon className="h-3.5 w-3.5" />
+                            </button>
+                          );
+                        })()}
                       </div>
                     ))}
                   </div>

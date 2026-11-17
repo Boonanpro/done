@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import Headers, UploadFile
 
 router = APIRouter()
-ROOT = Path(__file__).resolve().parents[2] / "uploads"
+ROOT = (Path(__file__).resolve().parents[2] / "uploads").resolve()
 STAGING = ROOT / ".transfers"
 CHUNK = 8 * 1024 * 1024
 MAX_SIZE = 2 * 1024 * 1024 * 1024
