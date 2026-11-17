@@ -802,6 +802,23 @@ _BLEND_MODES = {"screen": "screen", "add": "addition", "lighten": "lighten", "mu
                 "overlay": "overlay", "softlight": "softlight"}
 
 
+def visual_lane(track: dict[str, Any], clip: dict[str, Any], visual_index: int) -> float:
+    """The lane (stacking layer) a visual clip shows on in the editor; higher = in front.
+    Mirrors frontend lane-order.ts visualLane(). visual_index = the track's place among the
+    non-audio tracks (hidden ones included)."""
+    own = clip.get("layer")
+    if isinstance(own, (int, float)) and not isinstance(own, bool) and math.isfinite(own):
+        return float(own)
+    ttype = track.get("type")
+    if ttype == "caption" or clip.get("track") == "caption":
+        return float(max(2, visual_index))
+    if ttype == "effect":
+        return 3.0
+    if ttype == "overlay" or _is_overlay_clip(clip):
+        return 1.0
+    return float(visual_index)
+
+
 def _is_overlay_clip(clip: dict[str, Any]) -> bool:
     return str(clip.get("composition") or "") in ("pip", "overlay")
 
@@ -823,20 +840,12 @@ def _sequence_z_items(
     sequence = drop_switched_off(sequence)  # 本人が段の頭で非表示にした段は描かない
     visual_all = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict) and t.get("type") != "audio"]
     tracks = [t for t in visual_all if not t.get("hidden")]
-    # A picture's stacking layer, the same rule the editor preview draws with: its own `layer`
-    # (set when the clip is dragged to another lane), else its lane's place in the stack.
+    # Every visual item's stacking layer = the lane the editor shows it on (higher = in front).
+    # The same rule as the editor's computeClipLanes / lane-order.ts — keep the three identical.
     lane_index = {id(t): i for i, t in enumerate(visual_all)}
 
     def _pic_layer(track: dict[str, Any], clip: dict[str, Any]) -> float:
-        own = clip.get("layer")
-        if isinstance(own, (int, float)) and not isinstance(own, bool):
-            return float(own)
-        vi = lane_index.get(id(track), 0)
-        if track.get("type") == "caption":
-            return float(max(2, vi))
-        if track.get("type") == "overlay" or _is_overlay_clip(clip):
-            return 1.0
-        return float(vi)
+        return visual_lane(track, clip, lane_index.get(id(track), 0))
 
     base_ti: int | None = None
     base_clips: list[dict[str, Any]] = []
@@ -864,15 +873,15 @@ def _sequence_z_items(
             elif isinstance(clip.get("region"), dict):
                 if clip.get("style") != "note":  # 指示クリップ: 画には出さない
                     z_items.append(("fx", clip))
+                    pic_layers[id(clip)] = _pic_layer(track, clip)
             elif str(clip.get("text") or "").strip() or _is_scene_clip(clip):
                 z_items.append(("cap", clip))
-    # Pictures stack by layer among themselves (a clip dragged up/down a lane in the editor goes
-    # in front of / behind the others in the export too). Effects and captions keep their places;
-    # with no layer moves the order is exactly the lane order as before.
-    slots = [i for i, (kind, _) in enumerate(z_items) if kind == "overlay"]
-    pics = sorted((z_items[i] for i in slots), key=lambda it: pic_layers.get(id(it[1]), 0.0))
-    for i, it in zip(slots, pics):
-        z_items[i] = it
+                pic_layers[id(clip)] = _pic_layer(track, clip)
+    # ALL visual items (pictures, captions, scenes, effects) stack by the lane the editor shows
+    # them on: an upper lane is always in front of a lower one (2026-11-18 本人「上の段が前、
+    # 必ず守る仕組みに」). Before, only pictures were sorted and captions kept the order they were
+    # added in, so a caption dragged to a lower lane could still sit in front. Ties keep array order.
+    z_items.sort(key=lambda it: pic_layers.get(id(it[1]), 0.0))
     return base_clips, z_items
 
 
