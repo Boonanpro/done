@@ -16,6 +16,7 @@ from app.services.voice_sideband import Dialogue
 
 @pytest.fixture(autouse=True)
 def router_on(monkeypatch):
+    monkeypatch.setattr('app.services.voice_editor.call_editor', lambda room_id: None)   # no room is a work's room here
     monkeypatch.setenv('DAN_VOICE_ROUTER', '1')
     monkeypatch.setenv('DAN_VOICE_PLAIN', '1')
     monkeypatch.delenv('DAN_VOICE_BACKGROUND', raising=False)

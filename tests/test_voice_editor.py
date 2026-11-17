@@ -88,6 +88,7 @@ async def test_the_work_gets_the_moments_the_frames_and_says_first_what_it_will_
 
 @pytest.mark.asyncio
 async def test_a_call_not_from_the_editor_is_as_before(monkeypatch):
+    monkeypatch.setattr(voice_editor, 'call_editor', lambda room_id: None)
     started = []
     async def execute(params, room_id, user_id, voice_handoff=False):
         started.append(params)
@@ -122,3 +123,33 @@ async def test_a_send_without_the_owners_voice_gives_at_once():
     async def send(event): sent.append(event)
     await voice_say.say(send, 'answer', 'はい', None, 'del_1')
     assert sent[0]['delegation_id'] == 'del_1'
+
+
+@pytest.mark.asyncio
+async def test_work_handed_over_by_the_general_backend_still_gets_the_moments(monkeypatch, room):
+    """start_work (the general backend) passes the call's turns, not the call: the room tells it is a work's room."""
+    started = []
+    async def execute(params, room_id, user_id, voice_handoff=False):
+        started.append(params)
+        return {'accepted': True, 'receipt': {'id': 'job-1'}}
+    monkeypatch.setattr('app.services.command_center.execute', execute)
+    monkeypatch.setattr('app.services.parallel_job_runner.room_model', lambda room: 'opus')
+    monkeypatch.setattr(voice_editor, 'call_editor', lambda room_id: {'asset_room_id': 'assets', 'content_id': 'c1'})
+    monkeypatch.setattr(voice_editor, 'draw_frame', lambda *a: None)
+    d = Dialogue()
+    d.editor = voice_editor.Moments('assets', 'c1')
+    write_state(room)
+    d.add('user', 'この字幕直して')
+    await voice_router.start_chat_dan('u', 'r', [dict(t) for t in d.history], 'この字幕直して')
+    assert '〔エディター: 再生位置 0:12.3' in started[0]['task'] and '直す場所と中身' in started[0]['task']
+
+
+@pytest.mark.asyncio
+async def test_where_the_call_is_goes_with_the_question_of_where_a_request_goes(monkeypatch, room):
+    from tests.test_voice_router import Judge, answer, router
+    d_place = []
+    j = Judge({'route': answer('make', .9), 'calendar': answer('other', .9)})
+    r, sent, log = router(monkeypatch, j, said=['この字幕、直して'])
+    r.dialogue.editor = voice_editor.Moments('assets', 'c1')
+    got = await r.route()
+    assert got[0] == 'make' and 'エディター' in j.asked[-1][0]['call_place']

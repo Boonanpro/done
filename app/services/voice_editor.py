@@ -79,6 +79,22 @@ class Moments:
         self.read_at = 0.0
         self.mtime = 0
         self.state: dict[str, Any] | None = None
+        self._place = ''
+
+    def place(self) -> str:
+        """Where the call is, for whoever decides where a request goes (voice_router, voice_prefetch): without it
+        「この字幕、『見るのがやめられず』に直して」 went to the general backend, which asked to share the screen (11/17)."""
+        if not self._place:
+            title = ''
+            try:
+                from app.services import timeline_live as tl
+                content, _ = tl.live_sequence(self.asset_room_id, self.content_id)
+                title = str((content or {}).get('title') or '')
+            except Exception:  # noqa: BLE001
+                pass
+            self._place = (f'本人はダンの動画エディターで作品「{title}」のタイムラインとプレビューを開いて、見ながら話している'
+                           '（この通話はそのエディターの「話す」から）。「ここ」「この〜」は、その作品の中の映像・字幕・音のこと。')
+        return self._place
 
     def now_moment(self) -> dict[str, Any] | None:
         import json

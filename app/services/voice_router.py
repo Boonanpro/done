@@ -348,6 +348,9 @@ class Router:
         targets = self.targets or {}   # read at the call's start (warm); a request before that has no pages to name
         state = {'conversation': self.conversation(), 'running_work': [w['label'] for w in running[-4:]],
                  'screen': getattr(self.stage, 'caption', '') if self.stage is not None else ''}
+        editor = getattr(self.dialogue, 'editor', None)
+        if editor is not None:   # a call from the editor: 「この字幕」 is in the work on his screen (voice_editor)
+            state['call_place'] = await asyncio.to_thread(editor.place)
         asked = questions(running, {name: f'「{name}」' for name in targets})
         fit(state, asked)
         got = await self.judge.choose(state, asked)
@@ -607,7 +610,14 @@ class Router:
         # The whole call, what it already found and drafted, and what runs now: in the 11/5 15:12 call the mail's revision
         # asked the owner which product 「まろっぴゃくさんじゅう」 was and then for the product page's address, though both
         # had been found in the call, and a second run drafted an Instagram message nobody had asked for.
-        given = [{'role': 'user', 'content': '通話のここまで（新しいものが下。最後の本人の言葉が今の頼み）:' + chr(10) + turns_text(self.dialogue.history, 16000)
+        editor = getattr(self.dialogue, 'editor', None)
+        if editor is not None:   # a call from the editor: where he is and what he pointed at while speaking (voice_editor)
+            from app.services import voice_editor
+            said = (await asyncio.to_thread(editor.place) + chr(10)
+                    + await asyncio.to_thread(voice_editor.turns_text, self.dialogue.history, editor.asset_room_id, editor.content_id, 16000))
+        else:
+            said = turns_text(self.dialogue.history, 16000)
+        given = [{'role': 'user', 'content': '通話のここまで（新しいものが下。最後の本人の言葉が今の頼み）:' + chr(10) + said
                   + self.call_context(others) + extra + chr(10) * 2 + LUNA_RULES}]
         previous = None
 
@@ -731,11 +741,14 @@ async def start_chat_dan(user_id, room_id, dialogue, words, carried=''):
     from app.services.command_center import execute
     from app.services.parallel_job_runner import room_model
     from app.services import voice_parts
+    from app.services import voice_editor
     turns = getattr(dialogue, 'history', dialogue)
     editor = getattr(dialogue, 'editor', None)   # a call from one work in the editor (voice_editor)
+    if editor is None:   # handed over by the general backend's start_work: it passes the turns, not the call
+        place = await asyncio.to_thread(voice_editor.call_editor, room_id)
+        editor = voice_editor.Moments(place['asset_room_id'], place['content_id']) if place else None
     frames, editor_note = [], ''
     if editor is not None:
-        from app.services import voice_editor
         said = await asyncio.to_thread(voice_editor.turns_text, turns, editor.asset_room_id, editor.content_id, 30000)
         editor_note, frames = voice_editor.note_for(editor.asset_room_id, editor.content_id, turns)
     else:
