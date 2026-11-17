@@ -174,8 +174,8 @@ def _cap_graph_threads(path: Path) -> None:
     window (2026-11-18, スヤさん1本目 21:39〜26:19: 264 sources) passed the 8192 threads a
     macOS process may own: converters then failed to start ("Failed initializing scaling graph
     (Resource temporarily unavailable)") and their frames were silently dropped, so the export
-    came out 28 s short with the picture running ahead of the sound. The window is already
-    rendered in parallel with others, so one thread per converter costs no wall time."""
+    came out 28 s short with the picture running ahead of the sound. One thread per converter
+    made that window about 1.5x slower to render (windows still run in parallel)."""
     try:
         text = path.read_text(encoding="utf-8")
     except Exception:
