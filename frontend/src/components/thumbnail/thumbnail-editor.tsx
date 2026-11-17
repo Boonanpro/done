@@ -505,13 +505,13 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       </button>
       <button type="button" className={toolBtn(false)} onClick={addText} title="文字を足す"><Type className="h-3.5 w-3.5" />文字</button>
       <button type="button" className={toolBtn(listView)} onClick={() => setListView((v) => !v)} title="YouTube の一覧の大きさで見る" data-thumb-list>
-        <LayoutGrid className="h-3.5 w-3.5" />一覧で見る
+        <LayoutGrid className="h-3.5 w-3.5" />{compact ? '一覧' : '一覧で見る'}
       </button>
       <span className="mx-1 h-5 w-px bg-border" />
       <button type="button" className={toolBtn(false)} onClick={undo} disabled={!undoStack.current.length} title="元に戻す（Ctrl+Z）"><Undo2 className="h-3.5 w-3.5" /></button>
       <button type="button" className={toolBtn(false)} onClick={redo} disabled={!redoStack.current.length} title="やり直す（Ctrl+Shift+Z）"><Redo2 className="h-3.5 w-3.5" /></button>
       <button type="button" className={toolBtn(false)} onClick={() => void exportPng()} disabled={exporting} title="1280×720 の PNG に書き出す">
-        {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}書き出す
+        {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}{compact ? null : '書き出す'}
       </button>
     </div>
   );
@@ -594,9 +594,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         </div>
       )}
     </div>
-  ) : (
-    <p className="text-xs text-muted-foreground">サムネの上の部品を押すと、ここで直せます。</p>
-  );
+  ) : null;
 
   const layers = (
     <div data-thumb-layers>
@@ -652,13 +650,12 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
 
   const penBar = mode === 'pen' ? (
     <div className="rounded-md border border-red-300 bg-red-50/60 p-2 dark:bg-red-950/30" data-thumb-penbar>
-      <div className="mb-1 text-[11px] text-muted-foreground">{marks.length ? '書き込みに一言添えて送ると、ダンが直します' : 'サムネの上に丸や矢印を描きます'}</div>
       <textarea
         value={note}
         onChange={(e) => setNote(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void sendMarks(); }}
         rows={2}
-        placeholder="例: この人をもっと驚いた顔に／この文字をもう少し上へ"
+        placeholder="ダンへの一言"
         className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
         data-thumb-note
       />

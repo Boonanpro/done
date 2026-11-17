@@ -182,8 +182,9 @@ def context_lines(room_id: str) -> list[str]:
                      f"（uploads/production-assets/{a}）を使う。")
         if info["content_id"]:
             if _is_thumbnail(a, info["content_id"]):
+                from app.services.thumbnail_doc import cli
                 lines.append(f"この部屋の作品はサムネ（content_id={info['content_id']}）。背景・人物・文字・矢印を別々の部品で持つ。"
-                             f"直すのは scripts/thumb.py（show {a} {info['content_id']} で部品の一覧、set で位置・大きさ・色・文字、"
+                             f"直すのは {cli()}（show {a} {info['content_id']} で部品の一覧、set で位置・大きさ・色・文字、"
                              "repaint で絵の部品の範囲だけ描き直し、render で今の形を PNG にして確かめる、undo で1つ前に戻す）。"
                              "mcp__timeline は使わない。保存するとエディターの画面がすぐ変わる。")
             else:

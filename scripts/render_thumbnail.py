@@ -24,8 +24,8 @@ def main() -> int:
         browser = pw.chromium.launch(headless=True, channel="chrome", args=["--mute-audio"])
         try:
             page = browser.new_page(viewport={"width": out_w, "height": out_h}, device_scale_factor=1)
-            page.goto(f"{web_base}/thumbnail-frame", wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_function("() => typeof window.__setThumbPayload === 'function'", timeout=60000)
+            page.goto(f"{web_base}/thumbnail-frame", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_function("() => typeof window.__setThumbPayload === 'function'", timeout=20000)
             page.evaluate("(p) => window.__setThumbPayload(p)", {"doc": doc, "marks": spec.get("marks") or [], "outW": out_w})
             page.wait_for_selector('[data-thumb-ready="true"]', state="attached", timeout=45000)
             page.wait_for_timeout(150)

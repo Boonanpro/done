@@ -242,6 +242,8 @@ def build_thumb_task(ann: dict[str, Any], content: dict[str, Any], asset_room_id
     box = data.get('box') or []
     cid = str(content.get('id'))
     parts = data.get('parts_under') or []
+    from app.services.thumbnail_doc import cli
+    tool = cli()
     lines = [
         f"本人がエディターでサムネ「{content.get('title') or cid}」の上にペンで書き込んで送った直しの指示（チャットには書いていない）。",
         f"- 指示の言葉: 「{note}」" if note else "- 指示の言葉: （無し。書き込みの形から読み取る）",
@@ -256,12 +258,12 @@ def build_thumb_task(ann: dict[str, Any], content: dict[str, Any], asset_room_id
         lines.append(f"- 本人がその時に選んでいた部品: {data.get('selected')}")
     lines += [
         "",
-        "このサムネは部品（背景・人物・文字・矢印など）で持っている。直すのは scripts/thumb.py（mcp__timeline は使わない）:",
-        f"- 部品の一覧: python scripts/thumb.py show {asset_room_id} {cid}",
-        f"- 数値を直す（位置・大きさ・色・文字・縁・書体・順番・隠す）: python scripts/thumb.py set {asset_room_id} {cid} <部品id> x=… size=… fill=#ffe400 text=…",
+        f"このサムネは部品（背景・人物・文字・矢印など）で持っている。直すのは {tool}（mcp__timeline は使わない）:",
+        f"- 部品の一覧: {tool} show {asset_room_id} {cid}",
+        f"- 数値を直す（位置・大きさ・色・文字・縁・書体・順番・隠す）: {tool} set {asset_room_id} {cid} <部品id> x=… size=… fill=#ffe400 text=…",
         f"- 絵の中身を変える頼み（顔の表情・物を足す・消す）は、その絵の部品の範囲だけを描き直す: "
-        f"python scripts/thumb.py repaint {asset_room_id} {cid} <絵の部品id> --box x,y,w,h --prompt \"…\"（範囲の外は変わらない）",
-        f"- 直した結果を見る: python scripts/thumb.py render {asset_room_id} {cid}（PNG の場所が出る。Read で開いて確かめる）",
+        f"{tool} repaint {asset_room_id} {cid} <絵の部品id> --box x,y,w,h --prompt \"…\"（範囲の外は変わらない）",
+        f"- 直した結果を見る: {tool} render {asset_room_id} {cid}（PNG の場所が出る。Read で開いて確かめる）",
         "本人のエディターは保存した瞬間に読み直すので、数値の直しはすぐ本人の目の前で変わる。動かす・大きさ・色・文字の話は、"
         "描き直しを使わずに数値で直す（速く、ほかの所が変わらない）。指示の範囲の外は触らない。",
         "最後の返事は、本人に見せる言葉で1〜2文（何をどう直したか）。返事はエディターのこの指示の欄にだけ出て、チャットには出ない。",

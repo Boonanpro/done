@@ -26,6 +26,11 @@ ROOT = Path(__file__).resolve().parents[2]
 FORMAT = 'thumbnail'
 
 
+def cli() -> str:
+    """ダンがサムネを直す道具を呼ぶ形（この作りのコードの道具を、どこからでも同じ形で）。"""
+    return f"{sys.executable} {ROOT / 'scripts' / 'thumb.py'}"
+
+
 def _par():
     from app.api import production_asset_routes as par
     return par
@@ -237,7 +242,7 @@ def _api_size(w: float, h: float, long_side: int = 1536) -> tuple[int, int]:
 
 
 def repaint(room_id: str, content_id: str, part_id: str, box: tuple[float, float, float, float], prompt: str,
-            quality: str = 'high', feather: int = 6) -> dict[str, Any]:
+            quality: str = 'high', feather: int = 6, masked: bool = False) -> dict[str, Any]:
     """絵の部品 part_id の、サムネの座標の範囲 box=(x, y, w, h) だけを描き直す。範囲の外は元の画素のまま。
 
     元の絵は消さずに残し（新しい素材を作って部品の絵を差し替える）、前の形は履歴に入るので undo で戻せる。"""
@@ -279,13 +284,21 @@ def repaint(room_id: str, content_id: str, part_id: str, box: tuple[float, float
     kx, ky = aw / (cx1 - cx0), ah / (cy1 - cy0)
     ImageDraw.Draw(mask).rectangle([(x0 - cx0) * kx, (y0 - cy0) * ky, (x1 - cx0) * kx, (y1 - cy0) * ky], fill=(0, 0, 0, 0))
     mask.save(work / 'mask.png')
-    full_prompt = (f"{prompt}\n\n透明にした範囲（マスク）の中だけを描き直す。範囲の外は元の絵のまま。写真の質感・光・色合いを周りに合わせ、"
-                   "境目が分からないようにつなぐ。文字・ロゴ・透かしは描かない。")
+    # 既定はマスクを付けずに写真全体を渡し、頼まれた所だけを変えた写真を返してもらう（マスクで塗り直させると、
+    # 顔立ちやメガネの色まで別人に変わった。2026-11-18 の試し）。使うのは範囲の中だけなので、外は元のまま。
+    keep = "写っている人や物は、同じ人・同じ物のまま描く（顔立ち・年齢・髪型・メガネの形と色・服を変えない）。"
+    if masked:
+        full_prompt = (f"{prompt}\n\n透明にした範囲（マスク）の中だけを描き直す。範囲の外は元の絵のまま。{keep}"
+                       "頼まれた所だけを変える。写真の質感・光・色合いを周りに合わせ、境目が分からないようにつなぐ。文字・ロゴ・透かしは描かない。")
+    else:
+        full_prompt = (f"この写真を編集する: {prompt}\n\n頼まれた所（表情・しぐさ・足す物・消す物）だけを変え、それ以外は元の写真と"
+                       f"同じ構図・同じ位置・同じ大きさのまま描く。{keep}写真の質感・光・色合いも元のまま。文字・ロゴ・透かしは描かない。")
     (work / 'prompt.txt').write_text(full_prompt, encoding='utf-8')
-    r = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'gpt_image.py'), '--image', str(work / 'in.png'),
-                        '--mask', str(work / 'mask.png'), '--size', f"{aw}x{ah}", '--quality', quality,
-                        '--out', str(work / 'out.png')], input=full_prompt, capture_output=True, text=True, timeout=600,
-                       cwd=str(ROOT))
+    cmd = [sys.executable, str(ROOT / 'scripts' / 'gpt_image.py'), '--image', str(work / 'in.png'),
+           '--size', f"{aw}x{ah}", '--quality', quality, '--out', str(work / 'out.png')]
+    if masked:
+        cmd[4:4] = ['--mask', str(work / 'mask.png')]
+    r = subprocess.run(cmd, input=full_prompt, capture_output=True, text=True, timeout=600, cwd=str(ROOT))
     if r.returncode != 0 or not (work / 'out.png').exists():
         raise RuntimeError(f"描き直せませんでした: {(r.stderr or r.stdout)[-500:]}")
     gen = Image.open(work / 'out.png').convert('RGB').resize(crop.size, Image.LANCZOS)

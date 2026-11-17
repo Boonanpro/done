@@ -14,6 +14,8 @@
   python scripts/thumb.py render  <部屋> <作品> [--out a.png] [--width 1280]   今の形を PNG に（Read で見る）
   python scripts/thumb.py export  <部屋> <作品>                      1280×720 の書き出し
   python scripts/thumb.py undo    <部屋> <作品>                      1つ前の形へ戻す
+  python scripts/thumb.py refs    <部屋> <作品> add <絵のURL> "題" "チャンネル" | clear
+        「一覧で見る」で横に並べるほかのサムネ（参考・競合・同じチャンネルの過去の動画）
   python scripts/thumb.py create  <部屋> "題" <doc.json>             新しいサムネの作品を作る
 """
 from __future__ import annotations
@@ -149,13 +151,19 @@ def main() -> None:
                 i += 1
         if not box or len(box) != 4 or not prompt:
             sys.exit('--box x,y,w,h と --prompt が要ります')
-        print(json.dumps(td.repaint(room, cid, pid, box, prompt, quality=quality), ensure_ascii=False))
+        print(json.dumps(td.repaint(room, cid, pid, box, prompt, quality=quality, masked='--masked' in a), ensure_ascii=False))
     elif cmd == 'render':
         out = Path(a[a.index('--out') + 1]) if '--out' in a else None
         w = int(a[a.index('--width') + 1]) if '--width' in a else 1280
         print(td.render(room, cid, out, out_w=w))
     elif cmd == 'export':
         print(json.dumps(td.export(room, cid), ensure_ascii=False))
+    elif cmd == 'refs':
+        if a[3] == 'clear':
+            doc['references'] = []
+        else:
+            doc.setdefault('references', []).append({'src': a[4], 'title': a[5] if len(a) > 5 else '', 'channel': a[6] if len(a) > 6 else ''})
+        print(f"保存しました rev {td.save(room, cid, doc, 'dan')['rev']} 参考 {len(doc.get('references') or [])}件")
     elif cmd == 'undo':
         print(f"戻しました rev {td.undo(room, cid)['rev']}")
     else:
