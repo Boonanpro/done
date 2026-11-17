@@ -159,3 +159,10 @@ def test_a_place_in_the_video_is_said_in_minutes_and_seconds():
     assert voice_say.speakable('note', '0:55.8のテロップを消すね') == '55秒のテロップを消すね'
     assert voice_say.speakable('note', '3:47.2の札') == '3分47秒の札'
     assert voice_say.speakable('answer', '14:05に始めた') == '14:05に始めた'   # a time of day stays
+
+
+def test_the_speech_model_knows_the_call_is_from_the_editor(monkeypatch, room):
+    from app.services import voice_live
+    monkeypatch.setattr(voice_editor, 'call_editor', lambda room_id: {'asset_room_id': 'assets', 'content_id': 'c1'} if room_id == 'work' else None)
+    assert 'エディター' in voice_live.session_config(room_id='work', user_id='u')['instructions']
+    assert 'エディター' not in voice_live.session_config(room_id='chat', user_id='u')['instructions'].split('通話を始めた日')[1]

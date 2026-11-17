@@ -239,6 +239,8 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
     if not voice_plain.enabled():   # plain calls do not give the backend this brief (voice_plain)
         from app.services.dan_core import shared
         await asyncio.to_thread(shared, body.room_id, user.user_id)
+    from app.services import voice_editor   # whether the room is a work's room in the editor, read off the loop (cached)
+    await asyncio.to_thread(voice_editor.call_editor, body.room_id)
     config = session_config(history, timezone=body.timezone, files=files, room_id=body.room_id, user_id=user.user_id)
     backend = config.pop('_backend', None)   # the Responses spec the server itself runs when Jev routes the delegations (voice_router)
     pending_id = 'pending-' + uuid4().hex
