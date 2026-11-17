@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.paths import real_dir
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -18,7 +19,7 @@ from app.services.auth_service import TokenData
 router = APIRouter(prefix="/video-review", tags=["video-review"])
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-UPLOADS_DIR = PROJECT_ROOT / "uploads"
+UPLOADS_DIR = real_dir(PROJECT_ROOT / "uploads")
 from app.paths import DAN_WORKSPACE
 SESSION_DIR = UPLOADS_DIR / "video-review-sessions"
 SESSION_DIR.mkdir(parents=True, exist_ok=True)

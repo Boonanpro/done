@@ -57,6 +57,37 @@ def local_file(value: str | None) -> str | None:
     素材の台帳が「D:\\done\\uploads\\production-assets\\…」のまま残っていて、ファイル自体は
     Mac の同じ場所にあるのに見つけられなかった。読み替えられない場所（C:/Users/… など）はそのまま返す。
     """
-    if _WINDOWS or not value or len(value) < 3 or value[1] != ":" or value[2] not in "\\/":
+    if not value or len(value) < 3:
         return value
-    return localize(value.replace("\\", "/"))
+    if not _WINDOWS and value[1] == ":" and value[2] in "\\/":
+        value = localize(value.replace("\\", "/"))
+    return shared_file(value)
+
+
+# 世代ごとのコードの写し（dan-workspace/releases/<世代>/）では、uploads・.data・.tmp は動いているダン
+# （LIVE_ROOT）の同じフォルダへのつなぎ（symlink）になっている（scripts/core_release.py link_shared）。
+LIVE_ROOT = _place("DAN_LIVE_ROOT", "D:/done", "done")
+_SHARED_TOPS = ("uploads", ".data", ".tmp")
+
+
+def shared_file(value: str | None) -> str | None:
+    """写しの中の住所（…/releases/<世代>/uploads/…）を、動いているダンの本物の住所にする。
+
+    2026-11-17: エディターの冒頭の演出・LINE特典の映像が再生で出なかった。画面用の写しの住所が
+    「dan-workspace/releases/db23980566c8-c975ac/uploads/…」のまま台帳に書かれていて、その世代の写しが
+    掃除で消えると、ファイルは done/uploads に残っているのに見つけられなかった。"""
+    if not value or "/releases/" not in value:
+        return value
+    head, _, tail = value.replace("\\", "/").partition("/releases/")
+    parts = tail.split("/", 2)
+    if head != DAN_WORKSPACE.as_posix() or len(parts) < 3 or parts[1] not in _SHARED_TOPS:
+        return value
+    return str(LIVE_ROOT / parts[1] / parts[2])
+
+
+def real_dir(path: Path) -> Path:
+    """つなぎ（symlink）を解いた本物のフォルダ。ここから作った住所は世代の写しが消えても残る。"""
+    try:
+        return path.resolve()
+    except OSError:
+        return path

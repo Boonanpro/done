@@ -285,6 +285,13 @@ def timeline_outline(sequence: dict[str, Any], assets: dict[str, dict[str, Any]]
     the only lane-level distinction. Clip kind comes from the clip's own fields."""
     lines: list[str] = [f"duration: {_f(sequence.get('duration')):.2f}s / format: {sequence.get('format') or '9:16'}"]
     lines.append("lanes are layers: lane 0 = back, higher = front; an effect/overlay affects only lanes BELOW it")
+    from app.services import lane_switches as _ls
+    _off = _ls.switched_off(sequence)
+    _off_ids: set[str] = set()
+    if _off:
+        lines.append(_ls.describe(sequence))
+        _lanes = _ls.clip_lanes([t for t in (sequence.get("tracks") or []) if isinstance(t, dict)])
+        _off_ids = {cid for cid, zl in _lanes.items() if _ls.lane_key(*zl) in _off}
     for ti, track in enumerate(sequence.get("tracks") or []):
         clips = track.get("clips") or []
         kind = str(track.get("type") or "")
@@ -348,5 +355,6 @@ def timeline_outline(sequence: dict[str, Any], assets: dict[str, dict[str, Any]]
             if authors and str(c.get("id")) in authors:
                 from app.services.timeline_authors import short
                 by = f" last_changed_by=[{short(authors[str(c.get('id'))])}]"
-            lines.append(f"  {c.get('id')}: {ts:.2f}-{te:.2f} {what}{aid_tag}{by}")
+            off = " [switched-off lane: not shown/heard]" if str(c.get("id")) in _off_ids else ""
+            lines.append(f"  {c.get('id')}: {ts:.2f}-{te:.2f} {what}{aid_tag}{by}{off}")
     return "\n".join(lines)

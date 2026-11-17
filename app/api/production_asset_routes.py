@@ -27,14 +27,15 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.chat_artifact_routes import get_current_user
-from app.paths import local_file
+from app.paths import local_file, real_dir
 from app.services.auth_service import TokenData
 
 
 router = APIRouter(prefix="/production-assets", tags=["production-assets"])
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-UPLOADS_DIR = PROJECT_ROOT / "uploads"
+# 世代の写しの中では uploads はつなぎ。解いた本物の住所で台帳に書く（app/paths.py shared_file）
+UPLOADS_DIR = real_dir(PROJECT_ROOT / "uploads")
 ASSET_ROOT = UPLOADS_DIR / "production-assets"
 ASSET_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -818,6 +819,8 @@ def _sequence_z_items(
     every other visual item in draw order as ("overlay" | "fx" | "cap", clip)."""
     if not isinstance(sequence, dict):
         return [], []
+    from app.services.lane_switches import drop_switched_off
+    sequence = drop_switched_off(sequence)  # 本人が段の頭で非表示にした段は描かない
     visual_all = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict) and t.get("type") != "audio"]
     tracks = [t for t in visual_all if not t.get("hidden")]
     # A picture's stacking layer, the same rule the editor preview draws with: its own `layer`
@@ -883,6 +886,8 @@ def _is_scene_clip(clip: dict[str, Any]) -> bool:
 def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(sequence, dict):
         return []
+    from app.services.lane_switches import drop_switched_off
+    sequence = drop_switched_off(sequence)  # 本人が段の頭で消音にした段は鳴らさない
     tracks = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict)]
     # link_id -> the visual lane that owns the linked audio (unified A/V rule)
     link_owner: dict[str, dict[str, Any]] = {}
@@ -5706,7 +5711,8 @@ def _ensure_view_copies_bg(room_id: str, assets: list[dict[str, Any]]) -> None:
     できると view_url が付き、画面は次の読み直しからそちらで再生する。"""
     todo = [a["id"] for a in assets if isinstance(a, dict) and a.get("id") and a.get("status") not in ("processing", "proxy_pending")
             and not (a.get("view_error_at") and time.time() - float(a.get("view_error_at") or 0) < 86400)
-            and (not a.get("view_path") or (a.get("view_alpha") != "stacked" and _asset_has_alpha(a)))
+            and (not a.get("view_path") or not Path(str(a.get("view_path"))).is_file()
+                 or (a.get("view_alpha") != "stacked" and _asset_has_alpha(a)))
             and _needs_view_copy(a)]
     with _view_copy_lock:
         todo = [aid for aid in todo if aid not in _view_copy_running]
@@ -6193,12 +6199,22 @@ async def get_asset_media(
         "view": "view_path",
         "thumbnail": "thumbnail_path",
     }[variant]
-    value = asset.get(key)
-    if not value:
-        raise HTTPException(status_code=404, detail=f"{variant} is not available")
-    path = Path(value).resolve()
-    if not path.exists() or not path.is_file():
+    # 画面用の写し・再生用の写しが無くなっていても、元の動画で再生する（2026-11-17 写しの住所が切れて
+    # プレビューが空になっていた）。透明な動画の写し（上下に色と透明を重ねた形）は元と形が違うので落とさない。
+    order = [key]
+    if variant == "view" and asset.get("view_alpha") != "stacked":
+        order += ["proxy_path", "local_path"]
+    elif variant == "proxy":
+        order += ["local_path"]
+    path = next((Path(str(asset[k])).resolve() for k in order if asset.get(k) and Path(str(asset[k])).is_file()), None)
+    if path is None:
+        if not asset.get(key):
+            raise HTTPException(status_code=404, detail=f"{variant} is not available")
+        if variant == "view":
+            _ensure_view_copies_bg(room_id, [asset])
         raise HTTPException(status_code=404, detail="Media file not found")
+    if variant == "view" and path != Path(str(asset.get("view_path") or "")).resolve():
+        _ensure_view_copies_bg(room_id, [asset])  # 写しを作り直す（できるまでは元で再生）
     return _range_file_response(path, request)
 
 

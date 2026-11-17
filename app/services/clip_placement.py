@@ -386,7 +386,8 @@ def render_fields(clip: dict[str, Any], sw: float, sh: float, W: float, H: float
 def render_sequence(seq: dict[str, Any], assets: dict[str, dict[str, Any]], fmt: str | None = None) -> dict[str, Any]:
     """A copy of the sequence with every one-form picture clip in box form (for the exporter)."""
     import copy
-    seq = copy.deepcopy(seq)
+    from app.services.lane_switches import drop_switched_off
+    seq = copy.deepcopy(drop_switched_off(seq))  # 段の頭で切った段は、書き出しにもコマの絵にも出さない
     W, H = canvas_px(fmt or seq.get("format"))
     fps = _num(seq.get("frame_rate") or seq.get("fps"), 30.0) or 30.0
     for tr in seq.get("tracks") or []:

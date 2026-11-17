@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-UPLOAD_ROOT = Path(__file__).resolve().parents[2] / "uploads" / "production-assets"
+UPLOAD_ROOT = (Path(__file__).resolve().parents[2] / "uploads").resolve() / "production-assets"
 _LOG_KEEP = 300
 OWNER = {"kind": "owner", "label": "みきさん"}
 
