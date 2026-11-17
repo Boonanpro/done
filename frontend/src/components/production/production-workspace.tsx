@@ -133,7 +133,7 @@ export function ProductionWorkspace({
 }: {
   roomId: string;
   /** スマホの形のエディターで、タイムラインと入れ替えて出す会話の欄 */
-  phoneChat?: ReactNode;
+  phoneChat?: ((lead: ReactNode) => ReactNode) | null;
   /** スマホの幅: ライブラリは作品の一覧だけを1列で、エディターは畳んだ形で出す */
   compact?: boolean;
   /** ライブラリの真ん中に大きく置く「ダンと制作」の会話（制作の窓だけが渡す） */
