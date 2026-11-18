@@ -35,6 +35,7 @@ from app.api.project_routes import router as project_router
 from app.api.parallel_job_routes import router as parallel_job_router
 from app.api.note_routes import router as note_router
 from app.api.prompts_screen import router as prompts_router
+from app.api.script_listen_screen import router as script_listen_router
 from app.api.artifact_documents_routes import router as artifact_documents_router
 from app.api.file_routes import router as file_router
 from app.api.studio_routes import router as studio_router
@@ -184,6 +185,7 @@ app.add_middleware(
 # 業務系ルーター登録
 app.include_router(gmail_router, prefix="/api/v1")
 app.include_router(prompts_router, prefix="/api/v1")   # the /prompts screen (app/services/prompt_store.py)
+app.include_router(script_listen_router, prefix="/api/v1")   # the /script-listen screen (app/services/script_listen.py)
 app.include_router(gdoc_event_router)
 app.include_router(detection_router, prefix="/api/v1")
 app.include_router(content_router, prefix="/api/v1")
