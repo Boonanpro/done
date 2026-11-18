@@ -292,6 +292,13 @@ def evidence(job_id, full=False):
             'note':'snapshots は場所だけ。全文は raw_path のDOCX、またはこのコマンドに --full を付けて取得する。'}
 
 
+# Google's export sometimes stops naming the author of old suggestions and writes a
+# placeholder instead (2026-11-18, 1vfII8…: 57 of Dan's and 22 of the owner's suggestions
+# turned into 利用できないアカウント). The placeholder says nothing about who wrote it,
+# so such a suggestion must never be taken as the owner's and approved.
+UNKNOWN_AUTHORS={'利用できないアカウント','不明な作成者','Unknown Author','Unknown author','Anonymous','Unavailable account'}
+
+
 def dan_label(payload):
     for t in payload.get('threads',[]):
         for item in [t,*t.get('replies',[])]:
@@ -323,6 +330,7 @@ def suggestions(file_id, snapshot=None):
         except Exception: when=None
         inside=when is not None and any(a<=when<=b for a,b in intervals)
         if r['author_label']==dan: who='dan' if inside or when is None else 'owner-or-dan'
+        elif r['author_label'] in UNKNOWN_AUTHORS: who='other'
         else: who='owner' if private else 'other'
         para=payload['paragraphs'][r['paragraph']] if isinstance(r.get('paragraph'),int) and r['paragraph']<len(payload['paragraphs']) else {}
         result.append({'kind':r['kind'],'author_label':r['author_label'],'date':r.get('date'),'text':r.get('text'),

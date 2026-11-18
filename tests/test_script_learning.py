@@ -221,3 +221,10 @@ def test_only_answered_learned_quiet_threads_are_resolved(target):
     assert L.finished_threads(target,threads)==['done']
     with E.db() as c:c.execute('INSERT INTO batches(id,file_id,payload,created,status) VALUES(?,?,?,?,?)',('b','f','[{"comment_id":"done"}]',E.iso(),'pending'))
     assert L.finished_threads(target,threads)==[]
+
+
+def test_placeholder_author_is_never_the_owner(target,monkeypatch):
+    monkeypatch.setattr(E,'owner_only',lambda *a:True)
+    L.store('f',docx('<w:p>'+text('本文')+insertion('本人','1','投手コーチイツキ')+insertion('不明','2','利用できないアカウント')+'</w:p>'),{})
+    by={s['text']:s['by'] for s in L.suggestions('f')}
+    assert by=={'本人':'owner','不明':'other'}
