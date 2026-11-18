@@ -334,3 +334,226 @@ def repaint(room_id: str, content_id: str, part_id: str, box: tuple[float, float
     saved = save(room_id, content_id, {**doc, 'parts': parts}, 'dan')
     return {'part_id': part_id, 'asset_id': asset['id'], 'image': str(out), 'rev': saved['rev'],
             'box_in_image': [x0, y0, x1, y1]}
+
+
+# ── 荒く並べた絵を「仕上げ」る ────────────────────────────────────────────────────
+# 2026-11-18 本人「うん」（機能3「素材を荒く並べて『仕上げ』を押すと、並べた構図のまま光や影を整えた1枚にする」）。
+# 仕上げるのは「文字より奥にある絵」（背景・人物・物）だけ。文字と、文字より手前の絵（矢印・× など）は部品のまま残る。
+# 結果は1枚の絵の部品「仕上げた絵」になり、元の絵の部品は消さずに隠す（仕上げを外すと元に戻る）。
+# 本人が前後を見比べて採用するまで、サムネの形は変えない（採用はエディターが commit するので Ctrl+Z で戻る）。
+# 顔: AI が光を整えた絵の、顔の範囲だけ「明るさと色は AI の絵・目鼻立ちの細かい形は元の写真」に合わせ直すので、
+# 顔立ちは変わらない（2026-11-18 の試しで AI は人の位置・大きさを1画素も動かさなかった。動いた時は合わせ直さず止める）。
+
+FINISH_PROMPT = """このYouTubeのサムネイル用の合成写真を、1枚の自然な写真に仕上げる。
+
+- 構図はそのまま: 人や物の位置・大きさ・向き・ポーズを変えない。新しい人や物を足さない・消さない・動かさない。
+- 写っている人は同じ人のまま: 顔立ち・表情・年齢・髪型・メガネの形と色・服を変えない。
+- 整えるのは、光の向きと色・影・色味・つなぎ目だけ: 人と背景の光と色合いをそろえ、人の後ろや足元に自然な影を落とし、切り抜きの縁・ぼかしの帯・境目が分からないように馴染ませる。不自然に途切れた体や机は、同じ位置のまま自然につなぐ。
+- 背景の中身（画面・部屋・物）は残し、同じ物のまま光と色だけ合わせる。
+- 文字・ロゴ・透かし・枠は描かない（文字はあとで上に重ねる）。
+- サムネイルらしく、人がはっきり見える明るさとコントラストにする。"""
+
+
+def _finish_dir(room_id: str, content_id: str) -> Path:
+    d = _par()._room_dir(room_id) / 'thumbnails' / content_id / 'finish'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def finish_sources(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """仕上げる絵の部品（奥から手前の順）。一番奥の文字より奥にある、見えている絵。
+    もう仕上げてある時は、その仕上げの元の絵（隠してある）を使い、仕上げた絵そのものは使わない（重ねがけしない）。"""
+    parts = [p for p in doc.get('parts') or [] if isinstance(p, dict)]
+    fin = next((p for p in parts if p.get('type') == 'image' and isinstance(p.get('finish'), dict)), None)
+    fin_src = set((fin or {}).get('finish', {}).get('sources') or []) if fin else set()
+    first_text = next((i for i, p in enumerate(parts) if p.get('type') == 'text' and not p.get('hidden')), len(parts))
+    out = []
+    for p in parts[:first_text]:
+        if p.get('type') != 'image' or p is fin:
+            continue
+        if p.get('hidden') and p.get('id') not in fin_src:
+            continue
+        out.append({**p, 'hidden': False})
+    return out
+
+
+def _finish_write(path: Path, st: dict[str, Any]) -> dict[str, Any]:
+    st = {**st, 'updated_at': _now()}
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(st, ensure_ascii=False), encoding='utf-8')
+    tmp.replace(path)
+    return st
+
+
+def finish_status(room_id: str, content_id: str, job_id: str | None = None) -> dict[str, Any] | None:
+    d = _finish_dir(room_id, content_id)
+    if not job_id:
+        lp = d / 'latest.txt'
+        if not lp.exists():
+            return None
+        job_id = lp.read_text(encoding='utf-8').strip()
+    p = d / f"{job_id}.json"
+    if not p.exists():
+        return None
+    st = json.loads(p.read_text(encoding='utf-8'))
+    # 本体が途中で入れ替わって裏の仕事が消えた時は、いつまでも「仕上げ中」にしない
+    if st.get('state') == 'running' and time.time() - float(st.get('started_ts') or 0) > 900:
+        st = _finish_write(p, {**st, 'state': 'error', 'message': '仕上げが途中で止まりました。もう一度押してください'})
+    return st
+
+
+def finish_decide(room_id: str, content_id: str, job_id: str, adopted: bool) -> dict[str, Any]:
+    p = _finish_dir(room_id, content_id) / f"{job_id}.json"
+    if not p.exists():
+        raise ValueError('その仕上げが見つかりません')
+    st = json.loads(p.read_text(encoding='utf-8'))
+    return _finish_write(p, {**st, 'decided': 'adopted' if adopted else 'discarded'})
+
+
+def finish_start(room_id: str, content_id: str, note: str = '', quality: str = 'high') -> dict[str, Any]:
+    """仕上げを裏で始める。すぐに状態（job_id）を返し、画面は finish_status を読み直して待つ（約1〜2分）。"""
+    import threading
+    doc = get(room_id, content_id)
+    sources = finish_sources(doc)
+    if not sources:
+        raise ValueError('仕上げる絵がありません（文字より奥に絵の部品を置いてください）')
+    cur = finish_status(room_id, content_id)
+    if cur and cur.get('state') == 'running':
+        return cur
+    job_id = f"fin_{int(time.time())}_{uuid.uuid4().hex[:4]}"
+    d = _finish_dir(room_id, content_id)
+    path = d / f"{job_id}.json"
+    st = _finish_write(path, {'job_id': job_id, 'state': 'running', 'step': '絵を並べた形を描いています',
+                              'note': note, 'rev': doc.get('rev'), 'sources': [p['id'] for p in sources],
+                              'started_at': _now(), 'started_ts': time.time()})
+    (d / 'latest.txt').write_text(job_id, encoding='utf-8')
+
+    def run() -> None:
+        try:
+            res = _finish_run(room_id, content_id, doc, sources, d / job_id, note, quality,
+                              lambda step: _finish_write(path, {**json.loads(path.read_text(encoding='utf-8')), 'step': step}))
+            _finish_write(path, {**json.loads(path.read_text(encoding='utf-8')), **res, 'state': 'done', 'step': ''})
+        except Exception as exc:   # 画面にそのまま出すので、日本語の一文にする
+            msg = str(exc) if any('぀' <= ch <= 'ヿ' for ch in str(exc)) else '仕上げに失敗しました。もう一度押してください'
+            _finish_write(path, {**json.loads(path.read_text(encoding='utf-8')), 'state': 'error', 'message': msg[:300]})
+
+    threading.Thread(target=run, name=f"thumb-finish-{content_id[:8]}", daemon=True).start()
+    return st
+
+
+def _finish_run(room_id: str, content_id: str, doc: dict[str, Any], sources: list[dict[str, Any]], work: Path,
+                note: str, quality: str, step) -> dict[str, Any]:
+    from PIL import Image
+    work.mkdir(parents=True, exist_ok=True)
+    W, H = int(doc.get('width') or 1920), int(doc.get('height') or 1080)
+    src_doc = {**doc, 'parts': sources, 'instructions': []}
+    render(room_id, content_id, work / 'in.png', out_w=W, doc=src_doc, timeout=240)
+    step('AIで光と影を整えています（1〜2分）')
+    aw, ah = _api_size(W, H, long_side=2048)
+    prompt = FINISH_PROMPT + (f"\n\n本人からの一言: {note}" if note.strip() else '')
+    (work / 'prompt.txt').write_text(prompt, encoding='utf-8')
+    r = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'gpt_image.py'), '--image', str(work / 'in.png'),
+                        '--size', f"{aw}x{ah}", '--quality', quality, '--out', str(work / 'ai.png')],
+                       input=prompt, capture_output=True, text=True, timeout=900, cwd=str(ROOT))
+    if r.returncode != 0 or not (work / 'ai.png').exists():
+        raise RuntimeError(f"AI の仕上げに失敗しました: {(r.stderr or r.stdout)[-300:]}")
+    step('顔を元の顔に合わせています')
+    before = Image.open(work / 'in.png').convert('RGB')
+    if before.size != (W, H):
+        before = before.resize((W, H), Image.LANCZOS)
+    ai = Image.open(work / 'ai.png').convert('RGB').resize((W, H), Image.LANCZOS)
+    out, faces = keep_faces(before, ai)
+    out.save(work / 'out.png')
+    asset = add_image_asset(room_id, work / 'out.png', f"サムネ 仕上げた絵 {time.strftime('%m%d-%H%M')}.png",
+                            generated_by='dan:thumbnail-finish')
+    return {'asset_id': asset['id'], 'src': media_url(room_id, asset['id']), 'width': W, 'height': H, 'faces': faces}
+
+
+def keep_faces(before, ai):
+    """AI の絵の顔の範囲を、元の写真の目鼻立ち（細かい形）＋AI の絵の明るさと色に合わせ直す。
+    返り値 (絵, 顔ごとの記録)。AI が顔を動かした（元の位置で形が合わない）顔は合わせ直さず記録だけ残す。"""
+    import cv2
+    import numpy as np
+    from PIL import Image
+    a = cv2.cvtColor(np.asarray(before), cv2.COLOR_RGB2BGR)
+    b = cv2.cvtColor(np.asarray(ai), cv2.COLOR_RGB2BGR)
+    g = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+    H, W = g.shape
+    found = []
+    # 見落としを減らすため、正面2種と横顔（左右）で探す。顔でない所を拾っても、そこは元の写真の細かい形に戻るだけ
+    ms = max(32, W // 40)
+    for name, flip in (('haarcascade_frontalface_default.xml', False), ('haarcascade_frontalface_alt2.xml', False),
+                       ('haarcascade_profileface.xml', False), ('haarcascade_profileface.xml', True)):
+        c = cv2.CascadeClassifier(cv2.data.haarcascades + name)
+        for (x, y, w, h) in c.detectMultiScale(cv2.flip(g, 1) if flip else g, 1.05, 5, minSize=(ms, ms)):
+            if flip:
+                x = W - x - w
+            if not any(abs(x - fx) < max(w, fw) * 0.5 and abs(y - fy) < max(h, fh) * 0.5 for fx, fy, fw, fh in found):
+                found.append((int(x), int(y), int(w), int(h)))
+    out = b.astype(np.float32)
+    log = []
+    gb = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
+    for (x, y, w, h) in found:
+        # 元の顔が AI の絵のどこにあるか（同じ位置なら動いていない）
+        pad = int(w * 0.12)
+        X0, Y0, X1, Y1 = max(0, x - pad), max(0, y - pad), min(W, x + w + pad), min(H, y + h + pad)
+        m = cv2.matchTemplate(gb[Y0:Y1, X0:X1], g[y:y + h, x:x + w], cv2.TM_CCOEFF_NORMED)
+        _, score, _, loc = cv2.minMaxLoc(m)
+        dx, dy = loc[0] + X0 - x, loc[1] + Y0 - y
+        rec = {'box': [x, y, w, h], 'match': round(float(score), 3), 'shift': [int(dx), int(dy)]}
+        if score < 0.6 or abs(dx) > w * 0.06 or abs(dy) > h * 0.06:
+            rec['kept'] = False
+            log.append(rec)
+            continue
+        # 顔より少し広い楕円の中で、細かい形（元の写真 − ぼかした元の写真）を AI の絵のぼかしに足す
+        ex, ey, ew, eh = x - int(w * 0.18), y - int(h * 0.22), int(w * 1.36), int(h * 1.5)
+        ex0, ey0, ex1, ey1 = max(0, ex), max(0, ey), min(W, ex + ew), min(H, ey + eh)
+        mask = np.zeros((H, W), np.float32)
+        cv2.ellipse(mask, (x + w // 2, y + int(h * 0.55)), (int(ew * 0.5), int(eh * 0.5)), 0, 0, 360, 1.0, -1)
+        mask = cv2.GaussianBlur(mask, (0, 0), w * 0.06)
+        sig = max(2.0, w * 0.035)
+        sa = a[ey0:ey1, ex0:ex1].astype(np.float32)
+        sb = b[ey0 + dy:ey1 + dy, ex0 + dx:ex1 + dx].astype(np.float32) if (dx or dy) else b[ey0:ey1, ex0:ex1].astype(np.float32)
+        if sb.shape != sa.shape:
+            rec['kept'] = False
+            log.append(rec)
+            continue
+        detail = sa - cv2.GaussianBlur(sa, (0, 0), sig)
+        merged = np.clip(cv2.GaussianBlur(sb, (0, 0), sig) + detail, 0, 255)
+        mm = mask[ey0:ey1, ex0:ex1][..., None]
+        region = out[ey0:ey1, ex0:ex1]
+        out[ey0:ey1, ex0:ex1] = region * (1 - mm) + merged * mm
+        rec['kept'] = True
+        log.append(rec)
+    res = Image.fromarray(cv2.cvtColor(np.clip(out, 0, 255).astype(np.uint8), cv2.COLOR_BGR2RGB))
+    return res, log
+
+
+def apply_finish(doc: dict[str, Any], st: dict[str, Any]) -> dict[str, Any]:
+    """仕上げた絵をサムネの形に入れる（エディターの「採用」と同じ。ダンの道具が使う）。
+    元の絵の部品は隠すだけ。前の仕上げがあれば外してから入れる。"""
+    doc = remove_finish(doc)
+    parts = [dict(p) for p in doc.get('parts') or []]
+    srcs = set(st.get('sources') or [])
+    idx = min([i for i, p in enumerate(parts) if p.get('id') in srcs] or [0])
+    for p in parts:
+        if p.get('id') in srcs:
+            p['hidden'] = True
+    parts.insert(idx, {'id': f"f_{uuid.uuid4().hex[:6]}", 'type': 'image', 'name': '仕上げた絵', 'src': st['src'],
+                       'asset_id': st['asset_id'], 'x': 0, 'y': 0, 'w': doc.get('width') or 1920, 'h': doc.get('height') or 1080,
+                       'locked': True, 'finish': {'job_id': st.get('job_id'), 'sources': sorted(srcs)}})
+    return {**doc, 'parts': parts}
+
+
+def remove_finish(doc: dict[str, Any]) -> dict[str, Any]:
+    """仕上げた絵を外し、隠していた元の絵の部品を出す。"""
+    parts = [dict(p) for p in doc.get('parts') or []]
+    fin = next((p for p in parts if p.get('type') == 'image' and isinstance(p.get('finish'), dict)), None)
+    if not fin:
+        return doc
+    srcs = set(fin['finish'].get('sources') or [])
+    parts = [p for p in parts if p is not fin]
+    for p in parts:
+        if p.get('id') in srcs:
+            p['hidden'] = False
+    return {**doc, 'parts': parts}

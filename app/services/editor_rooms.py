@@ -185,7 +185,8 @@ def context_lines(room_id: str) -> list[str]:
                 from app.services.thumbnail_doc import cli
                 lines.append(f"この部屋の作品はサムネ（content_id={info['content_id']}）。背景・人物・文字・矢印を別々の部品で持つ。"
                              f"直すのは {cli()}（show {a} {info['content_id']} で部品の一覧、set で位置・大きさ・色・文字、"
-                             "repaint で絵の部品の範囲だけ描き直し、render で今の形を PNG にして確かめる、undo で1つ前に戻す）。"
+                             "repaint で絵の部品の範囲だけ描き直し、finish で文字より奥の絵を構図のまま光・影を整えた1枚に仕上げる、"
+                             "render で今の形を PNG にして確かめる、undo で1つ前に戻す）。"
                              "mcp__timeline は使わない。保存するとエディターの画面がすぐ変わる。")
             else:
                 lines.append(f"この部屋の作品: content_id={info['content_id']}。タイムラインは mcp__timeline__* で直す。")

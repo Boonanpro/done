@@ -10,14 +10,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ArrowLeft, ArrowDown, ArrowUp, Check, Copy, Download, Eye, EyeOff, LayoutGrid, Loader2, Lock, MessageSquare,
-  MousePointer2, PenLine, Redo2, RotateCcw, Send, Trash2, Type, Undo2, Unlock, X,
+  MousePointer2, PenLine, Redo2, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { ThumbCanvas, partCenter, type PartBox } from './thumb-canvas';
 import {
-  THUMB_FONTS, asThumbDoc, loadThumbFonts, newPartId,
-  type ThumbDoc, type ThumbFontId, type ThumbInstruction, type ThumbMark, type ThumbPart, type ThumbTextPart,
+  THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, newPartId, removeFinish,
+  type ThumbDoc, type ThumbFinishJob, type ThumbFontId, type ThumbInstruction, type ThumbMark, type ThumbPart, type ThumbTextPart,
 } from './thumb-doc';
 
 type Props = {
@@ -104,6 +104,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const [phoneChatOpen, setPhoneChatOpen] = useState(false);
   const [stageW, setStageW] = useState(800);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
+  const [finishJob, setFinishJob] = useState<ThumbFinishJob | null>(null);
+  const [compareOpen, setCompareOpen] = useState(false);
 
   // ── 読み込み・ダンの直しを読み直す・保存 ──
   const load = useCallback(async (force = false) => {
@@ -409,6 +411,97 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     }
   };
 
+  // ── 仕上げ（荒く並べた絵を、構図のまま光と影を整えた1枚に。前後を見比べて採用する） ──
+  const finishUrl = (extra = '') => api(`${encodeURIComponent(contentId)}/thumbnail/finish${extra}`, roomId);
+  // 開いた時と、その後も5秒ごと: ほかの所（ダンへの頼み・別の端末）で始まった仕上げも拾う。
+  // 仕上げ中なら続きを待ち、仕上がったのにまだ選んでいなければ見比べを出す
+  const seenFinish = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    let stop = false;
+    const look = async () => {
+      try {
+        const res = await fetch(finishUrl(), { credentials: 'include', cache: 'no-store' });
+        if (!res.ok || stop) return;
+        const j = (await res.json()) as { job: ThumbFinishJob | null };
+        const job = j.job;
+        if (!job || stop || job.decided || seenFinish.current.has(`${job.job_id}:${job.state}`)) return;
+        seenFinish.current.add(`${job.job_id}:${job.state}`);
+        if (job.state === 'running') setFinishJob((cur) => (cur?.job_id === job.job_id ? cur : job));
+        if (job.state === 'done') { setFinishJob(job); setCompareOpen(true); }
+      } catch { /* 次に */ }
+    };
+    void look();
+    const t = window.setInterval(() => void look(), 5000);
+    return () => { stop = true; window.clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, contentId]);
+
+  const finishRunning = finishJob?.state === 'running';
+  useEffect(() => {
+    if (!finishRunning || !finishJob) return;
+    let stop = false;
+    const t = window.setInterval(async () => {
+      try {
+        const res = await fetch(finishUrl(`?job_id=${encodeURIComponent(finishJob.job_id)}`), { credentials: 'include', cache: 'no-store' });
+        if (!res.ok || stop) return;
+        const j = (await res.json()) as { job: ThumbFinishJob | null };
+        if (!j.job || stop) return;
+        setFinishJob(j.job);
+        seenFinish.current.add(`${j.job.job_id}:${j.job.state}`);
+        if (j.job.state === 'done') setCompareOpen(true);
+      } catch { /* 次に */ }
+    }, 2000);
+    return () => { stop = true; window.clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finishRunning, finishJob?.job_id]);
+
+  const startFinish = async (note = '') => {
+    if (finishRunning) return;
+    setCompareOpen(false);
+    try {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      await flush();
+      const res = await fetch(finishUrl(), {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }),
+      });
+      if (!res.ok) {
+        let msg = await res.text();
+        try { msg = (JSON.parse(msg) as { detail?: string }).detail || msg; } catch { /* そのまま */ }
+        throw new Error(msg);
+      }
+      const job = (await res.json()) as ThumbFinishJob;
+      seenFinish.current.add(`${job.job_id}:${job.state}`);
+      setFinishJob(job);
+    } catch (e) {
+      toast.error('仕上げを始められませんでした', { description: String((e as Error).message || e).slice(0, 160) });
+    }
+  };
+
+  const decideFinish = async (adopted: boolean) => {
+    const job = finishJob;
+    const d = docRef.current;
+    if (!job) return;
+    if (adopted && d) {
+      const next = applyFinish(d, job);
+      commit(next);
+      setSelected(null);
+    }
+    setCompareOpen(false);
+    setFinishJob(null);
+    try {
+      await fetch(finishUrl(`/${encodeURIComponent(job.job_id)}/decide`), {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ adopted }),
+      });
+    } catch { /* 選んだ記録だけなので、届かなくても画面はそのまま */ }
+  };
+
+  const unfinish = () => {
+    const d = docRef.current;
+    if (!d) return;
+    commit(removeFinish(d));
+    setSelected(null);
+  };
+
   const instructions = doc?.instructions || [];
   const activeIds = instructions.map((i) => i.job_id).filter((x): x is string => !!x);
   const activeKey = activeIds.join(',');
@@ -504,6 +597,10 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         <PenLine className="h-3.5 w-3.5" />書き込む
       </button>
       <button type="button" className={toolBtn(false)} onClick={addText} title="文字を足す"><Type className="h-3.5 w-3.5" />文字</button>
+      <button type="button" className={toolBtn(finishRunning)} onClick={() => void startFinish()} disabled={finishRunning}
+        title="文字より奥の絵（背景・人物）を、並べた形のまま光と影を整えた1枚にする" data-thumb-finish>
+        {finishRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}{finishRunning ? '仕上げ中' : '仕上げ'}
+      </button>
       <button type="button" className={toolBtn(listView)} onClick={() => setListView((v) => !v)} title="YouTube の一覧の大きさで見る" data-thumb-list>
         <LayoutGrid className="h-3.5 w-3.5" />{compact ? '一覧' : '一覧で見る'}
       </button>
@@ -584,6 +681,15 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
             </button>
           </div>
         </>
+      ) : sel.finish ? (
+        <div className="space-y-2" data-thumb-finish-part>
+          <button type="button" className="h-8 w-full rounded border border-border text-xs hover:bg-muted" onClick={unfinish} data-thumb-unfinish>
+            仕上げを外して、元の絵に戻す
+          </button>
+          <button type="button" className="h-8 w-full rounded border border-border text-xs hover:bg-muted disabled:opacity-40" disabled={finishRunning} onClick={() => void startFinish()}>
+            <Sparkles className="mr-1 inline h-3 w-3" />もう一度仕上げる
+          </button>
+        </div>
       ) : (
         <div className="grid grid-cols-2 gap-2">
           <label className="col-span-2"><span className={label}>不透明度</span>
@@ -646,6 +752,27 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         })}
       </ul>
     </div>
+  ) : null;
+
+  const finishCard = finishJob && (finishJob.state === 'running' || finishJob.state === 'error') ? (
+    <div className={`rounded-md border p-2 text-xs ${finishJob.state === 'error' ? 'border-red-300 bg-red-50/60 dark:bg-red-950/30' : 'border-sky-300 bg-sky-50/60 dark:bg-sky-950/30'}`} data-thumb-finish-status>
+      {finishJob.state === 'running' ? (
+        <div className="flex items-start gap-1.5"><Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-sky-500" /><span>仕上げ中: {finishJob.step || '始めています'}</span></div>
+      ) : (
+        <div className="space-y-1.5">
+          <div>{finishJob.message || '仕上げられませんでした'}</div>
+          <div className="flex gap-1.5">
+            <button type="button" className="rounded border border-border px-2 py-1 hover:bg-muted" onClick={() => void startFinish()}>もう一度</button>
+            <button type="button" className="rounded border border-border px-2 py-1 hover:bg-muted" onClick={() => setFinishJob(null)}>閉じる</button>
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  const comparePanel = compareOpen && finishJob?.state === 'done' && finishJob.src ? (
+    <FinishCompare doc={doc} job={finishJob} compact={compact}
+      onAdopt={() => void decideFinish(true)} onDiscard={() => void decideFinish(false)} onRetry={(note) => void startFinish(note)} />
   ) : null;
 
   const penBar = mode === 'pen' ? (
@@ -712,6 +839,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         ) : (
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden p-3">
             {tools}
+            {finishCard}
             {penBar}
             {mode === 'select' ? props : null}
             {instrList}
@@ -725,6 +853,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           </button>
         ) : null}
         {listPanel}
+        {comparePanel}
       </div>
     );
   }
@@ -740,6 +869,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       <div className="flex min-h-0 flex-1">
         <div className="min-h-0 min-w-0 flex-1 bg-muted/40 p-6">{stage}</div>
         <aside className="w-72 shrink-0 space-y-4 overflow-y-auto border-l border-border p-3">
+          {finishCard}
           {penBar}
           {mode === 'select' ? props : null}
           {instrList}
@@ -747,6 +877,59 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         </aside>
       </div>
       {listPanel}
+      {comparePanel}
+    </div>
+  );
+}
+
+// 仕上げの前後を見比べて、採用する・やめる・一言を添えてもう一度を選ぶ（文字は前後とも同じ部品を重ねて見せる）
+function FinishCompare({ doc, job, compact, onAdopt, onDiscard, onRetry }: {
+  doc: ThumbDoc; job: ThumbFinishJob; compact: boolean; onAdopt: () => void; onDiscard: () => void; onRetry: (note: string) => void;
+}) {
+  const after = useMemo(() => applyFinish(doc, job), [doc, job]);
+  const [note, setNote] = useState('');
+  const [retrying, setRetrying] = useState(false);
+  const fin = finishPart(doc);
+  // 前: 今の形（もう仕上げてあれば、その仕上げの前の元の絵）
+  const before = useMemo(() => (fin ? removeFinish(doc) : doc), [doc, fin]);
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col bg-[#0b0b0b] text-white" data-thumb-compare>
+      <div className="flex shrink-0 items-center gap-2 px-4 py-3">
+        <Sparkles className="h-4 w-4 text-sky-300" />
+        <span className="flex-1 text-sm font-semibold">仕上げの前と後</span>
+        <button type="button" onClick={onDiscard} className="rounded-full p-2 hover:bg-white/10" title="やめる"><X className="h-5 w-5" /></button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-4">
+        {compact ? (
+          // スマホ: 前と後を上下に、どちらも画面の幅いっぱいで
+          <div className="space-y-3">
+            <div><div className="mb-1 text-xs text-white/70">前</div><div className="overflow-hidden rounded-lg" data-thumb-compare-before><ThumbCanvas doc={before} width="100%" /></div></div>
+            <div><div className="mb-1 text-xs text-white/70">仕上げた後</div><div className="overflow-hidden rounded-lg ring-2 ring-sky-400" data-thumb-compare-after><ThumbCanvas doc={after} width="100%" /></div></div>
+          </div>
+        ) : (
+          <div className="mx-auto grid max-w-[1600px] grid-cols-2 gap-4">
+            <div><div className="mb-1.5 text-xs text-white/70">前</div><div className="overflow-hidden rounded-lg" data-thumb-compare-before><ThumbCanvas doc={before} width="100%" /></div></div>
+            <div><div className="mb-1.5 text-xs text-white/70">仕上げた後</div><div className="overflow-hidden rounded-lg ring-2 ring-sky-400" data-thumb-compare-after><ThumbCanvas doc={after} width="100%" /></div></div>
+          </div>
+        )}
+      </div>
+      <div className="shrink-0 space-y-2 px-4 pb-4 pt-3">
+        {retrying ? (
+          <div className="mx-auto flex max-w-xl gap-2">
+            <input value={note} onChange={(e) => setNote(e.target.value)} autoFocus placeholder="どう変えたいか（例: もっと明るく・影を弱く）"
+              onKeyDown={(e) => { if (e.key === 'Enter') onRetry(note.trim()); }}
+              className="h-10 min-w-0 flex-1 rounded-md border border-white/20 bg-white/10 px-3 text-sm text-white placeholder:text-white/40" data-thumb-compare-note />
+            <button type="button" onClick={() => onRetry(note.trim())} className="h-10 rounded-md bg-sky-500 px-4 text-sm font-semibold">送る</button>
+          </div>
+        ) : null}
+        <div className="mx-auto flex max-w-xl gap-2">
+          <button type="button" onClick={onAdopt} className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-md bg-sky-500 text-sm font-semibold" data-thumb-adopt>
+            <Check className="h-4 w-4" />採用する
+          </button>
+          <button type="button" onClick={() => setRetrying((v) => !v)} className="h-11 rounded-md border border-white/25 px-3 text-sm hover:bg-white/10" data-thumb-retry>もう一度</button>
+          <button type="button" onClick={onDiscard} className="h-11 rounded-md border border-white/25 px-3 text-sm hover:bg-white/10" data-thumb-discard>やめる</button>
+        </div>
+      </div>
     </div>
   );
 }

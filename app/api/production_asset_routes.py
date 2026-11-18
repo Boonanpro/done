@@ -9183,6 +9183,45 @@ async def export_thumbnail(content_id: str, room_id: str = Query(...), current_u
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+class ThumbnailFinishRequest(BaseModel):
+    note: str = ""
+
+
+class ThumbnailFinishDecide(BaseModel):
+    adopted: bool
+
+
+@router.post("/contents/{content_id}/thumbnail/finish")
+def start_thumbnail_finish(content_id: str, data: ThumbnailFinishRequest, room_id: str = Query(...),
+                           current_user: TokenData = Depends(get_current_user)):
+    """荒く並べた絵（文字より奥の絵）を、構図のまま光と影を整えた1枚にする。裏で1〜2分。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        return thumbnail_doc.finish_start(room_id, content_id, data.note)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/contents/{content_id}/thumbnail/finish")
+def thumbnail_finish_status(content_id: str, room_id: str = Query(...), job_id: str | None = Query(None),
+                            current_user: TokenData = Depends(get_current_user)):
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    return {"job": thumbnail_doc.finish_status(room_id, content_id, job_id)}
+
+
+@router.post("/contents/{content_id}/thumbnail/finish/{job_id}/decide")
+def thumbnail_finish_decide(content_id: str, job_id: str, data: ThumbnailFinishDecide, room_id: str = Query(...),
+                            current_user: TokenData = Depends(get_current_user)):
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        return {"job": thumbnail_doc.finish_decide(room_id, content_id, job_id, data.adopted)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.get("/contents/{content_id}/thumbnail/export.png")
 def thumbnail_export_file(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
     p = _room_dir(room_id) / "thumbnails" / content_id / "export.png"

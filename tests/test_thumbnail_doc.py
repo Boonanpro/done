@@ -76,3 +76,80 @@ def test_api_size_rules():
     for w, h in [(300, 200), (1920, 1080), (50, 400), (1000, 1000)]:
         aw, ah = td._api_size(w, h)
         assert aw % 16 == 0 and ah % 16 == 0 and aw * ah >= 655360 and max(aw, ah) / min(aw, ah) <= 3.01
+
+
+# ── 仕上げ（荒く並べた絵を、構図のまま光と影を整えた1枚に） ──
+
+def _finish_doc(room_id):
+    d = _doc(room_id)
+    d['parts'] = [
+        d['parts'][0],
+        {'id': 'person', 'type': 'image', 'src': 'x', 'x': 300, 'y': 100, 'w': 600, 'h': 900},
+        {'id': 'old', 'type': 'image', 'src': 'x', 'x': 0, 'y': 0, 'w': 10, 'h': 10, 'hidden': True},
+        d['parts'][1],
+        {'id': 'arrow', 'type': 'image', 'src': 'x', 'x': 1200, 'y': 500, 'w': 200, 'h': 200},
+    ]
+    return d
+
+
+def test_finish_sources_are_the_pictures_behind_the_text(room):
+    doc = _finish_doc(room)
+    assert [p['id'] for p in td.finish_sources(doc)] == ['bg', 'person']   # 隠した絵・文字より手前の矢印は使わない
+    st = {'job_id': 'fin_1', 'src': '/m', 'asset_id': 'a1', 'sources': ['bg', 'person']}
+    done = td.apply_finish(doc, st)
+    ids = [p['id'] for p in done['parts']]
+    fin = done['parts'][0]
+    assert fin['finish']['sources'] == ['bg', 'person'] and fin['locked'] and (fin['w'], fin['h']) == (1920, 1080)
+    assert {p['id']: p.get('hidden') for p in done['parts']}['person'] is True
+    assert ids[-2:] == ['t1', 'arrow']                                     # 文字と矢印は部品のまま手前に
+    # もう一度仕上げる時は、仕上げた絵ではなく元の絵から（重ねがけしない）
+    assert [p['id'] for p in td.finish_sources(done)] == ['bg', 'person']
+    again = td.apply_finish(done, {**st, 'job_id': 'fin_2', 'src': '/m2'})
+    assert sum(1 for p in again['parts'] if p.get('finish')) == 1
+    back = td.remove_finish(again)
+    assert [p['id'] for p in back['parts']] == ['bg', 'person', 'old', 't1', 'arrow']
+    assert not back['parts'][1].get('hidden') and back['parts'][2]['hidden'] is True
+
+
+def test_finish_job_runs_and_keeps_the_layout(room, monkeypatch):
+    c = td.create(room, 'サムネ', _finish_doc(room))
+    rendered = {}
+
+    def fake_render(room_id, content_id, out=None, marks=None, out_w=1280, doc=None, timeout=120):
+        rendered['ids'] = [p['id'] for p in doc['parts']]
+        Image.new('RGB', (out_w, round(out_w * 1080 / 1920)), (40, 40, 40)).save(out)
+        return Path(out)
+
+    def fake_run(cmd, *args, **kw):
+        if 'gpt_image.py' in ' '.join(map(str, cmd)):
+            out = Path(cmd[cmd.index('--out') + 1])
+            w, h = (int(v) for v in cmd[cmd.index('--size') + 1].split('x'))
+            assert w % 16 == 0 and h % 16 == 0 and abs(w / h - 16 / 9) < 0.02
+            Image.new('RGB', (w, h), (90, 60, 40)).save(out)
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(td, 'render', fake_render)
+    monkeypatch.setattr(td.subprocess, 'run', fake_run)
+    st = td.finish_start(room, c['id'], 'もっと明るく')
+    import time
+    for _ in range(100):
+        st = td.finish_status(room, c['id'], st['job_id'])
+        if st['state'] != 'running':
+            break
+        time.sleep(0.1)
+    assert st['state'] == 'done', st
+    assert rendered['ids'] == ['bg', 'person']                       # 文字・矢印は絵に焼かない
+    assert 'もっと明るく' in (par._room_dir(room) / 'thumbnails' / c['id'] / 'finish' / st['job_id'] / 'prompt.txt').read_text()
+    out = td.asset_file(room, st['asset_id'])
+    assert Image.open(out).size == (1920, 1080)
+    assert td.get(room, c['id'])['rev'] == 1                          # 採用するまでサムネは変えない
+    assert td.finish_status(room, c['id'])['job_id'] == st['job_id']
+    assert td.finish_decide(room, c['id'], st['job_id'], True)['decided'] == 'adopted'
+
+
+def test_keep_faces_without_faces_returns_the_ai_picture():
+    a = Image.new('RGB', (320, 180), (10, 10, 10))
+    b = Image.new('RGB', (320, 180), (200, 100, 50))
+    out, log = td.keep_faces(a, b)
+    assert log == [] and np.array_equal(np.asarray(out), np.asarray(b))

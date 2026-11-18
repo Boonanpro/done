@@ -23,6 +23,8 @@ export type ThumbImagePart = ThumbBase & {
   asset_id?: string;    // 作品の部屋の素材の id（ダンの描き直しが元の絵を探す）
   x: number; y: number; w: number; h: number;
   flip_x?: boolean;
+  // 「仕上げ」で作った1枚の絵（sources は隠した元の絵の部品の id。仕上げを外すと元に戻る）
+  finish?: { job_id?: string; sources: string[] } | null;
 };
 
 export type ThumbTextPart = ThumbBase & {
@@ -130,3 +132,44 @@ export function newPartId(prefix: string) {
 
 // ペンで描いた印（ダンへの書き込み指示）。座標はサムネの画素。
 export type ThumbMark = { color: string; width: number; points: Array<[number, number]> };
+
+// ── 仕上げ（荒く並べた絵を、構図のまま光と影を整えた1枚にする。サーバーは thumbnail_doc.finish_*）──
+
+export type ThumbFinishJob = {
+  job_id: string;
+  state: 'running' | 'done' | 'error';
+  step?: string;
+  message?: string;
+  src?: string;
+  asset_id?: string;
+  sources?: string[];
+  decided?: 'adopted' | 'discarded';
+  started_at?: string;
+};
+
+export function finishPart(doc: ThumbDoc): ThumbImagePart | undefined {
+  return doc.parts.find((p): p is ThumbImagePart => p.type === 'image' && !!p.finish);
+}
+
+// 仕上げた絵を外し、隠していた元の絵を出す
+export function removeFinish(doc: ThumbDoc): ThumbDoc {
+  const fin = finishPart(doc);
+  if (!fin) return doc;
+  const srcs = new Set(fin.finish?.sources || []);
+  return { ...doc, parts: doc.parts.filter((p) => p !== fin).map((p) => (srcs.has(p.id) ? { ...p, hidden: false } : p)) };
+}
+
+// 仕上げた絵を入れる（元の絵は隠すだけ。前の仕上げは外してから）。サーバーの apply_finish と同じ
+export function applyFinish(doc: ThumbDoc, job: ThumbFinishJob): ThumbDoc {
+  if (!job.src || !job.asset_id) return doc;
+  const base = removeFinish(doc);
+  const srcs = new Set(job.sources || []);
+  const idxs = base.parts.map((p, i) => (srcs.has(p.id) ? i : -1)).filter((i) => i >= 0);
+  const at = idxs.length ? Math.min(...idxs) : 0;
+  const parts: ThumbPart[] = base.parts.map((p) => (srcs.has(p.id) ? { ...p, hidden: true } : p));
+  parts.splice(at, 0, {
+    id: newPartId('f'), type: 'image', name: '仕上げた絵', src: job.src, asset_id: job.asset_id,
+    x: 0, y: 0, w: base.width, h: base.height, locked: true, finish: { job_id: job.job_id, sources: [...srcs] },
+  });
+  return { ...base, parts };
+}
