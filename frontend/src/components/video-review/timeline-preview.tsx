@@ -12,6 +12,7 @@ import { gradeFilter } from './grade-filter';
 import { ALPHA_ASSET_IDS, alphaSolidAt, unpackStacked } from './alpha-unpack';
 import { AudioSourceManager, STRETCH_BLOCK_SEC, audioOnlyUrl, webAudioSupported } from './audio-source';
 import { localMedia, localMediaEnabled, localPlaySrc, type LocalMediaProgress } from './local-media';
+import { feelDrawn, feelFrozen, feelSeek, feelStall, feelStart } from './editor-feel';
 import { isOneForm, motionAt, pictureRect, visibleRect, cropOf, type Motion } from './placement';
 
 // Live timeline compositor. Draws the current edit (base video + overlay/PiP layers +
@@ -716,6 +717,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   useEffect(() => {
     const prev = seekSeenRef.current;
     seekSeenRef.current = { rev: seekRev, t: currentTime };
+    // 体感の記録: 止まっている時に飛んだ → その位置の絵が出るまでを測る（editor-feel.ts）
+    if (!playingRef.current && (seekRev !== prev.rev || Math.abs(currentTime - prev.t) > 0.05)) feelSeek(currentTime);
     if (!localMediaEnabled()) return;
     const jumped = seekRev !== prev.rev || (!playingRef.current && Math.abs(currentTime - prev.t) > 0.05);
     if (!jumped) return;
@@ -1032,6 +1035,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         return false; // keep the last good frame on screen
       }
       stats.draws += 1;
+      feelDrawn(t);
       // 確かめ用: 画面をふさぐ一番上の映像より上に、描けなかった段があったか（あれば下が透けて見えた）
       {
         let top = 0;
@@ -1341,7 +1345,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       prevActiveAudioRef.current = new Set();
       const c = playClockRef.current;
       if (c) { c.t = t; c.wall = performance.now(); }
-      if (stall) { const st = previewStats(); st.stalls = (st.stalls || 0) + 1; }
+      if (stall) { const st = previewStats(); st.stalls = (st.stalls || 0) + 1; feelStall(); }
     };
     const prepStep = (clock: { wall: number; t: number }, nowWall: number) => {
       const t = clock.t;
@@ -1375,6 +1379,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       // そろった: 映像の要素・音・時計を同じ瞬間に流し始める
       const st = previewStats();
       (st.startWaits ||= []).push(Math.round(nowWall - prepSince));
+      feelStart(nowWall - prepSince);
       if (st.startWaits.length > 50) st.startWaits.splice(0, 10);
       for (const vc of active) {
         if (isFrozen(vc.clip)) continue;
@@ -1567,7 +1572,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const drawn = drawFrame(t);
       // 映像か音が時計に追いついていない: 0.15秒続いたら、全部止めてそろうまで待つ（時計だけ進めない）
       const visualOk = drawn && visualReadyAt(t, 'run');
-      if (!visualOk) { const st = previewStats(); st.frozenMs = (st.frozenMs || 0) + dtMs; }
+      if (!visualOk) { const st = previewStats(); st.frozenMs = (st.frozenMs || 0) + dtMs; feelFrozen(dtMs); }
       if (gate && (!visualOk || audioGap)) {
         if (!badSince) badSince = nowWall;
         else if (nowWall - badSince > 150) {
