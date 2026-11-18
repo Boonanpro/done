@@ -1124,15 +1124,22 @@ def _focus_chain(video_in: str, idx: int | str, x: int, y: int, w: int, h: int,
         )
         return filt, out
     op = max(0.0, min(1.0, float(opacity if opacity is not None else 1.0)))
+    # Every layer lives only for the effect's span (an endless color source never let the
+    # pass finish, 2026-11-18): cut to [start, end), draw, then move back to `start`.
+    s0 = max(0.0, float(start))
+    span = max(1.0 / fps, float(end) - s0)
+    cut = f"trim=start={s0:.4f}:end={s0 + span:.4f},setpts=PTS-STARTPTS"
+    back = f"setpts=PTS+{s0:.4f}/TB"
+    src = f"s={frame_w}x{frame_h}:r={fps_s}:d={span:.4f}"
     if style == "spotlight":
         dim = 1.0 - 0.55 * op
         filt = (
             f"[{video_in}]split[sb{idx}][sd{idx}];"
-            f"[sd{idx}]lutyuv=y=val*{dim:.3f}[sdim{idx}];"
-            f"color=c=black:s={frame_w}x{frame_h}:r={fps_s},format=gray,"
+            f"[sd{idx}]{cut},lutyuv=y=val*{dim:.3f}[sdim{idx}];"
+            f"color=c=black:{src},format=gray,"
             f"geq=lum='255*(1-between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1}))',"
             f"gblur=sigma=8[smask{idx}];"
-            f"[sdim{idx}][smask{idx}]alphamerge[sov{idx}];"
+            f"[sdim{idx}][smask{idx}]alphamerge,{back}[sov{idx}];"
             f"[sb{idx}][sov{idx}]overlay=0:0:{en}:eof_action=pass[{out}]"
         )
         return filt, out
@@ -1140,17 +1147,17 @@ def _focus_chain(video_in: str, idx: int | str, x: int, y: int, w: int, h: int,
     wash = 0.30 * op
     filt = (
         f"[{video_in}]split[mb{idx}][md{idx}];"
-        f"[md{idx}]lutyuv=y=val*0.85[mdim{idx}];"
-        f"color=c=black:s={frame_w}x{frame_h}:r={fps_s},format=gray,"
+        f"[md{idx}]{cut},lutyuv=y=val*0.85[mdim{idx}];"
+        f"color=c=black:{src},format=gray,"
         f"geq=lum='255*(1-between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1}))',"
         f"gblur=sigma=8[mmsk{idx}];"
-        f"[mdim{idx}][mmsk{idx}]alphamerge[mdov{idx}];"
+        f"[mdim{idx}][mmsk{idx}]alphamerge,{back}[mdov{idx}];"
         f"[mb{idx}][mdov{idx}]overlay=0:0:{en}:eof_action=pass[mb2{idx}];"
-        f"color=c=0xFFEDA0:s={frame_w}x{frame_h}:r={fps_s},format=rgb24[mwc{idx}];"
-        f"color=c=black:s={frame_w}x{frame_h}:r={fps_s},format=gray,"
+        f"color=c=0xFFEDA0:{src},format=rgb24[mwc{idx}];"
+        f"color=c=black:{src},format=gray,"
         f"geq=lum='{wash * 255:.0f}*between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1})',"
         f"gblur=sigma=8[mim{idx}];"
-        f"[mwc{idx}][mim{idx}]alphamerge[mwov{idx}];"
+        f"[mwc{idx}][mim{idx}]alphamerge,{back}[mwov{idx}];"
         f"[mb2{idx}][mwov{idx}]overlay=0:0:{en}:eof_action=pass[{out}]"
     )
     return filt, out
@@ -1185,15 +1192,25 @@ def _blur_chain_kf_sized(video_in: str, idx: int, kf: list[tuple[float, float, f
                          fps: float = 30.0) -> tuple[str, str]:
     """Keyframed regional blur with ANIMATED SIZE: crop/overlay cannot animate w/h, so
     blur the whole frame and alpha-mask it with a per-frame geq box (edges are the
-    piecewise-linear x / x+w / y / y+h expressions over geq's T). kf = [(t_abs, x, y, w, h)]."""
+    piecewise-linear x / x+w / y / y+h expressions over geq's T). kf = [(t_abs, x, y, w, h)].
+
+    The mask exists only for the effect's own span [start, end): an endless color source
+    kept geq drawing frames after the picture ended, and a one-frame render never finished
+    (2026-11-18, faces in スヤさん2本目). Both branches are cut to the span, merged, and moved
+    back to `start`; geq's T is span-local, so the keys are shifted by -start. No fps filter
+    on the picture: the stream is already on the timeline grid, and fps dropped the only
+    frame of a one-frame window (the mosaic vanished from render_frame)."""
     out = f"vblur{idx}"
     base, full, blurred, mask, bm = (
         f"bbase{idx}", f"bfull{idx}", f"bblur{idx}", f"bmsk{idx}", f"bbm{idx}",
     )
-    x0 = _kf_expr([(t, x) for t, x, _, _, _ in kf], frame_w, frame_w, tvar="T")
-    x1 = _kf_expr([(t, x + w) for t, x, _, w, _ in kf], frame_w, frame_w, tvar="T")
-    y0 = _kf_expr([(t, y) for t, _, y, _, _ in kf], frame_h, frame_h, tvar="T")
-    y1 = _kf_expr([(t, y + h) for t, _, y, _, h in kf], frame_h, frame_h, tvar="T")
+    s0 = max(0.0, float(start))
+    span = max(1.0 / fps, float(end) - s0)
+    loc = [(t - s0, x, y, w, h) for t, x, y, w, h in kf]
+    x0 = _kf_expr([(t, x) for t, x, _, _, _ in loc], frame_w, frame_w, tvar="T")
+    x1 = _kf_expr([(t, x + w) for t, x, _, w, _ in loc], frame_w, frame_w, tvar="T")
+    y0 = _kf_expr([(t, y) for t, _, y, _, _ in loc], frame_h, frame_h, tvar="T")
+    y1 = _kf_expr([(t, y + h) for t, _, y, _, h in loc], frame_h, frame_h, tvar="T")
     style = (style or "").lower()
     if "mosaic" in style:
         # mosaic block from the largest keyed width (the block size cannot animate)
@@ -1204,10 +1221,10 @@ def _blur_chain_kf_sized(video_in: str, idx: int, kf: list[tuple[float, float, f
     fps_filter = f"{fps:g}"
     filt = (
         f"[{video_in}]split[{base}][{full}];"
-        f"[{full}]fps={fps_filter},{proc}[{blurred}];"
-        f"color=c=black:s={frame_w}x{frame_h}:r={fps_filter},format=gray,"
+        f"[{full}]trim=start={s0:.4f}:end={s0 + span:.4f},setpts=PTS-STARTPTS,{proc}[{blurred}];"
+        f"color=c=black:s={frame_w}x{frame_h}:r={fps_filter}:d={span:.4f},format=gray,"
         f"geq=lum='255*between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1})'[{mask}];"
-        f"[{blurred}][{mask}]alphamerge[{bm}];"
+        f"[{blurred}][{mask}]alphamerge,setpts=PTS+{s0:.4f}/TB[{bm}];"
         f"[{base}][{bm}]overlay=0:0:enable='gte(t\\,{start:.3f})*lt(t\\,{end:.3f})':eof_action=pass[{out}]"
     )
     return filt, out
@@ -3091,8 +3108,29 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
         text=True,
         creationflags=creationflags,
         check=True,
+        # A graph that never ends must not run for hours (2026-11-18): run() kills ffmpeg
+        # with SIGKILL when the limit passes. One frame takes seconds; a pass gets ~40x its length.
+        timeout=_PASS_STILL_TIMEOUT if still else max(900.0, 40.0 * _sequence_span(sequence)),
     )
     return rendered_count, output_width, output_height
+
+
+_PASS_STILL_TIMEOUT = 120.0
+
+
+def _sequence_span(sequence: dict[str, Any]) -> float:
+    """Seconds the sequence lasts (its duration, else its latest clip end)."""
+    try:
+        dur = float(sequence.get("duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    for track in sequence.get("tracks") or []:
+        for clip in (track.get("clips") or []) if isinstance(track, dict) else []:
+            try:
+                dur = max(dur, float(clip.get("timeline_end") or 0))
+            except (TypeError, ValueError, AttributeError):
+                continue
+    return dur
 
 
 def _requested_ranges(instruction: dict[str, Any]) -> list[tuple[float, float]]:

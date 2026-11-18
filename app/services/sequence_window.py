@@ -147,6 +147,8 @@ def render_frames(room_id: str, sequence: dict[str, Any], ts: list[float],
                                                   Path(work), drawn_png, video_only=True, still=True)
             except subprocess.CalledProcessError as exc:
                 return None, f"{ts[i]:.2f}秒の絵を描けませんでした: {(exc.stderr or '')[-400:]}"
+            except subprocess.TimeoutExpired:
+                return None, f"{ts[i]:.2f}秒の絵が時間内に描き終わりませんでした"
             if not drawn or not drawn_png.exists() or drawn_png.stat().st_size == 0:
                 return None, f"{ts[i]:.2f}秒の絵を描けませんでした"
             shutil.move(str(drawn_png), png)
