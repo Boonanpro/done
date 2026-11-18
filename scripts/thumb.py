@@ -11,6 +11,11 @@
   python scripts/thumb.py delete  <部屋> <作品> <部品id>
   python scripts/thumb.py repaint <部屋> <作品> <絵の部品id> --box x,y,w,h --prompt "…" [--quality high]
         その絵の範囲だけを AI で描き直す（範囲の外は1画素も変えない）。座標はサムネの画素
+  python scripts/thumb.py finish  <部屋> <作品> [--note "…"] [--apply]
+        文字より奥の絵（背景・人物）を、並べた構図のまま光・影・色味・つなぎ目を AI で整えた1枚にする（1〜2分）。
+        顔は元の写真の目鼻立ちに合わせ直す。--apply でその絵をサムネに入れる（元の絵は隠すだけ。undo か unfinish で戻る）。
+        付けない時は候補を作るだけで、本人がエディターで前後を見比べて採用する
+  python scripts/thumb.py unfinish <部屋> <作品>                     仕上げた絵を外して元の絵の部品に戻す
   python scripts/thumb.py render  <部屋> <作品> [--out a.png] [--width 1280]   今の形を PNG に（Read で見る）
   python scripts/thumb.py export  <部屋> <作品>                      1280×720 の書き出し
   python scripts/thumb.py undo    <部屋> <作品>                      1つ前の形へ戻す
@@ -152,6 +157,23 @@ def main() -> None:
         if not box or len(box) != 4 or not prompt:
             sys.exit('--box x,y,w,h と --prompt が要ります')
         print(json.dumps(td.repaint(room, cid, pid, box, prompt, quality=quality, masked='--masked' in a), ensure_ascii=False))
+    elif cmd == 'finish':
+        import time as _t
+        note = a[a.index('--note') + 1] if '--note' in a else ''
+        st = td.finish_start(room, cid, note)
+        while st and st.get('state') == 'running':
+            _t.sleep(3)
+            st = td.finish_status(room, cid, st['job_id'])
+        if not st or st.get('state') != 'done':
+            sys.exit(f"仕上げられませんでした: {(st or {}).get('message')}")
+        print(json.dumps({k: st.get(k) for k in ('job_id', 'asset_id', 'src', 'sources', 'faces')}, ensure_ascii=False))
+        print(f"仕上げた絵: {td.asset_file(room, st['asset_id'])}")
+        if '--apply' in a:
+            saved = td.save(room, cid, td.apply_finish(td.get(room, cid), st), 'dan')
+            td.finish_decide(room, cid, st['job_id'], True)
+            print(f"サムネに入れました rev {saved['rev']}")
+    elif cmd == 'unfinish':
+        print(f"仕上げを外しました rev {td.save(room, cid, td.remove_finish(doc), 'dan')['rev']}")
     elif cmd == 'render':
         out = Path(a[a.index('--out') + 1]) if '--out' in a else None
         w = int(a[a.index('--width') + 1]) if '--width' in a else 1280
