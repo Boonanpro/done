@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 
 PATH = Path(__file__).resolve().parents[1] / ".tmp" / "perf_events.jsonl"
+if not PATH.exists():  # 作業場所から読む時は動いているダンの記録
+    PATH = Path.home() / "done" / ".tmp" / "perf_events.jsonl"
 
 
 def main() -> None:
