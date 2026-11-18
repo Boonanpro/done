@@ -15,6 +15,7 @@
 
 import { createFile, DataStream, type MP4File, type MP4ArrayBuffer } from 'mp4box';
 import { readLocalRange } from './local-media';
+import { mediaFetch } from './media-route';
 import { perfLog } from '@/lib/perf-log';
 
 export function webCodecsSupported(): boolean {
@@ -113,7 +114,7 @@ export class AssetFrameSource {
     const local = await readLocalRange(this.url, lo, hi);
     if (local) return local;
     const ctl = new AbortController();
-    const res = await fetch(this.url, { headers: { Range: `bytes=${lo}-${hi}` }, signal: ctl.signal });
+    const res = await mediaFetch(this.url, { headers: { Range: `bytes=${lo}-${hi}` }, signal: ctl.signal });
     if (!res.ok) throw new Error(`fetch ${res.status}`);
     if (res.status === 206) {
       const m = /\/(\d+)\s*$/.exec(res.headers.get('Content-Range') || '');

@@ -12,6 +12,7 @@ import { gradeFilter } from './grade-filter';
 import { ALPHA_ASSET_IDS, alphaSolidAt, unpackStacked } from './alpha-unpack';
 import { AudioSourceManager, STRETCH_BLOCK_SEC, audioOnlyUrl, webAudioSupported } from './audio-source';
 import { localMedia, localMediaEnabled, localPlaySrc, type LocalMediaProgress } from './local-media';
+import { setMediaElementSrc, startMediaRoute } from './media-route';
 import { feelDrawn, feelFrozen, feelSeek, feelStall, feelStart } from './editor-feel';
 import { isOneForm, motionAt, pictureRect, visibleRect, cropOf, type Motion } from './placement';
 
@@ -574,7 +575,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const a = assetById.get(aid);
       if (!a) continue;
       const v = document.createElement('video');
-      v.src = localPlaySrc(assetSrc(a));
+      setMediaElementSrc(v, localPlaySrc(assetSrc(a)));
       v.dataset.assetId = aid;
       v.muted = true;
       v.playsInline = true;
@@ -615,7 +616,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const a = assetById.get(aid);
       if (!a) continue;
       const v = document.createElement('video');
-      v.src = localPlaySrc(assetSrc(a));
+      setMediaElementSrc(v, localPlaySrc(assetSrc(a)));
       v.dataset.assetId = aid;
       v.muted = true; // audio comes from the dedicated audio elements
       v.playsInline = true;
@@ -711,6 +712,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     return () => { window.clearTimeout(t); off(); };
   }, [localUrlsKey]);
   useEffect(() => () => { if (localMediaEnabled()) localMedia().stop(); }, []);
+  // 家の中なら映像を Mac mini から直接読む（media-route.ts）。開いてすぐ確かめ始める
+  useEffect(() => { startMediaRoute(); }, []);
   // 開いてすぐ（取り込みの途中）に位置を飛ばした: 飛んだ先の絵と音は Mac から読むので、その間は取り込みを休ませて
   // 回線を譲る。あわせて、飛んだ先の近くで使う素材を先に取り込む（2026-11-16 本人「開いてすぐいろんな秒数に飛ぶとかくつく」）。
   const seekSeenRef = useRef({ rev: seekRev, t: currentTime });

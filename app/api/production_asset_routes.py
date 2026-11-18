@@ -756,7 +756,11 @@ def _asset_source_path(asset: dict[str, Any]) -> Path:
         or asset.get("proxy_path") or asset.get("local_path")
     if not source_value:
         raise RuntimeError(f"Video asset has no local path: {asset.get('id')}")
-    path = Path(source_value).resolve()
+    path = Path(source_value)
+    if not path.exists() and source_value == asset.get("local_path"):
+        # 高画質の写しを持たない長い録画は元から読む。NAS が閉じていたら開き直す（drop_export_proxy）
+        path = _original_file(asset) or path
+    path = path.resolve()
     if not path.exists():
         raise RuntimeError(f"Video file not found: {path}")
     return path
@@ -2089,11 +2093,42 @@ def _export_audio_clips(sequence: dict[str, Any], assets: dict[str, dict[str, An
     return out
 
 
+# 大きい元の録画（NAS の上の70分の録画は37GB）は、音を全部取り出すとファイルを丸ごと読むことになり、
+# 12秒の書き出しに3分かかった（2026-11-18）。大きいファイルは、使う所の前後だけを区切って取り出す。
+# 取り出した区切りの WAV の頭が元の何秒かを覚えておき、_render_audio_window がその分ずらして読む。
+_DECODE_WHOLE_MAX_BYTES = 1_000_000_000
+_DECODED_SPANS: dict[str, list[tuple[float, float, Path]]] = {}   # 元の住所 → [(頭の秒, 終わりの秒, WAV)]
+_DECODED_OFFSET: dict[str, float] = {}                             # WAV の住所 → その頭が元の何秒か
+
+
+def _audio_spans(clips: list[dict[str, Any]], assets: dict[str, dict[str, Any]], src: str) -> list[tuple[float, float]]:
+    """src の音のうち、書き出しで使う区間（前後1秒の余白つき・20秒より近い区間はまとめる）。"""
+    ranges: list[tuple[float, float]] = []
+    for clip in clips:
+        asset = assets.get(str(clip.get("asset_id") or ""))
+        if not asset or str(_asset_source_path(asset)) != src:
+            continue
+        meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        s0, s1, _o, _d, freeze = _clip_source_range(clip, meta)
+        if freeze:
+            continue
+        ranges.append((max(0.0, s0 - 1.0), s1 + 1.0))
+    ranges.sort()
+    merged: list[list[float]] = []
+    for a, b in ranges:
+        if merged and a - merged[-1][1] < 20.0:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return [(a, b) for a, b in merged]
+
+
 def _decoded_audio_sources(clips: list[dict[str, Any]], assets: dict[str, dict[str, Any]], folder: Path) -> dict[str, Path]:
     """Each sound source decoded once to 48 kHz WAV. Seeking inside a compressed file
-    (movie=seek_point on mp4/AAC) can land on the wrong samples; in a WAV it is exact."""
+    (movie=seek_point on mp4/AAC) can land on the wrong samples; in a WAV it is exact.
+    Big sources are decoded only around the parts the export uses (_audio_spans)."""
     from concurrent.futures import ThreadPoolExecutor
-    paths = {}
+    paths: dict[str, Path] = {}
     for clip in clips:
         asset = assets.get(str(clip.get("asset_id") or ""))
         if not asset:
@@ -2101,17 +2136,51 @@ def _decoded_audio_sources(clips: list[dict[str, Any]], assets: dict[str, dict[s
         src = str(_asset_source_path(asset))
         paths.setdefault(src, folder / f"src_{hashlib.sha1(src.encode()).hexdigest()[:12]}.wav")
     exe = _ffmpeg()
+    jobs: list[tuple[str, Path, float | None, float | None]] = []
+    for src, dest in paths.items():
+        try:
+            big = Path(src).stat().st_size > _DECODE_WHOLE_MAX_BYTES
+        except OSError:
+            big = False
+        if not big:
+            jobs.append((src, dest, None, None))
+            continue
+        for i, (a, b) in enumerate(_audio_spans(clips, assets, src)):
+            jobs.append((src, dest.with_name(f"{dest.stem}_{i:03d}.wav"), a, b))
 
     def decode(item):
-        src, dest = item
-        r = subprocess.run([exe, "-y", "-v", "error", "-i", src, "-vn", "-ac", "2", "-ar", "48000",
+        src, dest, a, b = item
+        seek = ["-ss", f"{a:.6f}", "-t", f"{b - a:.6f}"] if a is not None else []
+        r = subprocess.run([exe, "-y", "-v", "error", *seek, "-i", src, "-vn", "-ac", "2", "-ar", "48000",
                             "-c:a", "pcm_f32le", str(dest)], capture_output=True, text=True,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return src if r.returncode == 0 and dest.exists() else None
+        return item if r.returncode == 0 and dest.exists() else None
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        ok = set(filter(None, pool.map(decode, paths.items())))
-    return {src: dest for src, dest in paths.items() if src in ok}
+        done = [j for j in pool.map(decode, jobs) if j]
+    out: dict[str, Path] = {}
+    for src, dest, a, b in done:
+        if a is None:
+            out[src] = dest
+        else:
+            _DECODED_SPANS.setdefault(src, []).append((a, b, dest))
+            _DECODED_OFFSET[str(dest)] = a
+            out.setdefault(src, dest)
+    for spans in _DECODED_SPANS.values():
+        spans.sort(key=lambda x: x[0])
+    return out
+
+
+def _decoded_for(decoded: dict[str, Path], source_path: Path, t0: float, t1: float) -> tuple[Path, float]:
+    """書き出しで読む音の住所と、その頭が元の何秒か。区切って取り出した物があれば、t0〜t1 を含む区切り。"""
+    key = str(source_path)
+    for a, b, dest in _DECODED_SPANS.get(key, ()):
+        if a <= t0 and t1 <= b and str(decoded.get(key, "")) and dest.exists():
+            return dest, a
+    hit = decoded.get(key)
+    if hit is not None and str(hit) not in _DECODED_OFFSET:
+        return hit, 0.0
+    return source_path, 0.0
 
 
 def _render_audio_window(room_id: str, sequence: dict[str, Any], w0: float, w1: float, out_wav: Path,
@@ -2138,7 +2207,6 @@ def _render_audio_window(room_id: str, sequence: dict[str, Any], w0: float, w1: 
         source_start, source_end, _dur, _src, au_freeze = _clip_source_range(clip, metadata)
         if au_freeze:
             continue
-        source_path = decoded.get(str(source_path), source_path)
         sp = _clip_speed(clip)
         ts, te = max(a, w0), min(b, w1)
         s0 = round((source_start + (ts - a) * sp) * sr)
@@ -2146,6 +2214,8 @@ def _render_audio_window(room_id: str, sequence: dict[str, Any], w0: float, w1: 
         n = min(round((te - ts) * sr), round((round(source_end * sr) - s0) / sp))
         if n <= 0:
             continue
+        source_path, off = _decoded_for(decoded, source_path, s0 / sr, (s0 + n * sp) / sr)
+        s0 -= round(off * sr)
         delay = max(0, round(ts * sr) - round(w0 * sr))
         try:
             vol = float(clip.get("volume")) if clip.get("volume") is not None else 1.0
@@ -5748,6 +5818,121 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
         _make_view_copy(room_id, asset_id)
     except Exception:
         pass  # the view copy is an enhancement; the proxy still works
+    try:
+        drop_export_proxy(room_id, asset_id)
+    except Exception:
+        logger.exception("drop proxy failed %s", asset_id)
+
+
+# 長い録画の高画質の写し（proxy）を持たない（2026-11-18 本人承認）。
+# 長い録画は画面で見る時は小さい写し（view）を使い、書き出しは元の録画から読めば足りる。1920・CRF17 の
+# 写しは70分で14GBあり、Mac の空きを食っていた（作品ごとに数十GB）。画面用の写しができて、元の録画が
+# 読めることを確かめた物だけ、高画質の写しを消して記録から外す（proxy_path を外すと、書き出し・
+# 文字起こしなどの「proxy_path か local_path」はどれも元の録画を読む）。
+# 元の録画が NAS にある時、NAS が開いていなければ書き出しの前に開き直す（_asset_source_path）。
+PROXY_DROP_MIN_SECONDS = 600.0  # 画面用の写しを作る長さ（VIEW_COPY_MIN_SECONDS）と同じ
+_NAS_MOUNT = Path.home() / ".dan/mnt/nas"
+# 前に試しで開いていた NAS の場所（そこに書かれた素材は、今の NAS の場所で探す）
+_OLD_NAS_PREFIXES = ("/private/tmp/nastest/", "/tmp/nastest/")
+
+
+def _nas_reopen() -> bool:
+    """NAS（~/.dan/mnt/nas）が開いていなければ開き直す（scripts/disk_tidy.py の nas_root）。"""
+    if (_NAS_MOUNT / "Recordings").is_dir() or (_NAS_MOUNT / "案件").is_dir():
+        return True
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_dan_disk_tidy", PROJECT_ROOT / "scripts" / "disk_tidy.py")
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.nas_root() is not None
+    except Exception:
+        logger.exception("NAS reopen failed")
+        return False
+
+
+def _original_file(asset: dict[str, Any]) -> Path | None:
+    """元の録画の今の場所（無ければ None）。NAS の上なら開き直してから見る。"""
+    v = asset.get("local_path")
+    if not v:
+        return None
+    candidates = [str(v)]
+    for old in _OLD_NAS_PREFIXES:
+        if str(v).startswith(old):
+            candidates.append(str(_NAS_MOUNT / str(v)[len(old):]))
+    for c in candidates:
+        p = Path(c)
+        if not p.is_file() and str(p).startswith(str(_NAS_MOUNT)):
+            _nas_reopen()
+        if p.is_file():
+            return p
+    return None
+
+
+def drop_export_proxy(room_id: str, asset_id: str, *, dry_run: bool = False) -> dict[str, Any]:
+    """長い録画の高画質の写しを消す（条件を満たした時だけ）。返り値は何をしたか・しなかった理由。"""
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        return {"dropped": False, "why": "no asset"}
+    proxy = asset.get("proxy_path")
+    if not proxy or not Path(str(proxy)).is_file():
+        return {"dropped": False, "why": "no proxy file"}
+    proxy_p = Path(str(proxy))
+    if UPLOADS_DIR.resolve() not in proxy_p.resolve().parents:
+        return {"dropped": False, "why": "proxy outside uploads"}
+    if asset.get("kind") != "video" or _asset_has_alpha(asset):
+        return {"dropped": False, "why": "not a plain video"}
+    meta = asset.get("metadata") or {}
+    duration = float(meta.get("duration") or 0)
+    if duration < PROXY_DROP_MIN_SECONDS and proxy_p.stat().st_size < VIEW_COPY_MIN_PROXY_BYTES:
+        return {"dropped": False, "why": "short"}
+    view = _usable_file(asset, "view_path")
+    if not view:
+        return {"dropped": False, "why": "no usable view copy"}
+    original = _original_file(asset)
+    if not original:
+        return {"dropped": False, "why": "original missing"}
+    # 元の録画を書き出しと同じ読み方（途中へ飛んで1秒読む）で読めるか、長さが写しと合うかを確かめる
+    probe = _media_probe(original)
+    pprobe = _media_probe(proxy_p)
+    if not probe or "video" not in probe["kinds"] or not pprobe:
+        return {"dropped": False, "why": "original unreadable"}
+    if abs(probe["duration"] - pprobe["duration"]) > 1.5:
+        return {"dropped": False, "why": f"length differs {probe['duration']:.1f} vs {pprobe['duration']:.1f}"}
+    mid = max(0.0, probe["duration"] / 2)
+    r = subprocess.run([_ffmpeg(), "-v", "error", "-ss", f"{mid:.2f}", "-i", str(original), "-t", "1", "-f", "null", "-"],
+                       capture_output=True, text=True, timeout=300, check=False,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if r.returncode != 0:
+        return {"dropped": False, "why": "original decode failed: " + (r.stderr or "")[-200:]}
+    size = proxy_p.stat().st_size
+    if dry_run:
+        return {"dropped": False, "would_drop": True, "bytes": size, "original": str(original)}
+    patch: dict[str, Any] = {"proxy_path": None,
+                             "proxy_dropped": {"path": str(proxy_p), "bytes": size, "at": time.time()}}
+    # 同じ写しを指している素材は、どの部屋でも一緒に外す（同じ素材を複数の部屋で使っている）
+    same = [room_id]
+    for f in ASSET_ROOT.glob("*/assets.json"):
+        rid = f.parent.name
+        if rid == room_id:
+            continue
+        try:
+            if str(proxy_p) in f.read_text(encoding="utf-8"):
+                same.append(rid)
+        except OSError:
+            pass
+    for rid in same:
+        for a in _read_assets(rid):
+            if str(a.get("proxy_path") or "") == str(proxy_p):
+                p2 = dict(patch)
+                # 元の録画の住所が古い（前の NAS の場所）なら、今の場所に直す
+                if not Path(str(a.get("local_path") or "")).is_file():
+                    p2["local_path"] = str(original)
+                _update_asset(rid, a["id"], p2)
+    proxy_p.unlink(missing_ok=True)
+    proxy_p.with_suffix(".pts.json").unlink(missing_ok=True)
+    logger.info("dropped export proxy %s (%.1f GB); exports read %s", proxy_p.name, size / 1e9, original)
+    return {"dropped": True, "bytes": size, "original": str(original), "rooms": same}
 
 
 # VIEW COPY (2026-11-12): the proxy above is near-original quality (1920 long side, CRF17) because
@@ -6385,6 +6570,45 @@ async def get_asset_peaks(room_id: str = Query(...), asset_id: str = Query(...))
         raise HTTPException(status_code=404, detail="no audio")
     return FileResponse(path, media_type="application/octet-stream",
                         headers={"Cache-Control": "private, max-age=86400", "X-Peaks-Per-Sec": str(PEAKS_PER_SEC)})
+
+
+_home_ip: dict[str, Any] = {"ip": None, "at": 0.0}
+
+
+def _home_public_ip() -> str | None:
+    """この Mac mini（家）のインターネット側の住所。10分だけ覚えておく。"""
+    now = time.time()
+    if _home_ip["ip"] and now - _home_ip["at"] < 600:
+        return _home_ip["ip"]
+    try:
+        with urllib.request.urlopen("https://api.ipify.org", timeout=3) as r:
+            ip = r.read().decode().strip()
+        if ip:
+            _home_ip.update(ip=ip, at=now)
+    except Exception:
+        _home_ip["at"] = now - 540  # 取れなければ1分後にもう一度
+    return _home_ip["ip"]
+
+
+@router.get("/home-route")
+async def get_home_route(request: Request):
+    """エディターを開いた端末が家の中にいるなら、映像を家の中の直通（scripts/lan_media_server.py）から
+    読ませる住所を返す。外にいれば base は null（今までどおり dan.paina.info から読む）。
+    家の中かどうかは、端末のインターネット側の住所（Cloudflare が付ける CF-Connecting-IP）が、
+    この Mac と同じかで決める。外の端末に家の中の住所を試させない（スマホの電波で待たせない・
+    Chrome の「家の中の機械へのアクセス」の確かめを外で出さない）。"""
+    route_file = Path.home() / ".dan/lan-media/route.json"
+    try:
+        route = json.loads(route_file.read_text())
+    except Exception:
+        return {"base": None}
+    if not route.get("alive") or not route.get("base"):
+        return {"base": None}
+    client = (request.headers.get("cf-connecting-ip") or "").strip()
+    if not client:
+        return {"base": None}
+    home = await asyncio.to_thread(_home_public_ip)
+    return {"base": route["base"] if home and client == home else None}
 
 
 @router.get("/media")

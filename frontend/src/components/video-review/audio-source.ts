@@ -12,6 +12,7 @@
 
 import { createFile, type MP4File, type MP4ArrayBuffer } from 'mp4box';
 import { readLocalRange } from './local-media';
+import { mediaFetch } from './media-route';
 import { stretchChannels } from './time-stretch';
 
 const BLOCK_SEC = 4;                  // 1 回に解読する長さ
@@ -78,7 +79,7 @@ export class AssetAudioSource {
   private async fetchRange(lo: number, hi: number): Promise<{ buf: ArrayBuffer; total: number; partial: boolean }> {
     const local = await readLocalRange(this.fetchUrl, lo, hi);
     if (local) return local;
-    const res = await fetch(this.fetchUrl, { headers: { Range: `bytes=${lo}-${hi}` } });
+    const res = await mediaFetch(this.fetchUrl, { headers: { Range: `bytes=${lo}-${hi}` } });
     if (!res.ok) throw new Error(`fetch ${res.status}`);
     if (res.status === 206) {
       const m = /\/(\d+)\s*$/.exec(res.headers.get('Content-Range') || '');
