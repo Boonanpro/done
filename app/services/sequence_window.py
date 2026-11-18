@@ -172,7 +172,10 @@ def render_ranges(room_id: str, job_id: str, instruction: dict[str, Any], job_di
     sound = par._export_audio_clips(sequence, assets)
     parts = job_dir / f"{job_id}_ranges"
     parts.mkdir(parents=True, exist_ok=True)
-    decoded = par._decoded_audio_sources(sound, assets, parts) if sound else {}
+    # 書き出す範囲に掛かる音だけを下ごしらえする（長い元の録画を全部読まない。2026-11-18）
+    near = [c for c in sound if any(float(c.get("timeline_end") or 0) > r0 and float(c.get("timeline_start") or 0) < r1
+                                    for r0, r1 in ranges)]
+    decoded = par._decoded_audio_sources(near, assets, parts) if near else {}
     exe = par._ffmpeg()
     drawn_total, size = 0, (0, 0)
     try:

@@ -161,6 +161,8 @@ export function startEditorFeel(ctx: () => Record<string, unknown> & { room_id?:
         frozen_ms: Math.round(state.frozenMs),
         loaf,
         local_media: lm ? lm.status() : null,
+        // 家の中の直通で読んでいたか（media-route.ts）
+        media_route: (window as unknown as { __mediaRoute?: { state: string } }).__mediaRoute?.state ?? null,
         cores: navigator.hardwareConcurrency || null,
         mem_gb: nav.deviceMemory || null,
         gpu: gpu(),

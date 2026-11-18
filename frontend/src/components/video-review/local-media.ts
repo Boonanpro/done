@@ -11,6 +11,11 @@
 // - 同じ素材を複数のタブで同時に写さないよう、素材ごとに Web Locks を取る。
 // - 保存場所が足りなければ、最近使っていない写しから消す。
 
+import { homeRouteActive, mediaRouteReady, onMediaRouteChange } from './media-route';
+
+// 家の中では使わない（2026-11-18）: 家の中では映像を Mac mini から直接読む（media-route.ts）ので、
+// このパソコンへ写す必要が無い。家の中だと分かった時に、前に写した物も消して場所を空ける。
+
 const META_KEY = 'dan-local-media-v1';
 const DIR_NAME = 'dan-media';
 const CHUNK = 8 * 1024 * 1024;           // 1回に取りに行く大きさ（頭出しに譲る時に捨てる量も、これより大きくならない）
@@ -240,6 +245,15 @@ class LocalMediaStore {
 
   /** 作品で使う素材を取り込む（urls は先に要る順）。写している途中の素材が一覧に残っていれば、そのまま続ける。 */
   async ensure(urls: string[]): Promise<void> {
+    this.lastUrls = urls;
+    const run0 = this.runId;
+    await mediaRouteReady();
+    if (run0 !== this.runId) return;
+    if (homeRouteActive()) {
+      // 家の中: 写さない。この画面でまだ写しを使っていなければ、前に写した物を消して場所を空ける
+      if (!this.files.size && !this.cleared) { this.cleared = true; void this.clearAll(); }
+      return;
+    }
     this.wanted = Array.from(new Set(urls.filter(Boolean)));
     this.wantedSet = new Set(this.wanted);
     this.report();
@@ -315,8 +329,35 @@ class LocalMediaStore {
     }
   }
 
+  private lastUrls: string[] = [];
+  private cleared = false;
+
+  /** 家の中で、前に写した物を全部消す（この画面で使っている写しが無い時だけ呼ぶ） */
+  private async clearAll() {
+    try {
+      const root = await navigator.storage.getDirectory();
+      await root.removeEntry(DIR_NAME, { recursive: true });
+    } catch { /* 無ければよい */ }
+    this.dir = null;
+    try { localStorage.removeItem(META_KEY); } catch { /* noop */ }
+  }
+
+  /** 家の中かどうかが途中で変わった: 家の中になったら写すのを止め、外に出たら写し始める */
+  watchRoute() {
+    onMediaRouteChange((home) => {
+      if (home) {
+        const urls = this.lastUrls;
+        this.stop();
+        this.lastUrls = urls;
+      } else if (this.lastUrls.length) {
+        void this.ensure(this.lastUrls);
+      }
+    });
+  }
+
   /** 取り込みを止める（作品を閉じた） */
   stop() {
+    this.lastUrls = [];
     this.runId++;
     this.wanted = [];
     this.wantedSet = new Set();
@@ -330,6 +371,7 @@ let store: LocalMediaStore | null = null;
 export function localMedia(): LocalMediaStore {
   if (!store) {
     store = new LocalMediaStore();
+    store.watchRoute();
     (window as unknown as { __localMedia?: LocalMediaStore }).__localMedia = store;
   }
   return store;
