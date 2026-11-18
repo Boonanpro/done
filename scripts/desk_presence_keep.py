@@ -1,4 +1,7 @@
-"""手元カメラ（Frigate の desk）の「人が映っている時間」だけを180日残す。
+"""手元カメラ（Frigate の desk）の「人が映っている時間」だけを残す（期限なし）。
+
+2026-11-18 本人「一旦180日より長く残したい」（Vlog の素材）。書き出しは自動では消さない。
+NAS の空きが RESERVE を割る前に書き出しを止める（下の2）。期限を付け直す時は KEEP_DAYS に日数を入れる。
 
 なぜこの作り:
   Frigate 0.17 が録画を消すかどうかは「見返し用の区間（ReviewSegment）」だけで決まる。
@@ -12,7 +15,7 @@
      （Frigate の再起動で後からまとめて閉じられた印）は、次の印の始まりか4時間で切る。
   2. まだ書き出していない区間を古い順に書き出す。NAS の空きが RESERVE を割りそうなら止める。
      書き出しが済んだら、動画の長さが録画の長さとほぼ同じかを ffprobe で確かめる。
-  3. 書き出しの名前が「desk zaiseki」で、始まりが180日より前の物を消す。
+  3. KEEP_DAYS に日数がある時だけ、書き出しの名前が「desk zaiseki」で始まりがそれより前の物を消す。
   4. --manage-retention の時だけ: まだ書き出していない一番古い区間より前の録画が消えてよい
      日数まで continuous の日数を下げる（最小3日）。本人が机にいない時（開いた印が無く、
      最後の印の終わりから10分以上）だけ、2時間に1回まで。下げたら Frigate を再起動し、
@@ -42,7 +45,7 @@ MERGE_GAP = 600          # 秒。これ以内に次の印が始まれば1つの�
 PRE, POST = 15, 10       # 区間の前後に足す秒（desk の alerts の pre/post と同じ）
 SETTLE = 600             # 区間が終わってからこの秒数たってから書き出す
 UNKNOWN_END_CAP = 4 * 3600
-KEEP_DAYS = 180
+KEEP_DAYS: float | None = None   # None＝消さない（本人 11/18）
 MIN_CONTINUOUS_DAYS = 3
 RESERVE_MIB = 25 * 1024  # 書き出した後も NAS にこれだけは空けておく
 OWNER_AWAY_SEC = 600
@@ -260,6 +263,8 @@ def trusted_ranges(st: dict, exports: list[dict], include_running: bool):
 
 def delete_old_exports(exports: list[dict], now: float, dry: bool) -> int:
     n = 0
+    if not KEEP_DAYS:
+        return 0
     for s, e, x in export_ranges(exports):
         if not (x.get("name") or "").startswith(NAME_PREFIX):
             continue

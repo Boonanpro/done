@@ -44,3 +44,16 @@ def test_covered():
     r = [(0, 100, {}), (150, 200, {})]
     assert d.covered(0, 100, r) == 1
     assert 0.6 < d.covered(0, 200, r) < 0.8
+
+
+def test_exports_are_kept_without_limit(monkeypatch):
+    """本人 11/18「180日より長く残したい」: 期限なしの時は1年前の書き出しも消さない。"""
+    calls = []
+    monkeypatch.setattr(d, "api", lambda *a, **k: calls.append(a) or (200, {}))
+    old = {"id": "x", "name": "desk zaiseki 10-02 1926-2041", "in_progress": False}
+    monkeypatch.setattr(d, "export_ranges", lambda ex: [(0.0, 100.0, old)])
+    assert d.KEEP_DAYS is None
+    assert d.delete_old_exports([old], now=400 * 86400, dry=False) == 0
+    assert calls == []
+    monkeypatch.setattr(d, "KEEP_DAYS", 180)
+    assert d.delete_old_exports([old], now=400 * 86400, dry=False) == 1
