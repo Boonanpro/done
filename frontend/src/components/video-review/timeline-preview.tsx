@@ -15,6 +15,7 @@ import { localMedia, localMediaEnabled, localPlaySrc, type LocalMediaProgress } 
 import { setMediaElementSrc, startMediaRoute } from './media-route';
 import { feelDrawn, feelFrozen, feelSeek, feelStall, feelStart } from './editor-feel';
 import { isOneForm, motionAt, pictureRect, visibleRect, cropOf, type Motion } from './placement';
+import { drawRegionEffect, isRegionEffect } from './region-effect';
 
 // Live timeline compositor. Draws the current edit (base video + overlay/PiP layers +
 // captions + blur) onto a <canvas> for the playhead time, so manual edits reflect
@@ -379,6 +380,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         // a caption Dan put on a picture lane is drawn by the caption layer, not as a picture
         if (clip.track === 'caption' && !clip.asset_id) continue;
         if (isSceneClip(clip)) continue; // drawn by <SceneLayer>, not the canvas
+        // a region effect (mosaic / blur / frame…) is not a picture: it processes what is below it (regionFx)
+        if (isRegionEffect(clip)) continue;
         const overlay = isOverlayClip(clip, track.type);
         // A pop-out clip is drawn by the editor's canvas overlay (matted person breaking out of a
         // rounded card); skip its plain-wipe rendering here so no sharp-cornered rectangle peeks
@@ -457,10 +460,22 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const upperCanvasRefs = useRef<Array<HTMLCanvasElement | null>>([]);
   const upperDirty = useRef<boolean[]>([]);
 
-  const effectClips = useMemo(
-    () => (sequence?.tracks || []).filter((t) => t.type === 'effect').flatMap((t) => t.clips || []),
-    [sequence],
-  );
+  // 範囲の効果（モザイク・ぼかし・枠…）と、その段。effect の段の物も、add_region が映像の段に置いた物も同じ。
+  // 書き出しと同じく、その段より下に重なった絵を加工する（region-effect.ts）。
+  const regionFx = useMemo(() => {
+    const out: Array<{ clip: SequenceClip; layer: number }> = [];
+    let visualIndex = -1;
+    for (const track of sequence?.tracks || []) {
+      if (track.type === 'audio') continue;
+      visualIndex += 1;
+      if ((track as { hidden?: boolean }).hidden) continue;
+      for (const clip of track.clips || []) {
+        if (!isRegionEffect(clip)) continue;
+        out.push({ clip, layer: visualLane(track.type, clip, visualIndex) });
+      }
+    }
+    return out.sort((a, b) => a.layer - b.layer);
+  }, [sequence]);
 
   const audioClips = useMemo(
     () => (sequence?.tracks || []).filter((t) => t.type === 'audio').flatMap((t) => t.clips || []),
@@ -1072,9 +1087,22 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         upperDirty.current[ci] = usedUpper.has(ci);
       });
 
+      // 範囲の効果（モザイク・ぼかし・枠…）は、その段より下に描いた絵を加工する（書き出しと同じ順番）。
+      // 描く先は、効果のすぐ下の絵が乗った canvas。
+      const fxNow = regionFx.filter((f) => t >= Number(f.clip.timeline_start || 0) && t < Number(f.clip.timeline_end || 0));
+      let fxDone = 0;
+      let fxCtx: CanvasRenderingContext2D = baseCtx;
+      const applyFxBelow = (layer: number) => {
+        while (fxDone < fxNow.length && fxNow[fxDone].layer < layer) {
+          drawRegionEffect(fxCtx, fxNow[fxDone].clip, t, w, h);
+          fxDone += 1;
+        }
+      };
       for (const { vc, got } of layers) {
+        applyFxBelow(vc.layer);
         const ci = canvasOf.get(String(vc.clip.id)) || 0;
         const ctx = (ci > 0 && upperCtx[ci]) || baseCtx;
+        fxCtx = ctx;
         // colour grade: the same matrix the export applies (clip.grade)
         ctx.filter = gradeFilter((vc.clip as { grade?: unknown }).grade);
         // blend mode (light leaks etc. on black): the export mixes the same way (clip.blend)
@@ -1129,6 +1157,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         c2.globalCompositeOperation = 'source-over';
         c2.globalAlpha = 1;
       }
+      applyFxBelow(Number.POSITIVE_INFINITY);
       // 再生中に絵を使わなかった映像の要素（上の映像にふさがれた段など）も、1画素だけ描いて絵を受け取り続ける。
       // ブラウザは誰も絵を受け取らない映像の要素を0.25秒おきにしか進めず、その要素だけ再生が遅れて、
       // ふさいでいた映像が終わって見えた瞬間にずれていた（音を時計にした時に、映像が平均0.1秒以上遅れていた）。
@@ -1142,27 +1171,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         }
       }
 
-      // blur / mosaic regions (effect clips active now)
       const baseGot = (layers.find((l) => l.vc.kind === 'base') || layers[0])?.got || null;
-      for (const e of effectClips) {
-        const start = Number(e.timeline_start || 0);
-        const end = Number(e.timeline_end || 0);
-        if (!(t >= start && t < end)) continue;
-        const region = (e as unknown as { region?: { x: number; y: number; width: number; height: number } }).region;
-        if (!region || !baseGot) continue;
-        const rx = region.x * w;
-        const ry = region.y * h;
-        const rw = Math.max(2, region.width * w);
-        const rh = Math.max(2, region.height * h);
-        const style = String((e as unknown as { style?: string }).style || '');
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(rx, ry, rw, rh);
-        ctx.clip();
-        ctx.filter = style.includes('mosaic') ? `blur(${8 * ps}px)` : `blur(${14 * ps}px)`;
-        drawCover(ctx, baseGot.src, baseGot.vw, baseGot.vh, 0, 0, w, h);
-        ctx.restore();
-      }
 
       // Manual blur boxes, resolved at THIS frame's time t (not a lagging prop).
       for (const r of (blurRegionsAt ? blurRegionsAt(t) : [])) {
@@ -1190,7 +1199,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       }
       return true;
     },
-    [dims, visualClips, effectClips, blurRegionsAt, frameFor, willProvide, fixLayers, imageSrcByAssetId, showDiag],
+    [dims, visualClips, regionFx, blurRegionsAt, frameFor, willProvide, fixLayers, imageSrcByAssetId, showDiag],
   );
 
   // SCRUB: when not playing, paint the exact frame for currentTime. With WebCodecs we decode it

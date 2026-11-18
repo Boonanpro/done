@@ -53,6 +53,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { isSceneClip } from './scene-layer';
+import { isRegionEffect, regionLabel } from './region-effect';
 import { createZoomPreview, type ZoomPreview } from './zoom-preview';
 import { BlendSelect, SceneClipPanel } from './scene-clip-panel';
 import { TimelinePreview } from './timeline-preview';
@@ -1201,7 +1202,7 @@ export function VideoReviewEditor({
         let itemType = 'video';
         if (track.type === 'audio') itemType = 'audio';
         else if (track.type === 'caption' || clip.track === 'caption') itemType = 'caption';
-        else if (track.type === 'effect') itemType = 'effect';
+        else if (track.type === 'effect' || isRegionEffect(clip)) itemType = 'effect';
         aggs.push({
           zone: lane.zone,
           layer: lane.layer,
@@ -4537,7 +4538,9 @@ export function VideoReviewEditor({
                                   ? clip.text || 'テロップ'
                                   : item.itemType === 'audio'
                                     ? (assetName || clip.label || audioRoleLabel(clip.role))
-                                    : clip.label || assetName || '素材';
+                                    : item.itemType === 'effect' && isRegionEffect(clip)
+                                      ? clip.label || regionLabel(clip)
+                                      : clip.label || assetName || '素材';
                               const isImage = isVideo && ((clip as { kind?: string }).kind === 'image' || clipAsset?.kind === 'image');
                               const kind: ClipKind = laneItemKind(item, clipAsset);
                               const badge = CLIP_KIND_STYLE[kind].name;
