@@ -33,7 +33,8 @@ def main() -> None:
     for r in rows:
         x = r.get("extra") or {}
         print(r["at"][:19], (r.get("ua") or "")[13:30], "seek", x.get("seek"), "start", x.get("start"),
-              "input", x.get("input"), "stalls", x.get("stalls"), "frozen", x.get("frozen_ms"))
+              "input", x.get("input"), "stalls", x.get("stalls"), "frozen", x.get("frozen_ms"),
+              "route", x.get("media_route"))
         for lf in x.get("loaf") or []:
             for s in lf.get("scripts") or [{"what": "(画面の描き直し)", "ms": lf.get("ms")}]:
                 culprits[s["what"]] += 1
