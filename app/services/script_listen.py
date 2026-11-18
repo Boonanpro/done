@@ -178,6 +178,11 @@ def outline(doc):
         if text.startswith('◎'):
             if text.startswith(SCRIPT_HEADING): mode = 'script'
             elif any(text.startswith(h) for h in SKIP_HEADINGS): mode = 'before' if seen_script else 'skip'
+            elif mode == 'script':
+                # A ◎ line inside the script (◎追加特典① …) is a small heading of the script, not a new top part.
+                # As a top-level heading the screen filed everything after it under 「読みません」 (11/18).
+                section = text
+                units.append({'kind': 'heading', 'level': 3, 'text': text, 'read': True}); continue
             units.append({'kind': 'heading', 'level': 1, 'text': text, 'read': mode == 'script'}); continue
         if mode != 'script':
             units.append({'kind': 'note', 'text': text, 'section': 'top'}); continue
