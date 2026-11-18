@@ -60,6 +60,7 @@ def _run_tool_thread(name,args):
             return _ok({'ok': False, 'human_edit_received': True,
                 'note': 'ほかの編集（本人の手、または同じ作品で並行して動いている別のダンの作業）を取り込みました。'
                         '最新のtimeline_outlineを読んでから必要な編集を続けてください。今回の操作は未実行です。'})
+        before = json.loads(json.dumps(_load()))   # the draft as it was before this step
         result = asyncio.run(_dispatch(name,args))
         try:
             payload = json.loads(result[0].text)
@@ -73,8 +74,13 @@ def _run_tool_thread(name,args):
                 payload['timeline_updated'] = True
                 result = _ok(payload)
             elif not published.get('ok'):
-                return _ok({**payload, 'ok': False, 'saved_in_draft': True,
-                    'conflict': published.get('conflict', False),
+                conflict = bool(published.get('conflict', False))
+                if not conflict:
+                    # 検証で弾かれた手は下書きにも残さない（2026-11-18: 壊れたtrimが下書きに残り、次の手を全部止めた）
+                    td.save_draft(before)
+                    return _ok({**payload, 'ok': False, 'rolled_back': True,
+                        'error': ' / '.join(published.get('problems', []))})
+                return _ok({**payload, 'ok': False, 'saved_in_draft': True, 'conflict': True,
                     'error': ' / '.join(published.get('problems', []))})
         return result
 

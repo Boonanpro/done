@@ -1,0 +1,132 @@
+// サムネを部品で持つ形（2026-11-18 本人「サムネの微調整の往復に時間がかかりすぎる。自分で手で直せる・書き込みで
+// 指示できる・その場で変わる様子が見える仕組みがほしい」）。
+//
+// 作品（contents.json の1件）の format が 'thumbnail' の時、timeline.thumbnail にこの形で入る。
+// 部品は配列の順に奥から手前へ重なる。座標は width×height（既定 1920×1080）の画素。書き出しは 1280×720 の PNG。
+// エディターの画面も、書き出し（/thumbnail-frame をサーバーが headless Chromium で撮る）も、同じ <ThumbCanvas>（SVG）で描く。
+// ダンが直す時は scripts/thumb.py（同じ形の JSON を読み書きする）。
+
+export type ThumbShadow = { color?: string; blur?: number; opacity?: number; dx?: number; dy?: number };
+
+export type ThumbBase = {
+  id: string;
+  name?: string;
+  hidden?: boolean;
+  locked?: boolean;
+  opacity?: number;
+  rotation?: number; // 度。部品の真ん中を中心に回す
+};
+
+export type ThumbImagePart = ThumbBase & {
+  type: 'image';
+  src: string;          // 絵の URL（/api/v1/production-assets/media?… など）
+  asset_id?: string;    // 作品の部屋の素材の id（ダンの描き直しが元の絵を探す）
+  x: number; y: number; w: number; h: number;
+  flip_x?: boolean;
+};
+
+export type ThumbTextPart = ThumbBase & {
+  type: 'text';
+  text: string;          // 改行で複数行
+  x: number;             // 1行目の左端
+  y: number;             // 1行目の文字の並びの線（ベースライン）
+  font: ThumbFontId;
+  size: number;          // 文字の大きさ（px）
+  fill: string;
+  stroke?: string;       // 縁の色
+  stroke_width?: number; // 縁の太さ（文字の外側へ出る幅 px）
+  letter_spacing?: number;
+  line_height?: number;  // 行の間（px、ベースラインからベースライン）
+  shadow?: ThumbShadow | null;
+  bg?: { color: string; radius?: number; top: number; bottom: number; left: number; right: number } | null;
+};
+
+export type ThumbPart = ThumbImagePart | ThumbTextPart;
+
+export type ThumbDoc = {
+  width: number;
+  height: number;
+  background?: string;
+  parts: ThumbPart[];
+  rev?: number;
+  // 一覧で並べて見る時に横に並べるほかのサムネ（参考や同じチャンネルの過去の動画）
+  references?: Array<{ src: string; title?: string; channel?: string }>;
+  title?: string; // 一覧で並べた時に下に出す動画の題
+  // 本人がペンで書き込んで送った指示（結果は指示の欄にだけ出す）
+  instructions?: ThumbInstruction[];
+};
+
+export type ThumbInstruction = {
+  id: string;
+  note: string;
+  marks: ThumbMark[];
+  job_id?: string;
+  created_at: string;
+};
+
+export type ThumbFontId =
+  | 'hiragino-w9' | 'hiragino-w8' | 'hiragino-w6'
+  | 'noto-sans' | 'dela-gothic' | 'zen-maru' | 'reggae' | 'mplus-rounded' | 'rocknroll' | 'mincho' | 'toppan-mincho';
+
+const OWNER_FONT_BASE = '/api/v1/editor-assistant/scene-vendor/fonts/';
+
+// [表示名, CSS の family, 太さ, ファイル]
+export const THUMB_FONTS: Record<ThumbFontId, { label: string; family: string; weight: number; url: string }> = {
+  'hiragino-w9': { label: 'ヒラギノ角ゴ W9', family: 'HiraginoW9', weight: 900, url: `${OWNER_FONT_BASE}HiraginoSans-W9.otf` },
+  'hiragino-w8': { label: 'ヒラギノ角ゴ W8', family: 'HiraginoW8', weight: 800, url: `${OWNER_FONT_BASE}HiraginoSans-W8.otf` },
+  'hiragino-w6': { label: 'ヒラギノ角ゴ W6', family: 'HiraginoW6', weight: 600, url: `${OWNER_FONT_BASE}HiraginoSans-W6.otf` },
+  'noto-sans': { label: 'Noto Sans 太', family: 'NotoSansJP', weight: 900, url: '/fonts/NotoSansJP.ttf' },
+  'dela-gothic': { label: '極太', family: 'DelaGothicOne', weight: 400, url: '/fonts/DelaGothicOne-Regular.ttf' },
+  'zen-maru': { label: '角丸', family: 'ZenMaruGothic', weight: 900, url: '/fonts/ZenMaruGothic-Black.ttf' },
+  'reggae': { label: 'レゲエ', family: 'ReggaeOne', weight: 400, url: '/fonts/ReggaeOne-Regular.ttf' },
+  'mplus-rounded': { label: '丸ポップ', family: 'MPLUSRounded', weight: 800, url: '/fonts/MPLUSRounded1c-ExtraBold.ttf' },
+  'rocknroll': { label: 'ロック', family: 'RocknRollOne', weight: 400, url: '/fonts/RocknRollOne-Regular.ttf' },
+  'mincho': { label: '明朝', family: 'ShipporiMincho', weight: 800, url: '/fonts/ShipporiMincho-ExtraBold.ttf' },
+  'toppan-mincho': { label: '見出し明朝', family: 'ToppanMidashiMincho', weight: 800, url: `${OWNER_FONT_BASE}ToppanBunkyuMidashiMincho-ExtraBold.otf` },
+};
+
+export function thumbFont(id: unknown) {
+  return (typeof id === 'string' && Object.prototype.hasOwnProperty.call(THUMB_FONTS, id))
+    ? THUMB_FONTS[id as ThumbFontId] : THUMB_FONTS['hiragino-w9'];
+}
+
+// 使っている書体だけを読む（書き出しは読み終わるまで待つ）
+const loads = new Map<string, Promise<void>>();
+export function loadThumbFonts(doc: ThumbDoc | null | undefined, timeoutMs = 10000): Promise<void> {
+  if (typeof document === 'undefined' || typeof FontFace === 'undefined' || !doc) return Promise.resolve();
+  const ids = new Set<string>();
+  for (const p of doc.parts) if (p.type === 'text') ids.add(p.font);
+  return Promise.all([...ids].map((id) => {
+    const f = thumbFont(id);
+    let p = loads.get(f.url);
+    if (!p) {
+      p = (async () => {
+        const face = new FontFace(f.family, `url("${f.url}")`, { weight: String(f.weight) });
+        await face.load();
+        document.fonts.add(face);
+      })().catch(() => { loads.delete(f.url); });
+      loads.set(f.url, p);
+    }
+    return Promise.race([p, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+  })).then(() => undefined);
+}
+
+export function emptyThumbDoc(): ThumbDoc {
+  return { width: 1920, height: 1080, background: '#111', parts: [], rev: 0 };
+}
+
+export function asThumbDoc(raw: unknown): ThumbDoc {
+  const d = (raw && typeof raw === 'object' ? raw : {}) as Partial<ThumbDoc>;
+  return {
+    ...emptyThumbDoc(),
+    ...d,
+    parts: Array.isArray(d.parts) ? d.parts.filter((p) => p && typeof p === 'object' && (p.type === 'image' || p.type === 'text')) as ThumbPart[] : [],
+  };
+}
+
+export function newPartId(prefix: string) {
+  return `${prefix}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// ペンで描いた印（ダンへの書き込み指示）。座標はサムネの画素。
+export type ThumbMark = { color: string; width: number; points: Array<[number, number]> };

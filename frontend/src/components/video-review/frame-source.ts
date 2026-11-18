@@ -15,6 +15,7 @@
 
 import { createFile, DataStream, type MP4File, type MP4ArrayBuffer } from 'mp4box';
 import { readLocalRange } from './local-media';
+import { perfLog } from '@/lib/perf-log';
 
 export function webCodecsSupported(): boolean {
   return typeof window !== 'undefined' && typeof window.VideoDecoder !== 'undefined';
@@ -96,6 +97,14 @@ export class AssetFrameSource {
       this.failed = true;
       // Leave the source unusable; the preview falls back to black for this asset.
       console.warn('[frame-source] init failed for', url, e);
+      // 読めない素材は記録に残す（2026-11-18 壊れた写しで2日間真っ黒だったのに、記録に何も無かった）
+      try {
+        const q = new URL(url, location.href).searchParams;
+        perfLog({
+          surface: 'web', event: 'editor-media-error', ms: 0, room_id: q.get('room_id'),
+          extra: { asset_id: q.get('asset_id'), variant: q.get('variant'), error: String((e as Error)?.message || e).slice(0, 200) },
+        });
+      } catch { /* not a URL we know */ }
     });
   }
 

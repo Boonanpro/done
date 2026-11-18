@@ -24,6 +24,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as ScreenOrientation from 'expo-screen-orientation';
+import * as NavigationBar from 'expo-navigation-bar';
 import Svg, { Circle } from 'react-native-svg';
 import { Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
@@ -1396,6 +1397,18 @@ function useKeyboardShown() {
   return shown;
 }
 
+// エディターの全画面（帯を隠した edge-to-edge）では、Android は中の画面を縮めないので、入力欄がキーボードの下に
+// 隠れる。キーボードの高さだけ下を空ける（2026-11-18）。
+function useKeyboardHeight() {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', (e) => setH(Math.max(0, e.endCoordinates?.height || 0)));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setH(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+  return h;
+}
+
 function AppMain() {
   const language = useUiLanguage();
   const voice = useVoice();
@@ -1449,6 +1462,7 @@ function AppMain() {
   const [projectQuery, setProjectQuery] = useState('');
   const safeInsets = useSafeAreaInsets();
   const keyboardShown = useKeyboardShown();
+  const keyboardHeight = useKeyboardHeight();
   const insets = {...safeInsets, top: voice.minimized ? 0 : safeInsets.top};
   const [auth, setAuth] = useState<AuthState>({ status: 'checking' });
   useEffect(() => { if (auth.status === 'signed_out') voice.stop(); }, [auth.status]);
@@ -2953,6 +2967,21 @@ function AppMain() {
     };
   }, [loadInitialData]);
 
+  // Chrome やほかのアプリでエディターの住所（https://dan.paina.info/production-workspace?room_id=…）を開くと、
+  // このアプリに渡ってくる（app.json の intentFilters と /.well-known/assetlinks.json）。ログインが済んでから中の画面で開く。
+  const [linkedEditor, setLinkedEditor] = useState<string | null>(null);
+  useEffect(() => {
+    const take = (url: string | null) => { if (url && isEditorUrl(url)) setLinkedEditor(url); };
+    void Linking.getInitialURL().then(take).catch(() => {});
+    const sub = Linking.addEventListener('url', (ev) => take(ev.url));
+    return () => sub.remove();
+  }, []);
+  useEffect(() => {
+    if (!linkedEditor || auth.status !== 'signed_in') return;
+    setLinkedEditor(null);
+    void openEditor(linkedEditor);
+  }, [linkedEditor, auth.status]);
+
   // 制作エディターを開いている間だけ、スマホを横にすると横の画面になる（2026-11-17 本人「横画面のときも同じように
   // 動かしたい」）。ほかの画面は今までどおり縦に固定。
   const editorOpen = screen === 'artifact' && !!artifactView?.editor;
@@ -2960,6 +2989,14 @@ function AppMain() {
     if (Platform.OS !== 'android' && Platform.OS !== 'ios') return;
     if (editorOpen) void ScreenOrientation.unlockAsync().catch(() => {});
     else void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+  }, [editorOpen]);
+  // エディターを開いている間は、Android の下のボタンの帯も隠す（上の時計の帯は StatusBar の hidden、題の帯は出さない）。
+  // 映像・タイムライン・チャットだけで画面を全部使う（2026-11-18 本人「何も意識しなくても無い状態にしたい」）。
+  // 帯は画面の端からなぞると一時的に出て、少しで自然に消える。
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !editorOpen) return;
+    void NavigationBar.setVisibilityAsync('hidden').catch(() => {});
+    return () => { void NavigationBar.setVisibilityAsync('visible').catch(() => {}); };
   }, [editorOpen]);
   const screenSize = useWindowDimensions();
   const landscape = screenSize.width > screenSize.height;
@@ -4238,11 +4275,20 @@ function AppMain() {
   }
 
   if (screen === 'artifact' && artifactView) {
+    // 帯を隠した後に残るのはカメラの穴（display cutout）の分だけ。その分は黒い余白にして、映像の上のボタンが穴に隠れないようにする。
+    const editorFrame = {
+      backgroundColor: '#000',
+      paddingTop: safeInsets.top,
+      paddingLeft: safeInsets.left,
+      paddingRight: safeInsets.right,
+      paddingBottom: keyboardHeight,
+    };
     return (
-      <View style={[styles.screen, artifactView.editor && landscape ? { backgroundColor: '#000' } : null]}>
-        <StatusBar style="dark" hidden={!!artifactView.editor && landscape} />
-        {/* エディターを横で見ている間は、上の帯を出さず映像を画面いっぱいにする（戻るはスマホの戻る操作か縦に戻す） */}
-        {artifactView.editor && landscape ? null : (
+      <View style={[styles.screen, artifactView.editor ? editorFrame : null]}>
+        <StatusBar style={artifactView.editor ? 'light' : 'dark'} hidden={!!artifactView.editor} />
+        {/* エディターは縦でも横でも、上の題の帯と時計の帯を出さず、映像・タイムライン・チャットで画面を全部使う
+            （戻るはエディターの中の「戻る」かスマホの戻る操作）。カメラの穴の分だけ黒く空ける。 */}
+        {artifactView.editor ? null : (
         <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
           <Pressable
             onPress={() => setScreen(currentProject ? 'chat' : 'projects')}

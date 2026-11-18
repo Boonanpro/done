@@ -160,8 +160,29 @@ def _filter_script_args(exe: str, path: Path) -> list[str]:
     """Filtergraph read from a file. FFmpeg 7 added `-/filter_complex <file>` and 8 removed
     `-filter_complex_script`; older builds (and unknown versions) keep the old spelling."""
     if _ffmpeg_major(exe) >= 7:
+        _cap_graph_threads(path)
         return ["-/filter_complex", str(path)]
     return ["-filter_complex_script", str(path)]
+
+
+_GRAPH_SWS_THREADS = "sws_flags=bicubic:threads=1;"
+
+
+def _cap_graph_threads(path: Path) -> None:
+    """One graph holds hundreds of movie sources and format conversions. With FFmpeg's automatic
+    thread counts each decoder and each converter starts a pool sized to the CPU, and a long
+    window (2026-11-18, スヤさん1本目 21:39〜26:19: 264 sources) passed the 8192 threads a
+    macOS process may own: converters then failed to start ("Failed initializing scaling graph
+    (Resource temporarily unavailable)") and their frames were silently dropped, so the export
+    came out 28 s short with the picture running ahead of the sound. One thread per converter
+    made that window about 1.5x slower to render (windows still run in parallel)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return
+    if text.lstrip().startswith("sws_flags="):
+        return
+    path.write_text(_GRAPH_SWS_THREADS + text, encoding="utf-8")
 
 
 def _ffprobe() -> str:
@@ -802,6 +823,23 @@ _BLEND_MODES = {"screen": "screen", "add": "addition", "lighten": "lighten", "mu
                 "overlay": "overlay", "softlight": "softlight"}
 
 
+def visual_lane(track: dict[str, Any], clip: dict[str, Any], visual_index: int) -> float:
+    """The lane (stacking layer) a visual clip shows on in the editor; higher = in front.
+    Mirrors frontend lane-order.ts visualLane(). visual_index = the track's place among the
+    non-audio tracks (hidden ones included)."""
+    own = clip.get("layer")
+    if isinstance(own, (int, float)) and not isinstance(own, bool) and math.isfinite(own):
+        return float(own)
+    ttype = track.get("type")
+    if ttype == "caption" or clip.get("track") == "caption":
+        return float(max(2, visual_index))
+    if ttype == "effect":
+        return 3.0
+    if ttype == "overlay" or _is_overlay_clip(clip):
+        return 1.0
+    return float(visual_index)
+
+
 def _is_overlay_clip(clip: dict[str, Any]) -> bool:
     return str(clip.get("composition") or "") in ("pip", "overlay")
 
@@ -823,20 +861,12 @@ def _sequence_z_items(
     sequence = drop_switched_off(sequence)  # 本人が段の頭で非表示にした段は描かない
     visual_all = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict) and t.get("type") != "audio"]
     tracks = [t for t in visual_all if not t.get("hidden")]
-    # A picture's stacking layer, the same rule the editor preview draws with: its own `layer`
-    # (set when the clip is dragged to another lane), else its lane's place in the stack.
+    # Every visual item's stacking layer = the lane the editor shows it on (higher = in front).
+    # The same rule as the editor's computeClipLanes / lane-order.ts — keep the three identical.
     lane_index = {id(t): i for i, t in enumerate(visual_all)}
 
     def _pic_layer(track: dict[str, Any], clip: dict[str, Any]) -> float:
-        own = clip.get("layer")
-        if isinstance(own, (int, float)) and not isinstance(own, bool):
-            return float(own)
-        vi = lane_index.get(id(track), 0)
-        if track.get("type") == "caption":
-            return float(max(2, vi))
-        if track.get("type") == "overlay" or _is_overlay_clip(clip):
-            return 1.0
-        return float(vi)
+        return visual_lane(track, clip, lane_index.get(id(track), 0))
 
     base_ti: int | None = None
     base_clips: list[dict[str, Any]] = []
@@ -864,15 +894,15 @@ def _sequence_z_items(
             elif isinstance(clip.get("region"), dict):
                 if clip.get("style") != "note":  # 指示クリップ: 画には出さない
                     z_items.append(("fx", clip))
+                    pic_layers[id(clip)] = _pic_layer(track, clip)
             elif str(clip.get("text") or "").strip() or _is_scene_clip(clip):
                 z_items.append(("cap", clip))
-    # Pictures stack by layer among themselves (a clip dragged up/down a lane in the editor goes
-    # in front of / behind the others in the export too). Effects and captions keep their places;
-    # with no layer moves the order is exactly the lane order as before.
-    slots = [i for i, (kind, _) in enumerate(z_items) if kind == "overlay"]
-    pics = sorted((z_items[i] for i in slots), key=lambda it: pic_layers.get(id(it[1]), 0.0))
-    for i, it in zip(slots, pics):
-        z_items[i] = it
+                pic_layers[id(clip)] = _pic_layer(track, clip)
+    # ALL visual items (pictures, captions, scenes, effects) stack by the lane the editor shows
+    # them on: an upper lane is always in front of a lower one (2026-11-18 本人「上の段が前、
+    # 必ず守る仕組みに」). Before, only pictures were sorted and captions kept the order they were
+    # added in, so a caption dragged to a lower lane could still sit in front. Ties keep array order.
+    z_items.sort(key=lambda it: pic_layers.get(id(it[1]), 0.0))
     return base_clips, z_items
 
 
@@ -1323,6 +1353,9 @@ def _shape_cut_filter(shape: str | None, w: int, h: int, alpha: bool) -> str:
     return f",geq=lum='if({cond}\\,lum(X,Y)\\,16)':cb='if({cond}\\,cb(X,Y)\\,128)':cr='if({cond}\\,cr(X,Y)\\,128)'"
 
 
+_MOVIE_DEC_THREADS = 2
+
+
 def _movie_input(path: Any, seek: float, *, audio: bool = False, streams: str | None = None, fmt: str | None = None) -> str:
     """movie=/amovie= source for the filtergraph SCRIPT — replaces a command-line -i input.
 
@@ -1334,6 +1367,9 @@ def _movie_input(path: Any, seek: float, *, audio: bool = False, streams: str | 
     # splits on ':' — so the drive colon must be escaped even inside quotes ('C\:/...')
     p = str(path).replace("\\", "/").replace("'", "\\'").replace(":", "\\:")
     out = ("amovie" if audio else "movie") + f"=filename='{p}'"
+    # a few decoder threads per source: hundreds of sources × a CPU-sized pool each exceed the
+    # per-process thread limit (see _cap_graph_threads)
+    out += f":dec_threads={_MOVIE_DEC_THREADS}"
     if seek > 0.001:
         out += f":seek_point={seek:.3f}"
     if streams:
@@ -5744,6 +5780,103 @@ def _needs_view_copy(asset: dict[str, Any]) -> bool:
             or Path(str(src)).stat().st_size >= VIEW_COPY_MIN_PROXY_BYTES)
 
 
+# 写しの中身を確かめる（2026-11-18 スヤさん2本目の画面用の写しが壊れていた）。
+# 2つの処理（世代の違う本体など）が同じ一時ファイルに同時に書き、片方が名前を付け替えた後も
+# もう片方が書き続けて、ファイルはあるのに映像も音も無い写しが2日間配られていた。画面は真っ黒、
+# 音の写しとタイムラインの絵もその壊れた写しから作ろうとして失敗した。ファイルがあるかだけでなく、
+# 中に映像か音が入っているかを見てから使う。結果は（住所・大きさ・更新時刻）ごとに覚えるので、
+# 同じファイルを2回調べない。
+_MEDIA_OK_CACHE: dict[tuple[str, int, int], bool] = {}
+
+
+def _media_probe(path: Path) -> dict[str, Any] | None:
+    """Streams and duration of a media file, or None when ffprobe can't read any stream."""
+    try:
+        r = subprocess.run(
+            [_ffprobe(), "-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=60, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        data = json.loads(r.stdout or "{}")
+    except Exception:
+        return None
+    kinds = [str(st.get("codec_type") or "") for st in data.get("streams") or []]
+    if not kinds:
+        return None
+    try:
+        duration = float((data.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return {"kinds": kinds, "duration": duration}
+
+
+def _media_ok(path: Path | str | None) -> bool:
+    """True when the file exists and holds at least one readable stream (cached per size+mtime)."""
+    if not path:
+        return False
+    p = Path(str(path))
+    try:
+        st = p.stat()
+    except OSError:
+        return False
+    if not p.is_file() or st.st_size == 0:
+        return False
+    key = (str(p), st.st_size, st.st_mtime_ns)
+    hit = _MEDIA_OK_CACHE.get(key)
+    if hit is None:
+        hit = _media_probe(p) is not None
+        _MEDIA_OK_CACHE[key] = hit
+    return hit
+
+
+# 作り直しで出す写し（view・proxy）は中身を確かめてから使う。元の動画（local_path）は本人の素材で、
+# NAS の上にあることもあるので、あるかどうかだけを見る。
+_CHECKED_COPY_KEYS = ("view_path", "proxy_path")
+
+
+def _usable_file(asset: dict[str, Any], key: str) -> Path | None:
+    v = asset.get(key)
+    if not v:
+        return None
+    p = Path(str(v))
+    if key in _CHECKED_COPY_KEYS:
+        return p if _media_ok(p) else None
+    return p if p.is_file() else None
+
+
+class _CopyLock:
+    """One encoder per copy across every Dan process (the in-process set can't see the other
+    generation). An O_EXCL lock file next to the copy; a lock older than 6 hours is a crash leftover."""
+
+    STALE_S = 6 * 3600
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.held = False
+
+    def acquire(self) -> bool:
+        for _ in range(2):
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"{os.getpid()} {time.time():.0f}".encode())
+                os.close(fd)
+                self.held = True
+                return True
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > self.STALE_S:
+                        self.path.unlink(missing_ok=True)
+                        continue
+                except OSError:
+                    continue
+                return False
+        return False
+
+    def release(self) -> None:
+        if self.held:
+            self.path.unlink(missing_ok=True)
+            self.held = False
+
+
 _view_copy_running: set[str] = set()
 _view_copy_lock = threading.Lock()
 
@@ -5751,6 +5884,24 @@ _view_copy_lock = threading.Lock()
 def _ensure_view_copies_bg(room_id: str, assets: list[dict[str, Any]]) -> None:
     """写しが要るのにまだ無い動画の写しを、裏で1本ずつ作る（どの経路で登録された素材も、一覧を開いた時に拾う）。
     できると view_url が付き、画面は次の読み直しからそちらで再生する。"""
+    def _broken_view(a: dict[str, Any]) -> bool:
+        v = a.get("view_path")
+        return bool(v) and Path(str(v)).is_file() and not _media_ok(v)
+
+    for a in assets:
+        if isinstance(a, dict) and _broken_view(a):
+            # 壊れた写しは配らない。脇へ退け、失敗の印に関係なく作り直す（作り直しは中身を確かめてから置く）
+            bad = Path(str(a["view_path"]))
+            logger.warning("broken view copy %s: rebuilding", bad)
+            try:
+                bad.replace(bad.with_name(bad.stem + ".broken.mp4"))
+            except OSError:
+                pass
+            a["view_error_at"] = None
+            try:
+                _update_asset(room_id, a["id"], {"view_error_at": None})
+            except Exception:
+                pass
     todo = [a["id"] for a in assets if isinstance(a, dict) and a.get("id") and a.get("status") not in ("processing", "proxy_pending")
             and not (a.get("view_error_at") and time.time() - float(a.get("view_error_at") or 0) < 86400)
             and (not a.get("view_path") or not Path(str(a.get("view_path"))).is_file()
@@ -5793,7 +5944,19 @@ def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path
     src = Path(str(asset.get("local_path") if alpha else (asset.get("proxy_path") or asset.get("local_path"))))
     out_dir = _room_dir(room_id)
     view = out_dir / f"{asset_id}_view.mp4"
-    tmp = out_dir / f"{asset_id}_view.tmp.mp4"
+    lock = _CopyLock(out_dir / f"{asset_id}_view.lock")
+    if not lock.acquire():
+        return None  # another Dan process is making this copy right now
+    try:
+        return _encode_view_copy(room_id, asset_id, asset, alpha, src, out_dir, view)
+    finally:
+        lock.release()
+
+
+def _encode_view_copy(room_id: str, asset_id: str, asset: dict[str, Any], alpha: bool,
+                      src: Path, out_dir: Path, view: Path) -> Path:
+    # 一時ファイルは処理ごとに別の名前（同じ名前に2つが書いて壊れた。2026-11-18）
+    tmp = out_dir / f"{asset_id}_view.{os.getpid()}.{threading.get_ident()}.tmp.mp4"
     fps = float((asset.get("metadata") or {}).get("proxy_fps") or _room_frame_rate(room_id))
     cfr = ["-fps_mode", "cfr"] if _ffmpeg_major(_ffmpeg()) >= 6 else ["-vsync", "cfr"]
     scale = f"scale=w={VIEW_COPY_LONG_SIDE}:h={VIEW_COPY_LONG_SIDE}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps:g}"
@@ -5823,6 +5986,13 @@ def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path
     if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
         tmp.unlink(missing_ok=True)
         raise RuntimeError("view copy encode failed")
+    # 置く前に中身を確かめる: 映像が入っていて、長さが元とほぼ同じ
+    got = _media_probe(tmp)
+    want = float((asset.get("metadata") or {}).get("duration") or 0) or float((_media_probe(src) or {}).get("duration") or 0)
+    if (not got or "video" not in got["kinds"]
+            or (want > 0 and abs(got["duration"] - want) > max(2.0, want * 0.01))):
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"view copy is broken: {got} (source {want:.1f}s)")
     tmp.replace(view)
     _update_asset(room_id, asset_id, {
         "has_alpha": alpha,
@@ -5986,10 +6156,9 @@ async def _audio_only_copy(room_id: str, asset: dict[str, Any]) -> Path | None:
     音の部分だけを読むと、映像の間に細かく挟まった音を拾うために映像も一緒に読むことになり、家の外の回線では
     音の読み込みが再生に追いつかなかった。83分の録画で約60MB・作るのに約2秒。最初に頼まれた時に作る。"""
     asset_id = str(asset.get("id") or "")
-    src_value = next((asset.get(k) for k in ("view_path", "proxy_path", "local_path") if asset.get(k) and Path(str(asset.get(k))).is_file()), None)
-    if not asset_id or not src_value:
+    src = next((p for k in ("view_path", "proxy_path", "local_path") if (p := _usable_file(asset, k))), None)
+    if not asset_id or not src:
         return None
-    src = Path(str(src_value))
     out = _room_dir(room_id) / f"{asset_id}_audio.m4a"
     if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
         return out
@@ -5997,7 +6166,7 @@ async def _audio_only_copy(room_id: str, asset: dict[str, Any]) -> Path | None:
     async with lock:
         if out.exists() and out.stat().st_size > 0 and out.stat().st_mtime >= src.stat().st_mtime:
             return out
-        tmp = out.with_name(f"{asset_id}_audio.tmp.m4a")
+        tmp = out.with_name(f"{asset_id}_audio.{os.getpid()}.tmp.m4a")
 
         # mp4 系はそのまま抜く。wav などは AAC にする（30MB の BGM が 1〜2MB になり、開いた時の読み込みを奪わない）
         codec = ["-c:a", "copy"] if src.suffix.lower() in {".mp4", ".m4a", ".mov", ".m4v"} else ["-c:a", "aac", "-b:a", "160k"]
@@ -6006,12 +6175,16 @@ async def _audio_only_copy(room_id: str, asset: dict[str, Any]) -> Path | None:
             r = subprocess.run([_ffmpeg(), "-y", "-v", "error", "-i", str(src), "-vn", *codec, "-movflags", "+faststart", str(tmp)],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            return r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0
+            if not (r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0):
+                return False
+            got = _media_probe(tmp)
+            return bool(got and "audio" in got["kinds"])
 
         ok = await asyncio.to_thread(_run)
         if not ok:
             tmp.unlink(missing_ok=True)
-            return None
+            # 作れなくても、前に作った音の写しが読めるならそれを使う（音は元と同じ）
+            return out if _media_ok(out) else None
         tmp.replace(out)
         return out
 
@@ -6029,9 +6202,9 @@ _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".heic"
 
 def _first_file(asset: dict[str, Any], keys: tuple[str, ...]) -> Path | None:
     for k in keys:
-        v = asset.get(k)
-        if v and Path(str(v)).is_file():
-            return Path(str(v))
+        p = _usable_file(asset, k)
+        if p:
+            return p
     return None
 
 
@@ -6248,7 +6421,7 @@ async def get_asset_media(
         order += ["proxy_path", "local_path"]
     elif variant == "proxy":
         order += ["local_path"]
-    path = next((Path(str(asset[k])).resolve() for k in order if asset.get(k) and Path(str(asset[k])).is_file()), None)
+    path = next((p.resolve() for k in order if (p := _usable_file(asset, k))), None)
     if path is None:
         if not asset.get(key):
             raise HTTPException(status_code=404, detail=f"{variant} is not available")
@@ -9020,6 +9193,18 @@ def _content_cover(room_id: str, content_id: str) -> Path | None:
 async def content_cover(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
     """作品のタイムラインの頭の1コマ（JPEG）。中身が無い・描けない時は 404（画面は印を出す）。"""
     _room_dir(room_id)  # 400 on malformed room_id
+    from app.services import thumbnail_doc
+    content = next((c for c in _read_contents(room_id) if str(c.get("id")) == str(content_id)), None)
+    if thumbnail_doc.is_thumbnail(content):
+        # 部品で持つサムネは、その書き出しの絵（今の形を描いた物）
+        try:
+            tpath = await asyncio.get_running_loop().run_in_executor(None, thumbnail_doc.cover, room_id, content_id)
+        except Exception:
+            logger.exception("thumbnail cover failed %s", content_id)
+            tpath = None
+        if not tpath:
+            raise HTTPException(status_code=404, detail="no cover")
+        return FileResponse(tpath, media_type="image/png", headers={"Cache-Control": "private, max-age=604800"})
     try:
         path = await asyncio.get_running_loop().run_in_executor(None, _content_cover, room_id, content_id)
     except Exception:
@@ -9091,3 +9276,53 @@ def use_sfx_from_library(data: UseSfxRequest, current_user: TokenData = Depends(
         return editor_instructions.use_sfx(data.room_id, data.source_room_id, data.source_asset_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ── 部品で持つサムネ（app/services/thumbnail_doc.py）─────────────────────────────────────────
+
+class ThumbnailSaveRequest(BaseModel):
+    doc: dict[str, Any]
+
+
+@router.get("/contents/{content_id}/thumbnail")
+def get_thumbnail_doc(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        return {"doc": thumbnail_doc.get(room_id, content_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.put("/contents/{content_id}/thumbnail")
+def save_thumbnail_doc(content_id: str, data: ThumbnailSaveRequest, room_id: str = Query(...),
+                       current_user: TokenData = Depends(get_current_user)):
+    """エディターでの本人の手の直し（つかんで動かす・文字を打ち直す・色を変える）。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        doc = thumbnail_doc.save(room_id, content_id, data.doc, "owner")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"rev": doc["rev"]}
+
+
+@router.post("/contents/{content_id}/thumbnail/export")
+async def export_thumbnail(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    """1280×720 の PNG に書き出す（エディターと同じ描き方）。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, thumbnail_doc.export, room_id, content_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/contents/{content_id}/thumbnail/export.png")
+def thumbnail_export_file(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    p = _room_dir(room_id) / "thumbnails" / content_id / "export.png"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="まだ書き出していません")
+    return FileResponse(p, media_type="image/png", filename=f"thumbnail-{content_id[:8]}.png")

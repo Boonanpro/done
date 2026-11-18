@@ -40,6 +40,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipKind } from './timeline-clip';
+import { visualLane } from './lane-order';
 import { perfLog } from '@/lib/perf-log';
 import { TimelineRuler } from './timeline-ruler';
 import { FullscreenBar } from './fullscreen-bar';
@@ -592,13 +593,7 @@ export function computeClipLanes(tracks: Array<{ type?: string | null; clips?: S
         }
         continue;
       }
-      let layer: number;
-      if (Number.isFinite(clip.layer as number)) layer = Number(clip.layer);
-      else if (track.type === 'caption' || clip.track === 'caption') layer = Math.max(2, visualIndex);
-      else if (track.type === 'effect') layer = 3;
-      else if (track.type === 'overlay') layer = 1;
-      else layer = clip.composition === 'pip' || clip.composition === 'overlay' ? 1 : visualIndex;
-      out.set(id, { zone: 'visual', layer });
+      out.set(id, { zone: 'visual', layer: visualLane(track.type, clip, visualIndex) });
     }
   }
   audioPending.sort((a, b) => a.group - b.group || a.clip.timeline_start - b.clip.timeline_start || a.order - b.order);
@@ -2729,8 +2724,18 @@ export function VideoReviewEditor({
         seekTimeline(nextTime);
       }
     };
+    // Space は再生/停止だけにする。Chrome はボタンを押した後にそのボタンに残った Space を、離した時（keyup）に
+    // もう一度押したことにする（keydown を止めても）。効果音の＋を押してから Space で再生すると、同じ効果音が
+    // もう1つ入っていた（2026-11-18 本人「効果音を1回追加すると2つ入る」）。どのボタンでも同じなので、ここで止める。
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== 'Space') return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return;
+      if (target?.closest('button, [role="button"], summary, a[href]')) event.preventDefault();
+    };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => { window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); };
   }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undo, togglePreviewFullscreen, contentDuration, maxTimelineZoom]);
 
   const markerPointRef = useRef<Point | null>(null);
