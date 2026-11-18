@@ -86,3 +86,14 @@ def test_new_text_takes_the_boldness_of_what_it_replaces():
     reqs = S.edit_requests(1, old, new, '1100000')
     styles = [r['updateTextStyle'] for r in reqs if 'updateTextStyle' in r]
     assert styles and all(st['textStyle']['bold'] is False for st in styles)
+
+
+def test_a_star_heading_inside_the_script_stays_in_the_script():
+    doc = _doc(('◎前提と狙い\n', 'HEADING_2'), '狙い：予約。\n', ('◎台本\n', 'HEADING_2'), ('▼追加特典\n', 'HEADING_3'),
+               '振り切りました。\n', ('◎追加特典①ブーストセット\n', 'HEADING_3'), '1つ目はこれです。\n')
+    units = S.outline(doc)
+    star = next(u for u in units if u['text'].startswith('◎追加特典'))
+    assert star['level'] == 3 and star['read']
+    said = [u for u in units if u['kind'] == 'say']
+    assert [u['speak'] for u in said] == ['振り切りました。', '1つ目はこれです。']
+    assert said[1]['section'].startswith('◎追加特典') and said[0]['gap'] == 'h'
