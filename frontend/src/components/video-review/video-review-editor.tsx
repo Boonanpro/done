@@ -2838,15 +2838,6 @@ export function VideoReviewEditor({
     [timelineZoom]
   );
 
-  const getTimelineTime = useCallback(
-    (event: React.PointerEvent | PointerEvent): number => {
-      const rect = timelineRef.current?.getBoundingClientRect();
-      if (!rect || !timelineDuration) return 0;
-      const ratio = (event.clientX - rect.left) / rect.width;
-      return Number(clamp(ratio * timelineDuration, 0, timelineDuration).toFixed(2));
-    },
-    [timelineDuration]
-  );
 
   const updateAnnotationTime = useCallback(
     (id: string, start: number, end: number, layer?: number) => {
@@ -3979,7 +3970,8 @@ export function VideoReviewEditor({
       const startLane = clipLanes.get(String(clip.id)) || { zone: 'visual' as const, layer: clip.layer ?? 0 };
       dragLayerRef.current = startLane.layer;
       dragLaneGeomRef.current = laneGeomRef.current.map((g) => ({ ...g })); // freeze for stable hit-testing
-      seekTimeline(getTimelineTime(event));
+      // クリップを押す・引きずる・端を伸ばすだけでは再生位置を動かさない（Premiere・DaVinci と同じ）。
+      // 再生位置が動くのは目盛りの帯と何もない所を押した時だけ（2026-11-17 本人の指摘）。
       dragSnapshotRef.current = editSequence;
       // Alt（Mac は Option）を押しながら真ん中をつかむと、写しを作って写しの方を引きずる
       // （Premiere・DaVinci と同じ）。元のクリップはその場に残る。
@@ -4026,7 +4018,7 @@ export function VideoReviewEditor({
         /* ignore */
       }
     },
-    [editSequence, clipLanes, getTimelineTime, seekTimeline, selectSequenceClip, selectedSequenceClipIds, buildCopySource, placeClipCopies]
+    [editSequence, clipLanes, selectSequenceClip, selectedSequenceClipIds, buildCopySource, placeClipCopies]
   );
 
   useEffect(() => {
