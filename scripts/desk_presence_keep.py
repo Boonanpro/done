@@ -96,7 +96,7 @@ def load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text())
     except Exception:
-        return {"failed": {}, "last_restart": 0}
+        return {"failed": {}, "last_restart": 0, "verified": []}
 
 
 def save_state(st: dict) -> None:
@@ -226,8 +226,36 @@ def export_one(s: float, e: float, rec_sec: float) -> tuple[bool, str]:
     dur = ffprobe_duration(f"{FRIGATE}/exports/{Path(vp).name}")
     # 録画にある秒数の9割以上が動画に入っていれば良しとする
     if dur <= 0 or dur < rec_sec * 0.9 - 5:
-        return False, f"short export {exp_id} dur={dur:.0f} rec={rec_sec:.0f}"
-    return True, f"{exp_id} {name} dur={dur:.0f}s"
+        api("DELETE", f"/api/export/{exp_id}")
+        return False, f"short export {exp_id} dur={dur:.0f} rec={rec_sec:.0f} (deleted)"
+    return True, exp_id
+
+
+def reconcile_exports(st: dict, exports: list[dict]) -> None:
+    """途中で止まった実行が残した、まだ確かめていない書き出しを確かめる。足りなければ消す。"""
+    verified = set(st.setdefault("verified", []))
+    for s, e, x in export_ranges(exports):
+        if x["id"] in verified or x.get("in_progress"):
+            continue
+        if not (x.get("name") or "").startswith(NAME_PREFIX):
+            continue
+        dur = ffprobe_duration(f"{FRIGATE}/exports/{Path(x.get('video_path', '')).name}")
+        rec = recorded_seconds(s, e)
+        if dur > 0 and (rec < 5 or dur >= rec * 0.9 - 5):
+            verified.add(x["id"])
+            log("verified_existing", id=x["id"], name=x.get("name"), dur=round(dur))
+        else:
+            api("DELETE", f"/api/export/{x['id']}")
+            log("deleted_broken_export", id=x["id"], name=x.get("name"), dur=round(dur), rec=round(rec))
+    st["verified"] = sorted(verified)
+    save_state(st)
+
+
+def trusted_ranges(st: dict, exports: list[dict], include_running: bool):
+    verified = set(st.get("verified", []))
+    return [(s, e, x) for s, e, x in export_ranges(exports)
+            if x["id"] in verified or (include_running and x.get("in_progress"))
+            or (not x.get("in_progress") and not (x.get("name") or "").startswith(NAME_PREFIX))]
 
 
 def delete_old_exports(exports: list[dict], now: float, dry: bool) -> int:
@@ -284,7 +312,10 @@ def run(args) -> int:
     events = fetch_events(oldest_rec - 86400)
     intervals, open_now, last_end = presence_intervals(events, now)
     exports = get("/api/exports")
-    ranges = export_ranges(exports)
+    if not args.plan:
+        reconcile_exports(st, exports)
+        exports = get("/api/exports")
+    ranges = trusted_ranges(st, exports, include_running=True) if not args.plan else export_ranges(exports)
 
     todo = []
     for s, e in intervals:
@@ -326,6 +357,8 @@ def run(args) -> int:
         ok, msg = export_one(s, e, rec)
         if ok:
             done += 1
+            st.setdefault("verified", []).append(msg)
+            save_state(st)
             log("exported", start=fmt(s), end=fmt(e), detail=msg)
         else:
             f = st["failed"].setdefault(key, {"n": 0})
@@ -348,7 +381,7 @@ def manage_retention(st: dict, now: float) -> None:
     oldest_rec = dt.datetime.strptime(rec_days[0], "%Y-%m-%d").timestamp() if rec_days else now
     events = fetch_events(oldest_rec - 86400)
     intervals, open_now, last_end = presence_intervals(events, now)
-    ranges = export_ranges(get("/api/exports"))
+    ranges = trusted_ranges(st, get("/api/exports"), include_running=False)
     pending = [s for s, e in intervals
                if e >= oldest_rec and covered(s, e, ranges) < 0.95
                and st["failed"].get(f"{int(s)}-{int(e)}", {}).get("n", 0) < 3]
