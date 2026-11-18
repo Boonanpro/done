@@ -42,6 +42,7 @@ import { toast } from 'sonner';
 import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipKind } from './timeline-clip';
 import { visualLane } from './lane-order';
 import { perfLog } from '@/lib/perf-log';
+import { startEditorFeel } from './editor-feel';
 import { TimelineRuler } from './timeline-ruler';
 import { FullscreenBar } from './fullscreen-bar';
 import { PhoneSeekBar, PhoneSwipeSurface, PhoneTime, PhoneTimeline, createPhoneScrub, type PhoneLane } from './phone-timeline';
@@ -4310,6 +4311,9 @@ export function VideoReviewEditor({
       window.removeEventListener('wheel', note, true);
     };
   }, [roomId, contentId]);
+
+  // 本人の端末での体感（飛んでから絵が出るまで・再生が流れ出すまで・操作の反応・止めた処理の名前）を1分ごとに送る
+  useEffect(() => startEditorFeel(() => ({ room_id: roomId || null, content_id: contentId || null, ...freezeCtxRef.current })), [roomId, contentId]);
 
   // クリップの押した時の処理（ClipBox は memo なので ref から最新を呼ぶ）
   const laneClipLookup = useMemo(() => {
