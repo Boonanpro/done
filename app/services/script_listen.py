@@ -189,6 +189,9 @@ def outline(doc):
         if all(c[2]['blue'] or not c[1].strip() for c in visible) or text.startswith('［'):
             units.append({'kind': 'note', 'text': text}); continue
         for part in _split(chars):
+            while part and not part[0][1].strip(): part = part[1:]
+            while part and not part[-1][1].strip(): part = part[:-1]
+            if not part: continue
             speak = _speakable(part)
             if not speak or not re.search(r'[\w぀-ヿ一-鿿]', speak):
                 units.append({'kind': 'note', 'text': _raw(part).strip()}); continue
@@ -196,6 +199,7 @@ def outline(doc):
             end = part[-1][0] + _units16(part[-1][1])
             inside = [c for c in chars if start <= c[0] < end]
             units.append({'kind': 'say', 'text': _raw(part).strip(), 'speak': speak, 'para': pi, 'start': start, 'end': end,
+                          'bmask': ''.join('1' if c[2]['bold'] else '0' for c in part),
                           'bold': all(c[2]['bold'] for c in part if c[1].strip()),
                           'locked': any(c[2]['ins'] or c[2]['del'] for c in inside), 'section': section, 'gap': 's'})
     # Longer pause where a paragraph or a section ends.
@@ -218,23 +222,25 @@ def read(doc_id, voice=DEFAULT_VOICE):
             u['ready'] = (CACHE / f"{u['key']}.mp3").exists()
             u['seconds'] = _meta(u['key']).get('seconds')
     title = doc.get('title', '')
-    return {'doc_id': doc_id, 'title': title, 'revision': doc.get('revisionId'), 'version': version(doc_id),
+    return {'doc_id': doc_id, 'title': title, 'revision': doc.get('revisionId'), 'version': doc.get('revisionId'),
             'voice': voice, 'voices': [{'id': v['id'], 'name': v['name']} for v in VOICES], 'units': units}
 
 
 def version(doc_id):
-    from app.services import gdoc_drive as G
+    """The doc's revision, read alone (cheap). Drive's file version lagged an edit by over 20 s on 11/18; this does not."""
     for account in ACCOUNTS:
         try:
-            return str(G.request(account, 'GET', f'files/{doc_id}', params={'fields': 'version'}).get('version'))
+            return _docs('GET', doc_id, account, params={'fields': 'revisionId'}).get('revisionId')
         except Exception:
             continue
     return None
 
 
-def edit_requests(start, old, new):
+def edit_requests(start, old, new, bmask=''):
     """Docs API requests that turn ``old`` (which sits at ``start``) into ``new`` touching only what differs.
-    Work from the end so earlier positions stay valid."""
+    Work from the end so earlier positions stay valid. New text takes the boldness of the text it replaces (the Docs
+    API would otherwise give it the boldness of the character before it, e.g. bold right after a bold phrase)."""
+    bold = lambda i: bool(bmask) and 0 <= i < len(bmask) and bmask[i] == '1'
     pos, acc = [], start
     for ch in old:
         pos.append(acc); acc += _units16(ch)
@@ -245,7 +251,12 @@ def edit_requests(start, old, new):
         if i2 > i1:
             reqs.append({'deleteContentRange': {'range': {'startIndex': pos[i1], 'endIndex': pos[i2]}}})
         if j2 > j1:
-            reqs.append({'insertText': {'location': {'index': pos[i1]}, 'text': new[j1:j2]}})
+            text = new[j1:j2]
+            reqs.append({'insertText': {'location': {'index': pos[i1]}, 'text': text}})
+            if bmask:
+                like = i1 if i1 < len(old) else i1 - 1
+                reqs.append({'updateTextStyle': {'range': {'startIndex': pos[i1], 'endIndex': pos[i1] + sum(_units16(c) for c in text)},
+                                                 'textStyle': {'bold': bold(like)}, 'fields': 'bold'}})
     return reqs
 
 
@@ -265,7 +276,7 @@ def edit(doc_id, old, new, para=None, start=None):
     if u['locked']:
         raise ListenError('この文には提案（提案モードの直し）が入っているので、ここでは直せません。ドキュメントで提案を決めてから直してください。', 409)
     if new == old: return {'changed': False}
-    reqs = edit_requests(u['start'], old, new)
+    reqs = edit_requests(u['start'], old, new, u.get('bmask', ''))
     _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
           body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
     _log_owner_edit(doc_id, doc.get('title', ''), old, new)
@@ -341,11 +352,27 @@ def _trim(samples, rate, floor_db=-42.0, keep=0.03):
     return samples[a:b]
 
 
-def synthesize(speak, voice, gap):
-    """Make one clip (mp3) unless it is already there. Returns its key."""
+_urgent = 0                # clips the listener is waiting for; making ahead steps aside for them
+_urgent_lock = threading.Lock()
+
+
+def synthesize(speak, voice, gap, urgent=True):
+    """Make one clip (mp3) unless it is already there. Returns its key. A clip the listener waits for (urgent) goes
+    before the clips being made ahead."""
+    global _urgent
     key = clip_key(speak, voice, gap)
     path = CACHE / f'{key}.mp3'
     if path.exists(): return key
+    if urgent:
+        with _urgent_lock: _urgent += 1
+    try:
+        return _make(key, path, speak, voice, gap)
+    finally:
+        if urgent:
+            with _urgent_lock: _urgent -= 1
+
+
+def _make(key, path, speak, voice, gap):
     import numpy as np
     import soundfile as sf
     with _engine_lock:
@@ -394,10 +421,11 @@ def prepare(items):
 
 def _run_queue():
     while True:
+        while _urgent > 0: time.sleep(0.05)
         with _queue_lock:
             if not _queue: return
             key, speak, voice, gap = _queue.pop(0)
-        try: synthesize(speak, voice, gap)
+        try: synthesize(speak, voice, gap, urgent=False)
         except Exception: time.sleep(2)
 
 

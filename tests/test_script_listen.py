@@ -79,3 +79,10 @@ def test_trim_cuts_head_and_tail_silence():
     x = np.concatenate([np.zeros(500), np.full(300, 8000), np.zeros(700)]).astype('int16')
     y = S._trim(x, rate)
     assert 300 <= len(y) <= 300 + 2 * 30 + 20
+
+
+def test_new_text_takes_the_boldness_of_what_it_replaces():
+    old, new = '強く言います。', '強く言わせてください。'
+    reqs = S.edit_requests(1, old, new, '1100000')
+    styles = [r['updateTextStyle'] for r in reqs if 'updateTextStyle' in r]
+    assert styles and all(st['textStyle']['bold'] is False for st in styles)
