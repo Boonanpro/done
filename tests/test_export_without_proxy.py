@@ -34,7 +34,7 @@ def room(tmp_path, monkeypatch):
 
 def _video(path: Path, seconds: int, size: str = "640x360") -> Path:
     subprocess.run([r._ffmpeg(), "-y", "-f", "lavfi", "-i", f"testsrc=size={size}:rate=30:duration={seconds}",
-                    "-f", "lavfi", "-i", f"sine=frequency=330:beep_factor=4:duration={seconds}",
+                    "-f", "lavfi", "-i", f"sine=frequency=330:beep_factor=4:sample_rate=48000:duration={seconds}",
                     "-c:v", "libx264", "-g", "15", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path)],
                    check=True, capture_output=True)
     return path
@@ -112,7 +112,13 @@ def test_span_decoded_audio_matches_whole_decode(room, tmp_path, monkeypatch):
         out[mode] = _wav(folder / "mix.wav")
     a, b = out["whole"], out["span"]
     assert len(a) == len(b)
-    assert float(np.max(np.abs(a - b))) < 1e-4
+    # 同じ音が同じ位置に来る（ずれ0サンプル）。AAC を途中から解くと端の値がわずかに変わるだけ
+    for lo in (0, 144000):
+        seg, ref = b[lo + 24000:lo + 96000], a[lo + 22000:lo + 98000]
+        assert int(np.argmax(np.correlate(ref, seg, "valid"))) - 2000 == 0
+        rms = float(np.sqrt(np.mean(a[lo:lo + 144000] ** 2)))
+        err = float(np.sqrt(np.mean((a[lo:lo + 144000] - b[lo:lo + 144000]) ** 2)))
+        assert rms > 0.01 and err < rms * 0.02
 
 
 def test_home_route_only_for_the_home_address(tmp_path, monkeypatch):

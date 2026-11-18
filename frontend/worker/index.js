@@ -45,8 +45,12 @@ self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET') return;
   let path = '';
-  try { path = new URL(request.url).pathname; } catch { return; }
-  if (request.destination === 'video' || request.destination === 'audio' || request.headers.has('range') || MEDIA_PATH.test(path)) {
+  let host = '';
+  try { const u = new URL(request.url); path = u.pathname; host = u.hostname; } catch { return; }
+  // 家の中の直通（dan-home.paina.info。media-route.ts）も通さない。Service Worker を通して家の中の機械へ
+  // 読みに行くと、すぐに失敗した（ページから直接読む時は Chrome の許可の問いが出る。2026-11-18）
+  if (host === 'dan-home.paina.info'
+      || request.destination === 'video' || request.destination === 'audio' || request.headers.has('range') || MEDIA_PATH.test(path)) {
     event.stopImmediatePropagation();
   }
 });
