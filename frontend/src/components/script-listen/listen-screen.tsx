@@ -51,7 +51,9 @@ function placeThreads(units: ListenUnit[], threads: Thread[]) {
   let all = '';
   for (const u of units) {
     if (u.kind === 'image') continue;
-    const t = squash(u.text);
+    // With the struck-through words too: a comment's words are often the ones Dan's suggestion takes out (11/19).
+    const segs = 'segs' in u ? u.segs : undefined;
+    const t = squash(segs?.length ? segs.map(x => x.t).join('') : u.text);
     parts.push({ n: u.n, from: all.length, start: u.kind === 'say' ? u.start : undefined });
     all += t;
   }
