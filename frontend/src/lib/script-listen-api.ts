@@ -12,8 +12,9 @@ export type Seg = { t: string; ins?: string; del?: string; blue?: boolean; b?: b
 export type ListenUnit =
   | { n: number; kind: 'title'; text: string }
   | { n: number; kind: 'image'; src: string }
-  | { n: number; kind: 'heading'; level: number; text: string; read: boolean; segs?: Seg[] }
+  | { n: number; kind: 'heading'; level: number; text: string; read: boolean; segs?: Seg[]; para?: number }
   | { n: number; kind: 'note'; text: string; section?: string; para?: number; segs?: Seg[] }
+  | { n: number; kind: 'blank'; text: string; section?: string; para: number; segs: Seg[] }
   | { n: number; kind: 'gone'; text: string; para: number; section?: string; segs: Seg[] }
   | {
       n: number; kind: 'say'; text: string; speak: string; para: number; start: number; end: number; bold: boolean;
@@ -96,6 +97,9 @@ export const listenApi = {
   ahead: (voice: string, items: { speak: string; gap: string }[]) => json<{ queued: number }>('/ahead', { voice, items }),
   edit: (id: string, old: string, next: string, start: number) =>
     json<{ changed: boolean }>(`/doc/${encodeURIComponent(id)}/edit`, { old, new: next, start }),
+  /** 段落 para_from..para_to（'\n' でつないだ文）を old から new へ。new_bmask は1文字ずつの太字（'0'/'1'）。 */
+  replace: (id: string, body: { para_from: number; para_to: number; old: string; new: string; new_bmask: string }) =>
+    json<{ changed: boolean }>(`/doc/${encodeURIComponent(id)}/replace`, body),
   comments: (id: string) => json<{ threads: Thread[]; can_comment: boolean }>(`/doc/${encodeURIComponent(id)}/comments`),
   addComment: (id: string, body: { text: string; quote: string; start?: number | null; sentence?: string }) =>
     json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments`, body),
