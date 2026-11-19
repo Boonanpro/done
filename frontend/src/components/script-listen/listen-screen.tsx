@@ -151,6 +151,8 @@ export function ListenScreen({ docId }: { docId: string }) {
   const lastSnap = useRef({ at: 0, kind: '' });
   const afterBuild = useRef<AfterBuild | null>(null);
   const tapAt = useRef<{ x: number; y: number } | null>(null);
+  const lastInput = useRef(0);
+  const ownRevisions = useRef(new Set<string>());   // revisions this screen wrote (not someone else's change)
   useLayoutEffect(() => {
     saysRef.current = says;
     rateRef.current = rate;
@@ -325,21 +327,32 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   const editing = () => dirtyRef.current || (!!editorRef.current && document.activeElement === editorRef.current && typedRef.current);
 
-  // The doc changed elsewhere (Dan's fix, Google Docs): read it again, unless the owner is typing here.
+  // The doc changed elsewhere (Dan's fix, Google Docs): read it again. While the owner types, wait until they stop
+  // for a moment, then read it again keeping the caret where it is (like the doc showing others' changes).
+  const settleRef = useRef<(o: { focus: boolean; play: boolean }) => Promise<void>>(async () => {});
   useEffect(() => {
     const t = window.setInterval(async () => {
-      if (!doc || editing() || saving || settling.current || document.hidden) return;
+      if (!doc || saving || settling.current || document.hidden || composingRef.current) return;
+      if (Date.now() - lastInput.current < 5000 || saveTimer.current != null) return;
       try {
         const { version } = await listenApi.version(docId);
-        if (version && doc.version && version !== doc.version && !editing() && !settling.current) {
-          const here = saysRef.current[curRef.current];
-          const wasPlaying = playingRef.current;
-          if (wasPlaying) stop();
-          // Someone else changed the doc: undo here would bring their change back too.
-          undoRef.current = []; redoRef.current = [];
-          const d = await load(here ? { start: here.start, text: here.text } : undefined);
-          if (d && wasPlaying) void playFrom(curRef.current);
+        if (!version || !doc.version || version === doc.version || settling.current) return;
+        if (Date.now() - lastInput.current < 5000 || composingRef.current) return;
+        const theirs = !ownRevisions.current.has(version);
+        // Someone else changed the doc: undo here would bring their change back too.
+        if (theirs) { undoRef.current = []; redoRef.current = []; }
+        const root = editorRef.current;
+        if (dirtyRef.current) {
+          if (!theirs) return;          // only our own writes: the text on the screen is already right
+          await settleRef.current({ focus: !!root && document.activeElement === root, play: false });
+          return;
         }
+        const here = saysRef.current[curRef.current];
+        const wasPlaying = playingRef.current;
+        if (wasPlaying) stop();
+        else if (root && document.activeElement === root) afterBuild.current = { pos: getPos(root), focus: true, play: false };
+        const d = await load(here ? { start: here.start, text: here.text } : undefined);
+        if (d && wasPlaying) void playFrom(curRef.current);
       } catch { /* next time */ }
     }, 8000);
     return () => window.clearInterval(t);
@@ -373,6 +386,7 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   // ---------------------------------------------------------------- the editing surface
   const html = useMemo(() => buildHtml(units), [units]);
+  const hasDoc = !!doc;
 
   // Where the voice is and which words have comments: marks on the elements, so the text and the caret stay put.
   const applyMarks = useCallback(() => {
@@ -432,7 +446,8 @@ export function ListenScreen({ docId }: { docId: string }) {
     setSaving(true);
     try {
       const { next, ...body } = change;
-      await listenApi.replace(docId, body);
+      const r = await listenApi.replace(docId, body);
+      if (r.revision) ownRevisions.current.add(r.revision);
       baseRef.current = next;
     } catch (e) {
       toast.error(errorText(e));
@@ -465,6 +480,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   const changed = useCallback(() => {
     dirtyRef.current = true;
     typedRef.current = true;
+    lastInput.current = Date.now();
     if (playingRef.current) stop();
     setSelBtn(null);
     scheduleSave();
@@ -488,6 +504,8 @@ export function ListenScreen({ docId }: { docId: string }) {
     settling.current = run;
     return run;
   }, [flush, load]);
+
+  useEffect(() => { settleRef.current = settle; }, [settle]);
 
   const toggle = useCallback(async () => {
     if (playingRef.current) { stop(); return; }
@@ -578,7 +596,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     };
     root.addEventListener('beforeinput', onBefore);
     return () => root.removeEventListener('beforeinput', onBefore);
-  }, [undo, redo, remember]);
+  }, [undo, redo, remember, hasDoc]);
 
   const onEditorKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const mod = e.ctrlKey || e.metaKey;
@@ -795,6 +813,13 @@ export function ListenScreen({ docId }: { docId: string }) {
     return sec / rate;
   }, [cur, rate, says]);
 
+  if (loadError && !doc) {
+    return <div className="p-6 text-[15px] text-red-700">{loadError}</div>;
+  }
+  if (!doc) {
+    return <div className="flex items-center gap-2 p-6 text-sm text-stone-500"><Loader2 className="h-4 w-4 animate-spin" />台本を読んでいます…</div>;
+  }
+
   const sheetThreads = sheet?.kind === 'threads' ? threads.filter(t => sheet.ids.includes(t.id)) : sheet?.kind === 'all' ? visibleThreads : [];
   const sheetSuggestion = sheet?.kind === 'suggestion' ? suggestions.find(s => s.id === sheet.id) : undefined;
 
@@ -803,7 +828,7 @@ export function ListenScreen({ docId }: { docId: string }) {
       <header className="shrink-0 border-b border-stone-200 bg-white/90 px-3 py-2 backdrop-blur sm:px-6">
         <div className="mx-auto flex max-w-6xl items-center gap-2">
           <Volume2 className="h-4 w-4 shrink-0 text-amber-700" />
-          <div className="min-w-0 flex-1 truncate text-[14px] font-semibold">{doc?.title || ''}</div>
+          <div className="min-w-0 flex-1 truncate text-[14px] font-semibold">{doc.title}</div>
           <button
             type="button"
             onClick={() => (wide ? setShowResolved(v => !v) : setSheet({ kind: 'all' }))}
@@ -818,9 +843,9 @@ export function ListenScreen({ docId }: { docId: string }) {
             onChange={e => changeVoice(e.target.value)}
             className="max-w-[8rem] rounded-md border border-stone-300 bg-white px-1.5 py-1 text-[12px]"
           >
-            {(doc?.voices || []).map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+            {doc.voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
           </select>
-          {doc && (
+          {(
             <a
               href={`https://docs.google.com/document/d/${doc.doc_id}/edit`}
               target="_blank"
@@ -841,14 +866,10 @@ export function ListenScreen({ docId }: { docId: string }) {
       >
         <div className="mx-auto flex max-w-6xl gap-6 px-3 pb-44 pt-4 sm:px-6">
           <div ref={contentRef} className="relative min-w-0 max-w-3xl flex-1">
-            {loadError && !doc && <div className="p-6 text-[15px] text-red-700">{loadError}</div>}
-            {!doc && !loadError && (
-              <div className="flex items-center gap-2 p-6 text-sm text-stone-500"><Loader2 className="h-4 w-4 animate-spin" />台本を読んでいます…</div>
-            )}
             <div
               ref={editorRef}
               data-testid="script-editor"
-              contentEditable={!!doc && (!touch || armed)}
+              contentEditable={!touch || armed}
               suppressContentEditableWarning
               spellCheck={false}
               onInput={() => changed()}
@@ -871,7 +892,6 @@ export function ListenScreen({ docId }: { docId: string }) {
                 'whitespace-pre-wrap break-words outline-none caret-stone-900',
                 '[&_[data-on]]:rounded-[3px] [&_[data-on]]:bg-amber-200/70 [&_[data-on]]:[box-decoration-break:clone]',
                 '[&_[data-cm]]:bg-yellow-100 [&_[data-on][data-cm]]:bg-amber-200/70',
-                !doc && 'hidden',
               )}
             />
             {unplaced.length > 0 && (
@@ -885,7 +905,7 @@ export function ListenScreen({ docId }: { docId: string }) {
                 </div>
               </div>
             )}
-            {doc && (
+            {(
               <div className="mt-8 text-center text-[12px] text-stone-400">
                 {touch ? '文を押すとそこから聞けます。鳴っている文をもう一度押すと直せます。' : '文を押すとそこから聞けます。Google ドキュメントと同じように直せて、打つのを止めると自動でドキュメントに入ります。'}
                 文字を選ぶとコメントできます。
@@ -927,11 +947,11 @@ export function ListenScreen({ docId }: { docId: string }) {
           onMouseDown={e => e.preventDefault()}
           onClick={() => openDraft({ quote: selBtn.quote, n: selBtn.n, start: selBtn.start })}
           style={wide
-            ? { left: selBtn.x + 4, top: Math.max(selBtn.y - 4, 56) }
+            ? { left: selBtn.x - 28, top: Math.max(selBtn.y - 4, 56) }
             : { left: Math.max(8, selBtn.x - 40), top: Math.min(selBtn.y + 10, window.innerHeight - 190) }}
-          className="fixed z-30 flex h-9 w-9 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-700 shadow-md hover:bg-stone-50"
+          className="fixed z-30 flex h-8 w-8 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-700 shadow-md hover:bg-stone-50"
         >
-          <MessageSquarePlus className="h-5 w-5" />
+          <MessageSquarePlus className="h-[18px] w-[18px]" />
         </button>
       )}
 

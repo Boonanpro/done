@@ -99,7 +99,7 @@ export const listenApi = {
     json<{ changed: boolean }>(`/doc/${encodeURIComponent(id)}/edit`, { old, new: next, start }),
   /** 段落 para_from..para_to（'\n' でつないだ文）を old から new へ。new_bmask は1文字ずつの太字（'0'/'1'）。 */
   replace: (id: string, body: { para_from: number; para_to: number; old: string; new: string; old_bmask: string; new_bmask: string }) =>
-    json<{ changed: boolean }>(`/doc/${encodeURIComponent(id)}/replace`, body),
+    json<{ changed: boolean; revision?: string | null }>(`/doc/${encodeURIComponent(id)}/replace`, body),
   comments: (id: string) => json<{ threads: Thread[]; can_comment: boolean }>(`/doc/${encodeURIComponent(id)}/comments`),
   addComment: (id: string, body: { text: string; quote: string; start?: number | null; sentence?: string }) =>
     json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments`, body),

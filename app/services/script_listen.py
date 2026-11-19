@@ -470,11 +470,12 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask=''):
         return {'changed': False}
     reqs = replace_requests(pos, old, new, old_bmask, new_bmask)
     if not reqs: return {'changed': False}
-    _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
-          body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+    done = _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
+                 body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
     if new != old: _log_owner_edit(doc_id, doc.get('title', ''), old, new)
     else: _log_owner_action(doc_id, doc.get('title', ''), action='bold', text=new)
-    return {'changed': True, 'requests': len(reqs)}
+    # The screen tells its own writes from other people's by this revision.
+    return {'changed': True, 'requests': len(reqs), 'revision': (done.get('writeControl') or {}).get('requiredRevisionId')}
 
 
 def delete_requests(doc, u):
