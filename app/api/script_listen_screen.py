@@ -68,6 +68,7 @@ class Replace(BaseModel):
     para_to: int
     old: str = Field(max_length=200_000)
     new: str = Field(max_length=200_000)
+    old_bmask: str = Field('', max_length=200_000)
     new_bmask: str = Field('', max_length=200_000)
 
 
@@ -75,7 +76,7 @@ class Replace(BaseModel):
 async def replace(doc_id: str, body: Replace, user: TokenData = Depends(get_current_user)):
     try:
         return await run_in_threadpool(S.replace, S.doc_id_from(doc_id), body.para_from, body.para_to, body.old, body.new,
-                                       '', body.new_bmask)
+                                       body.old_bmask, body.new_bmask)
     except Exception as exc: _fail(exc)
 
 

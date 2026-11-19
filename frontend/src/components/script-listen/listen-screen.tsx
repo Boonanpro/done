@@ -4,10 +4,12 @@
 // - 台本の正本は Google ドキュメント。読むのは「◎台本」より下の黒い文だけ。サムネ・タイトル・前提と狙いは上に見せる（読まない）。
 // - 再生: 1文ずつの音声を順につなぐ。どの文の後も同じ短い間で、段落や段の切れ目でも止まらない（11/19 本人「全部一気に
 //   再生できるように」）。次の文は今の文の後ろの無音のうちに鳴らし始めるので、文と文の間に待ちが入らない。倍速でも声の高さは同じ。
-// - 直す: 本文はそのまま書き換えられる（四角い入力欄は無い）。PC は文を押すとそこから鳴り、そのまま打てる。スマホは
-//   鳴っている文をもう一度押すと打てる。打ち始めると止まり、Enter か外を押すとドキュメントに書き戻して、その文から鳴らし直す。
-// - コメント: 文字を選ぶか、下の「コメント」で今の文に書く。ドキュメントのコメントとして入るので、ダンが返事と直しをし、
-//   学習にも入る。ダンの直しは提案（緑＝足す、赤の線＝消す）で出て、ここで承認・却下できる。
+// - 直す: 本文全体が Google ドキュメントのように1枚で直せる（11/19 本人「Googleドキュメントと同じくらいの使い勝手にしろ」）。
+//   文や段落ごとの枠は無く、段落をまたいで選べる。Enter で改行、Ctrl+Z で戻す、Ctrl+Shift+Z / Ctrl+Y でやり直す、Ctrl+B で太字。
+//   打つのを止めると、変わった段落だけが自動でドキュメントに入る（editor-dom.ts の diffLines → replace）。
+//   PC は文を押すとそこから鳴る。スマホは文を押すと鳴り、鳴っている文をもう一度押すと打てる。
+// - コメント: 文字を選ぶと右の余白（スマホは選んだ所の下）にコメントの印が出る。ドキュメントのコメントとして入るので、ダンが
+//   返事と直しをし、学習にも入る。ダンの直しは提案（緑＝足す、赤の線＝消す）で出て、ここで承認・却下できる。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, Loader2, MessageSquare, MessageSquarePlus, Pause, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -17,7 +19,8 @@ import {
 } from '@/lib/script-listen-api';
 import { cn } from '@/lib/utils';
 
-import { Composer, SegText, SuggestionCard, ThreadCard } from './listen-cards';
+import { buildHtml, diffLines, extract, getPos, nodeAt, setPos, type Line, type Pos } from './editor-dom';
+import { Composer, SuggestionCard, ThreadCard } from './listen-cards';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 const RATE_KEY = 'script-listen-rate';
@@ -26,10 +29,14 @@ const posKey = (doc: string) => `script-listen-pos-${doc}`;
 // Every clip ends with 0.16 s of silence (+0.03 s kept after the voice). The next clip starts this many seconds of the
 // clip before its end, so only silence is cut and the switch to the next clip happens inside the pause.
 const LEAD = 0.17;
+// Typing that pauses this long is written into the doc.
+const SAVE_AFTER = 900;
 
 type Clip = { url: string; el: HTMLAudioElement };
 type Sheet = { kind: 'threads'; ids: string[] } | { kind: 'suggestion'; id: string } | { kind: 'compose' } | { kind: 'all' } | null;
 type Draft = { quote: string; n: number; start: number | null };
+type Snap = { html: string; pos: Pos | null };
+type AfterBuild = { pos: Pos | null; focus: boolean; play: boolean };
 
 function setPitchKeep(el: HTMLAudioElement) {
   const a = el as HTMLAudioElement & { preservesPitch?: boolean; webkitPreservesPitch?: boolean; mozPreservesPitch?: boolean };
@@ -87,6 +94,12 @@ function placeThreads(units: ListenUnit[], threads: Thread[]) {
   return place;
 }
 
+const unitN = (node: Node | null) => {
+  const el = node && (node.nodeType === 1 ? (node as Element) : node.parentElement);
+  const host = el?.closest('[data-n]') as HTMLElement | null;
+  return host ? Number(host.dataset.n) : null;
+};
+
 export function ListenScreen({ docId }: { docId: string }) {
   const [doc, setDoc] = useState<ListenDoc | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -96,7 +109,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   const [playing, setPlaying] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [armed, setArmed] = useState<number | null>(null);   // touch: the sentence that takes typing (unit n)
+  const [armed, setArmed] = useState(false);    // touch: the text takes typing (after a second tap on the sentence)
   const [threads, setThreads] = useState<Thread[]>([]);
   const [canComment, setCanComment] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
@@ -106,7 +119,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   const [selBtn, setSelBtn] = useState<(Draft & { x: number; y: number }) | null>(null);
   const [wide, setWide] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches);
   const [touch, setTouch] = useState(() => typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches);
-  const [remount, setRemount] = useState(0);    // bumps to throw away typed text the owner cancelled
+  const [build, setBuild] = useState(0);        // bumps to put the doc's text into the surface again
 
   const says = useMemo(() => (doc?.units.filter(u => u.kind === 'say') as SayUnit[]) || [], [doc]);
   const sayIndex = useMemo(() => new Map(says.map((u, i) => [u.n, i])), [says]);
@@ -122,10 +135,22 @@ export function ListenScreen({ docId }: { docId: string }) {
   const token = useRef(0);
   const lastUserScroll = useRef(0);
   const playFromRef = useRef<(i: number, natural?: boolean) => void>(() => {});
-  const editingRef = useRef<{ n: number; dirty: boolean } | null>(null);
-  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const contentRef = useRef<HTMLDivElement | null>(null);
   const marginRef = useRef<HTMLDivElement | null>(null);
+  // The editing surface. React never renders inside it: its HTML is put in once per reading of the doc.
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const baseRef = useRef<Line[]>([]);          // the doc as last written, paragraph by paragraph
+  const dirtyRef = useRef(false);               // typed since the doc was last read (sentences and voice are stale)
+  const typedRef = useRef(false);               // typed since the last click (Space plays until then)
+  const composingRef = useRef(false);
+  const saveTimer = useRef<number | null>(null);
+  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const settling = useRef<Promise<void> | null>(null);
+  const undoRef = useRef<Snap[]>([]);
+  const redoRef = useRef<Snap[]>([]);
+  const lastSnap = useRef({ at: 0, kind: '' });
+  const afterBuild = useRef<AfterBuild | null>(null);
+  const tapAt = useRef<{ x: number; y: number } | null>(null);
   useLayoutEffect(() => {
     saysRef.current = says;
     rateRef.current = rate;
@@ -250,11 +275,6 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   useEffect(() => { playFromRef.current = (i: number, natural?: boolean) => void playFrom(i, natural); }, [playFrom]);
 
-  const toggle = useCallback(() => {
-    if (playingRef.current) { stop(); return; }
-    void playFrom(curRef.current);
-  }, [playFrom, stop]);
-
   // ---------------------------------------------------------------- doc and comments
   const load = useCallback(async (keepText?: { start: number; text: string }) => {
     try {
@@ -303,16 +323,20 @@ export function ListenScreen({ docId }: { docId: string }) {
     return () => window.clearInterval(t);
   }, [busy, loadComments]);
 
+  const editing = () => dirtyRef.current || (!!editorRef.current && document.activeElement === editorRef.current && typedRef.current);
+
   // The doc changed elsewhere (Dan's fix, Google Docs): read it again, unless the owner is typing here.
   useEffect(() => {
     const t = window.setInterval(async () => {
-      if (!doc || editingRef.current || saving || document.hidden) return;
+      if (!doc || editing() || saving || settling.current || document.hidden) return;
       try {
         const { version } = await listenApi.version(docId);
-        if (version && doc.version && version !== doc.version && !editingRef.current) {
+        if (version && doc.version && version !== doc.version && !editing() && !settling.current) {
           const here = saysRef.current[curRef.current];
           const wasPlaying = playingRef.current;
           if (wasPlaying) stop();
+          // Someone else changed the doc: undo here would bring their change back too.
+          undoRef.current = []; redoRef.current = [];
           const d = await load(here ? { start: here.start, text: here.text } : undefined);
           if (d && wasPlaying) void playFrom(curRef.current);
         }
@@ -326,82 +350,12 @@ export function ListenScreen({ docId }: { docId: string }) {
     try { localStorage.setItem(RATE_KEY, String(rate)); } catch { /* ignore */ }
     if (active_.current) { setPitchKeep(active_.current); active_.current.playbackRate = rate; }
   }, [rate]);
-  const changeVoice = (v: string) => {
-    stop();
-    try { localStorage.setItem(VOICE_KEY, v); } catch { /* ignore */ }
-    setVoice(v);
-  };
-
-  useEffect(() => {
-    if (!('mediaSession' in navigator)) return;
-    const ms = navigator.mediaSession;
-    ms.setActionHandler('play', () => { if (!playingRef.current) void playFrom(curRef.current); });
-    ms.setActionHandler('pause', () => stop());
-    ms.setActionHandler('previoustrack', () => void playFrom(Math.max(0, curRef.current - 1)));
-    ms.setActionHandler('nexttrack', () => void playFrom(curRef.current + 1));
-    return () => { for (const a of ['play', 'pause', 'previoustrack', 'nexttrack'] as const) ms.setActionHandler(a, null); };
-  }, [playFrom, stop]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (t && (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT')) return;
-      if (e.code === 'Space') { e.preventDefault(); toggle(); }
-      else if (e.key === 'ArrowRight') { e.preventDefault(); void playFrom(curRef.current + 1); }
-      else if (e.key === 'ArrowLeft') { e.preventDefault(); void playFrom(Math.max(0, curRef.current - 1)); }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [playFrom, toggle]);
-
-  useEffect(() => {
-    if (!says[cur] || Date.now() - lastUserScroll.current < 5000 || editingRef.current) return;
-    document.getElementById(`u-${says[cur].n}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }, [cur, says]);
 
   useEffect(() => () => { token.current += 1; clearTick(); active_.current?.pause(); }, []);
 
-  // ---------------------------------------------------------------- editing in place
-  const save = useCallback((u: SayUnit, el: HTMLElement) => {
-    const next = (el.textContent || '').replace(/\s*\n+\s*/g, '').trim();
-    editingRef.current = null;
-    setArmed(null);
-    if (next === u.text) {
-      setRemount(r => r + 1);
-      return;
-    }
-    const run = async () => {
-      setSaving(true);
-      try {
-        await listenApi.edit(docId, u.text, next, u.start);
-        const d = await load({ start: u.start, text: next });
-        if (d) void playFrom(curRef.current);
-      } catch (e) {
-        toast.error(errorText(e));
-        await load({ start: u.start, text: u.text });
-      } finally {
-        setSaving(false);
-        setRemount(r => r + 1);
-      }
-    };
-    saveChain.current = saveChain.current.then(run, run);
-  }, [docId, load, playFrom]);
-
-  const onSayClick = (i: number, u: SayUnit) => {
-    const sel = window.getSelection();
-    if (sel && !sel.isCollapsed) return;          // selecting words to comment on
-    if (editingRef.current?.dirty) return;
-    if (touch) {
-      if (armed === u.n) return;                   // second tap: the caret goes in, keyboard opens
-      setArmed(u.n);
-      void playFrom(i);
-      return;
-    }
-    if (!(playingRef.current && curRef.current === i)) void playFrom(i);
-  };
-
   // ---------------------------------------------------------------- comments and suggestions
   const units = useMemo(() => doc?.units || [], [doc]);
+  const unitByN = useMemo(() => new Map(units.map(u => [u.n, u])), [units]);
   const visibleThreads = useMemo(() => threads.filter(t => showResolved || !t.resolved), [threads, showResolved]);
   const place = useMemo(() => placeThreads(units, threads), [units, threads]);
   const threadsAt = useMemo(() => {
@@ -417,14 +371,344 @@ export function ListenScreen({ docId }: { docId: string }) {
   const suggestions = doc?.suggestions || [];
   const openCount = threads.filter(t => !t.resolved).length;
 
-  const openDraft = (d: Draft) => {
+  // ---------------------------------------------------------------- the editing surface
+  const html = useMemo(() => buildHtml(units), [units]);
+
+  // Where the voice is and which words have comments: marks on the elements, so the text and the caret stay put.
+  const applyMarks = useCallback(() => {
+    const root = editorRef.current;
+    if (!root) return;
+    root.querySelectorAll('[data-on]').forEach(el => el.removeAttribute('data-on'));
+    root.querySelectorAll('[data-cm]').forEach(el => el.removeAttribute('data-cm'));
+    const u = says[cur];
+    if (u) root.querySelectorAll(`[data-n="${u.n}"]`).forEach(el => el.setAttribute('data-on', ''));
+    threadsAt.forEach((_, n) => root.querySelectorAll(`[data-n="${n}"]`).forEach(el => el.setAttribute('data-cm', '')));
+  }, [says, cur, threadsAt]);
+  useEffect(() => { applyMarks(); }, [applyMarks]);
+
+  const sayAtPos = useCallback((pos: Pos | null) => {
+    const root = editorRef.current;
+    if (!root || !pos) return -1;
+    const at = nodeAt(root, pos);
+    const n = at ? unitN(at.node) : null;
+    if (n == null) return -1;
+    const i = sayIndex.get(n);
+    if (i != null) return i;
+    // A heading, a note or an empty line: the first sentence after it.
+    return saysRef.current.findIndex(s => s.n > n);
+  }, [sayIndex]);
+
+  useLayoutEffect(() => {
+    const root = editorRef.current;
+    if (!root || !doc) return;
+    if (dirtyRef.current) return;   // never throw away what is being typed
+    root.innerHTML = html;
+    baseRef.current = extract(root);
+    applyMarks();
+    const after = afterBuild.current;
+    afterBuild.current = null;
+    if (after?.pos) {
+      const i = sayAtPos(after.pos);
+      if (i >= 0) { curRef.current = i; setCur(i); }
+      if (after.focus) { root.focus({ preventScroll: true }); setPos(root, after.pos); }
+      if (after.play && i >= 0) void playFrom(i);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [html, build]);
+
+  const doSave = useCallback(async () => {
+    const root = editorRef.current;
+    if (!root) return;
+    const now = extract(root);
+    const change = diffLines(baseRef.current, now);
+    if (!change) return;
+    if (change === 'gap') {
+      toast.error('表などをまたいだ直しはここからは入れられないので、ドキュメントから読み直しました。');
+      dirtyRef.current = false; undoRef.current = []; redoRef.current = [];
+      await load();
+      setBuild(b => b + 1);
+      return;
+    }
+    setSaving(true);
+    try {
+      const { next, ...body } = change;
+      await listenApi.replace(docId, body);
+      baseRef.current = next;
+    } catch (e) {
+      toast.error(errorText(e));
+      // The doc did not take it: show the doc as it is (the undo steps no longer match it).
+      dirtyRef.current = false; undoRef.current = []; redoRef.current = [];
+      const here = saysRef.current[curRef.current];
+      await load(here ? { start: here.start, text: here.text } : undefined);
+      setBuild(b => b + 1);
+    } finally {
+      setSaving(false);
+    }
+  }, [docId, load]);
+
+  const flush = useCallback(() => {
+    if (saveTimer.current != null) { window.clearTimeout(saveTimer.current); saveTimer.current = null; }
+    const run = () => doSave();
+    saveChain.current = saveChain.current.then(run, run);
+    return saveChain.current;
+  }, [doSave]);
+
+  const scheduleSave = useCallback(() => {
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null;
+      if (composingRef.current) return;   // the end of the composition saves
+      void flush();
+    }, SAVE_AFTER);
+  }, [flush]);
+
+  const changed = useCallback(() => {
+    dirtyRef.current = true;
+    typedRef.current = true;
+    if (playingRef.current) stop();
+    setSelBtn(null);
+    scheduleSave();
+  }, [scheduleSave, stop]);
+
+  /** Write what is typed, then read the doc again so sentences and voice follow the new text. */
+  const settle = useCallback((opts: { focus: boolean; play: boolean }) => {
+    if (settling.current) return settling.current;
+    const run = (async () => {
+      await flush();
+      if (!dirtyRef.current) return;
+      const root = editorRef.current;
+      const pos = root ? getPos(root) : null;
+      dirtyRef.current = false;
+      typedRef.current = false;
+      afterBuild.current = { pos, focus: opts.focus && !!pos, play: opts.play };
+      const here = saysRef.current[curRef.current];
+      await load(here ? { start: here.start, text: here.text } : undefined);
+      setBuild(b => b + 1);
+    })().finally(() => { settling.current = null; });
+    settling.current = run;
+    return run;
+  }, [flush, load]);
+
+  const toggle = useCallback(async () => {
+    if (playingRef.current) { stop(); return; }
+    if (dirtyRef.current || settling.current) {
+      await settle({ focus: false, play: false });
+    }
+    void playFrom(curRef.current);
+  }, [playFrom, settle, stop]);
+
+  // ---- undo / redo: own history of the surface, so it reaches back past what was already written to the doc
+  const snapshot = useCallback((): Snap => {
+    const root = editorRef.current!;
+    return { html: root.innerHTML, pos: getPos(root) };
+  }, []);
+  const remember = useCallback((kind: string, force = false) => {
+    const now = Date.now();
+    const last = lastSnap.current;
+    if (force || now - last.at > 1000 || kind !== last.kind) {
+      undoRef.current.push(snapshot());
+      if (undoRef.current.length > 200) undoRef.current.shift();
+      redoRef.current = [];
+    }
+    lastSnap.current = { at: now, kind };
+  }, [snapshot]);
+  const restore = useCallback((s: Snap) => {
+    const root = editorRef.current;
+    if (!root) return;
+    root.innerHTML = s.html;
+    if (s.pos) setPos(root, s.pos);
+    applyMarks();
+    lastSnap.current = { at: 0, kind: '' };
+    changed();
+  }, [applyMarks, changed]);
+  const undo = useCallback(() => {
+    const s = undoRef.current.pop();
+    if (!s) return;
+    redoRef.current.push(snapshot());
+    restore(s);
+  }, [restore, snapshot]);
+  const redo = useCallback(() => {
+    const s = redoRef.current.pop();
+    if (!s) return;
+    undoRef.current.push(snapshot());
+    restore(s);
+  }, [restore, snapshot]);
+
+  const openDraft = useCallback((d: Draft) => {
     if (!canComment) { toast.error('お客さんも開けるドキュメントなので、ここからはコメントできません。作業用の台本で書いてください。'); return; }
     stop();
     setDraft(d);
     setSelBtn(null);
     window.getSelection()?.removeAllRanges();
     if (!wide) setSheet({ kind: 'compose' });
+  }, [canComment, stop, wide]);
+
+  const selectionDraft = useCallback((): (Draft & { x: number; y: number }) | null => {
+    const root = editorRef.current;
+    const sel = window.getSelection();
+    if (!root || !sel || sel.isCollapsed || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    if (!root.contains(range.commonAncestorContainer)) return null;
+    const text = sel.toString().replace(/\s+/g, ' ').trim();
+    if (!text) return null;
+    const n = unitN(range.startContainer) ?? unitN(range.startContainer.nextSibling);
+    if (n == null) return null;
+    const u = unitByN.get(n);
+    const rect = range.getBoundingClientRect();
+    const rects = range.getClientRects();
+    const lastRect = rects.length ? rects[rects.length - 1] : rect;
+    return {
+      quote: text.slice(0, 400), n, start: u?.kind === 'say' ? u.start : null,
+      x: wide ? (marginRef.current?.getBoundingClientRect().left ?? rect.right) : Math.min(lastRect.right, window.innerWidth - 56),
+      y: wide ? rect.top : lastRect.bottom,
+    };
+  }, [unitByN, wide]);
+
+  // Native listeners the surface needs (React has no onBeforeInput with inputType).
+  useEffect(() => {
+    const root = editorRef.current;
+    if (!root) return;
+    try { document.execCommand('defaultParagraphSeparator', false, 'p'); } catch { /* old browsers */ }
+    const onBefore = (e: InputEvent) => {
+      if (e.inputType === 'historyUndo') { e.preventDefault(); undo(); return; }
+      if (e.inputType === 'historyRedo') { e.preventDefault(); redo(); return; }
+      if (e.inputType.startsWith('format') && e.inputType !== 'formatBold') { e.preventDefault(); return; }
+      if (composingRef.current || e.isComposing) return;
+      remember(e.inputType.startsWith('delete') ? 'delete' : 'insert');
+    };
+    root.addEventListener('beforeinput', onBefore);
+    return () => root.removeEventListener('beforeinput', onBefore);
+  }, [undo, redo, remember]);
+
+  const onEditorKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const mod = e.ctrlKey || e.metaKey;
+    const k = e.key.toLowerCase();
+    if (e.nativeEvent.isComposing || composingRef.current) return;
+    if (mod && !e.altKey && k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
+    if (mod && !e.altKey && k === 'y') { e.preventDefault(); redo(); return; }
+    if (mod && !e.altKey && k === 'b') {
+      e.preventDefault();
+      remember('format', true);
+      document.execCommand('styleWithCSS', false, 'false');
+      document.execCommand('bold');
+      changed();
+      return;
+    }
+    if (mod && !e.altKey && (k === 'i' || k === 'u')) { e.preventDefault(); return; }   // the doc copy keeps bold only
+    if (mod && e.altKey && k === 'm') {
+      e.preventDefault();
+      const d = selectionDraft();
+      if (d) openDraft(d);
+      return;
+    }
+    if (e.key === 'Enter' && e.shiftKey) {
+      e.preventDefault();
+      remember('insert', true);
+      document.execCommand('insertParagraph');
+      return;
+    }
+    if (e.key === 'Escape') { e.currentTarget.blur(); return; }
+    // Space before any typing still means play / pause (the caret sits in the text after a click to listen).
+    if (e.code === 'Space' && !mod && !typedRef.current && !dirtyRef.current) { e.preventDefault(); void toggle(); }
   };
+
+  const onEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const t = e.target as HTMLElement;
+    const sug = t.closest('[data-sug]') as HTMLElement | null;
+    if (sug?.dataset.sug) { pickSuggestion(sug.dataset.sug); return; }
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;           // selecting words
+    const n = unitN(t);
+    if (n == null) return;
+    const u = unitByN.get(n);
+    const i = sayIndex.get(n);
+    if (touch && armed) return;                    // typing: a tap only moves the caret
+    if (touch) {
+      const list = threadsAt.get(n);
+      if (list?.length) { pickThreads(list); return; }
+      if (u?.kind === 'heading') {
+        const first = says.findIndex(s => s.n > n);
+        if (first >= 0) void playFrom(first);
+        return;
+      }
+      if (i != null && i !== curRef.current) { void playFrom(i); return; }
+      // The sentence that is being read (or a note / an empty line): tapping again types into it.
+      stop();
+      tapAt.current = { x: e.clientX, y: e.clientY };
+      setArmed(true);
+      return;
+    }
+    typedRef.current = false;
+    const list = threadsAt.get(n);
+    if (list?.length) setActive(list[0].id);
+    if (dirtyRef.current || settling.current) {
+      // Typed before: write it, read the doc again, then play from the clicked place.
+      void settle({ focus: true, play: true });
+      return;
+    }
+    if (u?.kind === 'heading') {
+      const first = says.findIndex(s => s.n > n);
+      if (first >= 0) void playFrom(first);
+      return;
+    }
+    if (i != null && !(playingRef.current && curRef.current === i)) void playFrom(i);
+  };
+
+  // Touch: after the second tap, put the caret where the finger was and open the keyboard.
+  useLayoutEffect(() => {
+    const root = editorRef.current;
+    if (!armed || !root) return;
+    root.focus({ preventScroll: true });
+    const p = tapAt.current;
+    const doc_ = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+    const r = p && doc_.caretRangeFromPoint?.(p.x, p.y);
+    if (r && root.contains(r.startContainer)) { const s = window.getSelection(); s?.removeAllRanges(); s?.addRange(r); }
+  }, [armed]);
+
+  // The comment mark next to selected words.
+  useEffect(() => {
+    const onSel = () => setSelBtn(selectionDraft());
+    document.addEventListener('selectionchange', onSel);
+    return () => document.removeEventListener('selectionchange', onSel);
+  }, [selectionDraft]);
+
+  // Arrow keys and Space outside the text.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT')) return;
+      if (e.code === 'Space') { e.preventDefault(); void toggle(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); void playFrom(curRef.current + 1); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); void playFrom(Math.max(0, curRef.current - 1)); }
+      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && undoRef.current.length) {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [playFrom, toggle, undo, redo]);
+
+  useEffect(() => {
+    if (!says[cur] || Date.now() - lastUserScroll.current < 5000 || editing()) return;
+    document.getElementById(`u-${says[cur].n}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [cur, says]);
+
+  const changeVoice = (v: string) => {
+    stop();
+    try { localStorage.setItem(VOICE_KEY, v); } catch { /* ignore */ }
+    setVoice(v);
+  };
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+    const ms = navigator.mediaSession;
+    ms.setActionHandler('play', () => { if (!playingRef.current) void toggle(); });
+    ms.setActionHandler('pause', () => stop());
+    ms.setActionHandler('previoustrack', () => void playFrom(Math.max(0, curRef.current - 1)));
+    ms.setActionHandler('nexttrack', () => void playFrom(curRef.current + 1));
+    return () => { for (const a of ['play', 'pause', 'previoustrack', 'nexttrack'] as const) ms.setActionHandler(a, null); };
+  }, [playFrom, stop, toggle]);
 
   const sendComment = async (text: string) => {
     if (!draft) return;
@@ -444,12 +728,14 @@ export function ListenScreen({ docId }: { docId: string }) {
   const sendReply = (t: Thread) => async (text: string) => {
     try { await listenApi.reply(docId, t.id, text); await loadComments(); } catch (e) { toast.error(errorText(e)); throw e; }
   };
-  const settle = (t: Thread) => async (reopen: boolean) => {
+  const settleThread = (t: Thread) => async (reopen: boolean) => {
     try { await listenApi.settle(docId, t.id, reopen); await loadComments(); } catch (e) { toast.error(errorText(e)); }
   };
   const decide = useCallback(async (s: Suggestion, accept: boolean) => {
     try {
+      await settle({ focus: false, play: false });
       await listenApi.decide(docId, s.id, accept);
+      undoRef.current = []; redoRef.current = [];
       const here = saysRef.current[curRef.current];
       await load(here ? { start: here.start, text: here.text } : undefined);
       setSheet(null);
@@ -458,38 +744,20 @@ export function ListenScreen({ docId }: { docId: string }) {
       toast.error(errorText(e));
       await load();
     }
-  }, [docId, load]);
+  }, [docId, load, settle]);
 
   const focusUnit = useCallback((n: number) => {
     lastUserScroll.current = Date.now();
     document.getElementById(`u-${n}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }, []);
-  const pickSuggestion = (id: string) => {
+  function pickSuggestion(id: string) {
     setActive(id);
     if (!wide) setSheet({ kind: 'suggestion', id });
-  };
-  const pickThreads = (list: Thread[]) => {
+  }
+  function pickThreads(list: Thread[]) {
     setActive(list[0]?.id || null);
     if (!wide) setSheet({ kind: 'threads', ids: list.map(t => t.id) });
-  };
-
-  // A floating 「コメント」 button next to selected words.
-  useEffect(() => {
-    const onSel = () => {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || !sel.rangeCount) { setSelBtn(null); return; }
-      const text = sel.toString().replace(/\s+/g, ' ').trim();
-      const node = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode?.parentElement;
-      const host = node?.closest('[data-n]') as HTMLElement | null;
-      if (!text || !host || !contentRef.current?.contains(host)) { setSelBtn(null); return; }
-      const n = Number(host.dataset.n);
-      const u = units.find(x => x.n === n);
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
-      setSelBtn({ quote: text.slice(0, 400), n, start: u?.kind === 'say' ? u.start : null, x: rect.right, y: rect.top });
-    };
-    document.addEventListener('selectionchange', onSel);
-    return () => document.removeEventListener('selectionchange', onSel);
-  }, [units]);
+  }
 
   // Cards in the right margin sit beside the words they are about (PC).
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
@@ -527,143 +795,6 @@ export function ListenScreen({ docId }: { docId: string }) {
     return sec / rate;
   }, [cur, rate, says]);
 
-  if (loadError && !doc) {
-    return <div className="p-6 text-[15px] text-red-700">{loadError}</div>;
-  }
-  if (!doc) {
-    return <div className="flex items-center gap-2 p-6 text-sm text-stone-500"><Loader2 className="h-4 w-4 animate-spin" />台本を読んでいます…</div>;
-  }
-
-  // ---------------------------------------------------------------- layout of the text
-  const title = units.find(u => u.kind === 'title');
-  const top: ListenUnit[] = [];
-  const body: ListenUnit[] = [];
-  let inScript = !units.some(u => u.kind === 'heading' && u.level === 1 && u.text.startsWith('◎台本'));
-  for (const u of units) {
-    if (u.kind === 'title') continue;
-    if (u.kind === 'heading' && u.level === 1) { inScript = u.text.startsWith('◎台本'); if (!inScript) top.push(u); continue; }
-    (inScript ? body : top).push(u);
-  }
-  // Sentences of one paragraph flow together like the doc.
-  type Block = { kind: 'para'; key: string; items: ListenUnit[] } | { kind: 'one'; key: string; u: ListenUnit };
-  const blocks: Block[] = [];
-  for (const u of body) {
-    const para = (u.kind === 'say' || u.kind === 'note' || u.kind === 'gone') ? u.para : undefined;
-    const last = blocks[blocks.length - 1];
-    if (para != null && u.kind !== 'gone' && last?.kind === 'para' && (last.items[0] as { para?: number }).para === para) last.items.push(u);
-    else if (para != null && u.kind !== 'gone') blocks.push({ kind: 'para', key: `p${u.n}`, items: [u] });
-    else blocks.push({ kind: 'one', key: `u${u.n}`, u });
-  }
-
-  const commentMark = (n: number) => {
-    const list = threadsAt.get(n);
-    if (!list?.length) return null;
-    return (
-      <button
-        type="button"
-        contentEditable={false}
-        onClick={e => { e.stopPropagation(); pickThreads(list); }}
-        className="mx-0.5 inline-flex translate-y-[-1px] items-center gap-0.5 rounded-full bg-yellow-300/80 px-1.5 align-middle text-[11px] font-semibold text-stone-800"
-        aria-label="コメント"
-      >
-        <MessageSquare className="h-3 w-3" />{list.length > 1 ? list.length : ''}
-      </button>
-    );
-  };
-
-  const renderUnit = (u: ListenUnit) => {
-    const marked = threadsAt.has(u.n);
-    if (u.kind === 'say') {
-      const i = sayIndex.get(u.n) ?? 0;
-      const on = i === cur;
-      const editable = !u.locked && !saving && (!touch || armed === u.n);
-      const hasSug = u.segs?.some(s => s.ins || s.del);
-      return (
-        <span key={`${u.n}-${u.key}-${remount}`} className="inline">
-          <span
-            id={`u-${u.n}`}
-            data-n={u.n}
-            contentEditable={editable}
-            suppressContentEditableWarning
-            spellCheck={false}
-            onClick={() => onSayClick(i, u)}
-            onInput={() => {
-              // Only typing counts as editing: a click to listen leaves the caret here, and that must not stop the
-              // doc from being read again or the screen from following the voice.
-              editingRef.current = { n: u.n, dirty: true };
-              if (playingRef.current) stop();
-            }}
-            onBlur={e => { if (editingRef.current?.dirty) save(u, e.currentTarget); else editingRef.current = null; }}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.blur(); }
-              // Space before any typing still means play / pause (the caret sits here after a click to listen).
-              if (e.code === 'Space' && !e.nativeEvent.isComposing && !editingRef.current?.dirty) { e.preventDefault(); toggle(); }
-              if (e.key === 'Escape') {
-                editingRef.current = null;
-                setRemount(r => r + 1);
-                e.currentTarget.blur();
-              }
-            }}
-            className={cn(
-              'rounded-[3px] px-[1px] py-0.5 outline-none transition-colors [box-decoration-break:clone]',
-              u.bold && 'font-bold',
-              on ? 'bg-amber-200/80 text-stone-950' : marked ? 'bg-yellow-100' : 'hover:bg-stone-200/50',
-              active && u.segs?.some(s => s.ins === active || s.del === active) && 'ring-2 ring-emerald-400',
-              editable && 'focus:bg-white focus:ring-2 focus:ring-amber-400',
-              touch && armed === u.n && 'ring-1 ring-amber-400',
-            )}
-          >
-            {hasSug ? <SegText segs={u.segs || []} onSuggestion={pickSuggestion} /> : u.text}
-          </span>
-          {commentMark(u.n)}{' '}
-        </span>
-      );
-    }
-    if (u.kind === 'note') {
-      return (
-        <span key={u.n} id={`u-${u.n}`} data-n={u.n} className={cn('text-[14px] text-sky-700/80', marked && 'bg-yellow-100')}>
-          {u.segs ? <SegText segs={u.segs} onSuggestion={pickSuggestion} /> : u.text}{commentMark(u.n)}{' '}
-        </span>
-      );
-    }
-    return null;
-  };
-
-  const renderBlock = (b: Block) => {
-    if (b.kind === 'para') {
-      const onlyNotes = b.items.every(u => u.kind === 'note');
-      return <p key={b.key} className={cn('my-2.5 text-[16.5px] leading-[1.95]', onlyNotes && 'text-[14px] leading-relaxed')}>{b.items.map(renderUnit)}</p>;
-    }
-    const u = b.u;
-    if (u.kind === 'heading') {
-      const firstSay = says.findIndex(s => s.n > u.n);
-      return (
-        <div
-          key={b.key}
-          id={`u-${u.n}`}
-          data-n={u.n}
-          onClick={() => firstSay >= 0 && void playFrom(firstSay)}
-          className={cn(
-            'cursor-pointer',
-            u.level === 2 ? 'mb-2 mt-8 border-b border-stone-300 pb-1 text-[17px] font-bold text-stone-800' : 'mb-1 mt-5 text-[15px] font-semibold text-amber-800',
-            threadsAt.has(u.n) && 'bg-yellow-100',
-          )}
-        >
-          {u.segs?.some(s => s.ins || s.del) ? <SegText segs={u.segs} onSuggestion={pickSuggestion} /> : u.text}{commentMark(u.n)}
-        </div>
-      );
-    }
-    if (u.kind === 'gone') {
-      return (
-        <p key={b.key} id={`u-${u.n}`} data-n={u.n} className="my-2.5 text-[16px] leading-[1.95]">
-          <SegText segs={u.segs} onSuggestion={pickSuggestion} />
-        </p>
-      );
-    }
-    if (u.kind === 'note' || u.kind === 'say') return <p key={b.key} className="my-2">{renderUnit(u)}</p>;
-    return null;
-  };
-
   const sheetThreads = sheet?.kind === 'threads' ? threads.filter(t => sheet.ids.includes(t.id)) : sheet?.kind === 'all' ? visibleThreads : [];
   const sheetSuggestion = sheet?.kind === 'suggestion' ? suggestions.find(s => s.id === sheet.id) : undefined;
 
@@ -672,7 +803,7 @@ export function ListenScreen({ docId }: { docId: string }) {
       <header className="shrink-0 border-b border-stone-200 bg-white/90 px-3 py-2 backdrop-blur sm:px-6">
         <div className="mx-auto flex max-w-6xl items-center gap-2">
           <Volume2 className="h-4 w-4 shrink-0 text-amber-700" />
-          <div className="min-w-0 flex-1 truncate text-[14px] font-semibold">{doc.title}</div>
+          <div className="min-w-0 flex-1 truncate text-[14px] font-semibold">{doc?.title || ''}</div>
           <button
             type="button"
             onClick={() => (wide ? setShowResolved(v => !v) : setSheet({ kind: 'all' }))}
@@ -687,17 +818,19 @@ export function ListenScreen({ docId }: { docId: string }) {
             onChange={e => changeVoice(e.target.value)}
             className="max-w-[8rem] rounded-md border border-stone-300 bg-white px-1.5 py-1 text-[12px]"
           >
-            {doc.voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+            {(doc?.voices || []).map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
           </select>
-          <a
-            href={`https://docs.google.com/document/d/${doc.doc_id}/edit`}
-            target="_blank"
-            rel="noreferrer"
-            aria-label="ドキュメント"
-            className="flex shrink-0 items-center gap-1 rounded-md border border-stone-300 px-2 py-1 text-[12px] text-stone-700"
-          >
-            <ExternalLink className="h-3.5 w-3.5" /><span className="hidden sm:inline">ドキュメント</span>
-          </a>
+          {doc && (
+            <a
+              href={`https://docs.google.com/document/d/${doc.doc_id}/edit`}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="ドキュメント"
+              className="flex shrink-0 items-center gap-1 rounded-md border border-stone-300 px-2 py-1 text-[12px] text-stone-700"
+            >
+              <ExternalLink className="h-3.5 w-3.5" /><span className="hidden sm:inline">ドキュメント</span>
+            </a>
+          )}
         </div>
       </header>
 
@@ -708,45 +841,56 @@ export function ListenScreen({ docId }: { docId: string }) {
       >
         <div className="mx-auto flex max-w-6xl gap-6 px-3 pb-44 pt-4 sm:px-6">
           <div ref={contentRef} className="relative min-w-0 max-w-3xl flex-1">
-            {title && title.kind === 'title' && <h1 className="mb-3 text-[20px] font-bold leading-snug">{title.text}</h1>}
-            {top.length > 0 && (
-              <section className="mb-6 rounded-lg border border-stone-200 bg-white/80 px-4 py-3">
-                {top.map(u => {
-                  if (u.kind === 'image') return <img key={u.n} src={u.src} alt="サムネ" referrerPolicy="no-referrer" className="my-2 w-full max-w-md rounded-md border border-stone-200" />;
-                  if (u.kind === 'heading') {
-                    return (
-                      <div key={u.n} id={`u-${u.n}`} data-n={u.n} className="mt-3 flex items-center gap-2 text-[14px] font-bold text-stone-700 first:mt-0">
-                        {u.text}<span className="rounded bg-stone-100 px-1.5 py-0.5 text-[10px] font-normal text-stone-500">読みません</span>{commentMark(u.n)}
-                      </div>
-                    );
-                  }
-                  if (u.kind === 'note' || u.kind === 'gone') {
-                    return (
-                      <div key={u.n} id={`u-${u.n}`} data-n={u.n} className={cn('my-1 text-[14px] leading-relaxed text-stone-700', threadsAt.has(u.n) && 'bg-yellow-100')}>
-                        {u.segs ? <SegText segs={u.segs} onSuggestion={pickSuggestion} /> : u.text}{commentMark(u.n)}
-                      </div>
-                    );
-                  }
-                  return null;
-                })}
-              </section>
+            {loadError && !doc && <div className="p-6 text-[15px] text-red-700">{loadError}</div>}
+            {!doc && !loadError && (
+              <div className="flex items-center gap-2 p-6 text-sm text-stone-500"><Loader2 className="h-4 w-4 animate-spin" />台本を読んでいます…</div>
             )}
-            {blocks.map(renderBlock)}
+            <div
+              ref={editorRef}
+              data-testid="script-editor"
+              contentEditable={!!doc && (!touch || armed)}
+              suppressContentEditableWarning
+              spellCheck={false}
+              onInput={() => changed()}
+              onKeyDown={onEditorKey}
+              onClick={onEditorClick}
+              onCompositionStart={() => { composingRef.current = true; remember('compose'); }}
+              onCompositionEnd={() => { composingRef.current = false; changed(); }}
+              onPaste={e => {
+                e.preventDefault();
+                const text = e.clipboardData.getData('text/plain');
+                if (!text) return;
+                remember('paste', true);
+                document.execCommand('insertText', false, text.replace(/\r\n?/g, '\n'));
+              }}
+              onBlur={() => {
+                if (touch) setArmed(false);
+                if (dirtyRef.current) void settle({ focus: false, play: false });
+              }}
+              className={cn(
+                'whitespace-pre-wrap break-words outline-none caret-stone-900',
+                '[&_[data-on]]:rounded-[3px] [&_[data-on]]:bg-amber-200/70 [&_[data-on]]:[box-decoration-break:clone]',
+                '[&_[data-cm]]:bg-yellow-100 [&_[data-on][data-cm]]:bg-amber-200/70',
+                !doc && 'hidden',
+              )}
+            />
             {unplaced.length > 0 && (
               <div className="mt-10 border-t border-stone-300 pt-3">
                 <div className="mb-2 text-[13px] font-semibold text-stone-600">本文の場所が分からないコメント</div>
                 <div className="space-y-2">
                   {unplaced.map(t => (
                     <ThreadCard key={t.id} thread={t} active={active === t.id} onFocus={() => setActive(t.id)}
-                      onReply={sendReply(t)} onSettle={settle(t)} canWrite={canComment} />
+                      onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} />
                   ))}
                 </div>
               </div>
             )}
-            <div className="mt-8 text-center text-[12px] text-stone-400">
-              {touch ? '文を押すとそこから聞けます。もう一度押すと直せます。' : '文を押すとそこから聞けます。そのまま打つと直せて、Enter でドキュメントに入ります（文を全部消すと、その文が消えます）。'}
-              文字を選ぶとコメントできます。
-            </div>
+            {doc && (
+              <div className="mt-8 text-center text-[12px] text-stone-400">
+                {touch ? '文を押すとそこから聞けます。鳴っている文をもう一度押すと直せます。' : '文を押すとそこから聞けます。Google ドキュメントと同じように直せて、打つのを止めると自動でドキュメントに入ります。'}
+                文字を選ぶとコメントできます。
+              </div>
+            )}
           </div>
 
           {wide && (
@@ -761,7 +905,7 @@ export function ListenScreen({ docId }: { docId: string }) {
                 <div key={t.id} ref={el => { if (el) cardRefs.current.set(t.id, el); else cardRefs.current.delete(t.id); }}
                   data-anchor={place.get(t.id)} className={cn('absolute inset-x-0', active === t.id && 'z-10')}>
                   <ThreadCard thread={t} active={active === t.id} onFocus={() => { setActive(t.id); focusUnit(place.get(t.id)!); }}
-                    onReply={sendReply(t)} onSettle={settle(t)} canWrite={canComment} />
+                    onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} />
                 </div>
               ))}
               {suggestions.map(s => (
@@ -778,12 +922,16 @@ export function ListenScreen({ docId }: { docId: string }) {
       {selBtn && (
         <button
           type="button"
+          aria-label="コメントを追加"
+          title="コメントを追加（Ctrl+Alt+M）"
           onMouseDown={e => e.preventDefault()}
           onClick={() => openDraft({ quote: selBtn.quote, n: selBtn.n, start: selBtn.start })}
-          style={{ left: Math.min(selBtn.x + 6, window.innerWidth - 110), top: Math.max(selBtn.y - 40, 60) }}
-          className="fixed z-30 flex items-center gap-1 rounded-full bg-stone-900 px-3 py-1.5 text-[13px] font-semibold text-white shadow-lg"
+          style={wide
+            ? { left: selBtn.x + 4, top: Math.max(selBtn.y - 4, 56) }
+            : { left: Math.max(8, selBtn.x - 40), top: Math.min(selBtn.y + 10, window.innerHeight - 190) }}
+          className="fixed z-30 flex h-9 w-9 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-700 shadow-md hover:bg-stone-50"
         >
-          <MessageSquarePlus className="h-4 w-4" />コメント
+          <MessageSquarePlus className="h-5 w-5" />
         </button>
       )}
 
@@ -813,7 +961,7 @@ export function ListenScreen({ docId }: { docId: string }) {
             {sheetThreads.map(t => (
               <ThreadCard key={t.id} thread={t} active={active === t.id || sheet.kind === 'threads'}
                 onFocus={() => { setActive(t.id); const n = place.get(t.id); if (n != null) focusUnit(n); }}
-                onReply={sendReply(t)} onSettle={settle(t)} canWrite={canComment} />
+                onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} />
             ))}
             {sheet.kind === 'all' && !sheetThreads.length && !suggestions.length && <div className="py-4 text-center text-[13px] text-stone-500">コメントはありません</div>}
           </div>
@@ -831,22 +979,13 @@ export function ListenScreen({ docId }: { docId: string }) {
             </span>
           </div>
           <div className="mt-1.5 flex items-center justify-center gap-3">
-            <button
-              type="button"
-              aria-label="今の文にコメント"
-              disabled={!says[cur]}
-              onClick={() => { const u = says[cur]; if (u) openDraft({ quote: u.text, n: u.n, start: u.start }); }}
-              className="flex flex-col items-center rounded-lg px-2 py-1 text-[10px] text-stone-600 active:bg-stone-200 disabled:opacity-40"
-            >
-              <MessageSquarePlus className="h-5 w-5" />コメント
-            </button>
             <button type="button" aria-label="前の文" onClick={() => void playFrom(Math.max(0, cur - 1))} className="rounded-full p-2.5 text-stone-700 active:bg-stone-200">
               <SkipBack className="h-6 w-6" />
             </button>
             <button
               type="button"
               aria-label={playing ? '止める' : '聞く'}
-              onClick={toggle}
+              onClick={() => void toggle()}
               disabled={!says.length}
               className="flex h-14 w-14 items-center justify-center rounded-full bg-amber-600 text-white shadow active:bg-amber-700 disabled:opacity-40"
             >
@@ -855,7 +994,6 @@ export function ListenScreen({ docId }: { docId: string }) {
             <button type="button" aria-label="次の文" onClick={() => void playFrom(cur + 1)} className="rounded-full p-2.5 text-stone-700 active:bg-stone-200">
               <SkipForward className="h-6 w-6" />
             </button>
-            <div className="w-[52px]" />
           </div>
           <div className="mt-2 flex items-center justify-center gap-1 overflow-x-auto">
             {RATES.map(r => (

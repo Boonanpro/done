@@ -215,7 +215,7 @@ def outline(doc):
                               **({'section': 'top'} if mode != 'script' else {})})
             continue
         if style == 'TITLE' or style == 'HEADING_1':
-            units.append({'kind': 'title', 'text': text}); continue
+            units.append({'kind': 'title', 'text': text, 'segs': _segs(chars), 'para': pi}); continue
         if text.startswith('◎'):
             if text.startswith(SCRIPT_HEADING): mode = 'script'
             elif any(text.startswith(h) for h in SKIP_HEADINGS): mode = 'before' if seen_script else 'skip'
@@ -224,7 +224,7 @@ def outline(doc):
                 # As a top-level heading the screen filed everything after it under 「読みません」 (11/18).
                 section = text
                 units.append({'kind': 'heading', 'level': 3, 'text': text, 'read': True, 'segs': _segs(chars), 'para': pi}); continue
-            units.append({'kind': 'heading', 'level': 1, 'text': text, 'read': mode == 'script'}); continue
+            units.append({'kind': 'heading', 'level': 1, 'text': text, 'read': mode == 'script', 'segs': _segs(chars), 'para': pi}); continue
         if mode != 'script':
             units.append({'kind': 'note', 'text': text, 'section': 'top', 'segs': _segs(chars), 'para': pi}); continue
         if style in ('HEADING_2', 'HEADING_3') or re.match(r'^【\d+】', text) or text.startswith('▼'):
@@ -380,18 +380,28 @@ def _para_span(doc, para_from, para_to):
     every character plus the end, and their boldness. None when one of them is not a plain paragraph."""
     content = doc.get('body', {}).get('content', [])
     if not (0 <= para_from <= para_to < len(content)): return None
-    text, pos, bold, locked = [], [], [], False
+    text, pos, bold, locked = [], [], [], []
     for pi in range(para_from, para_to + 1):
         el = content[pi]
         p = el.get('paragraph')
         if p is None: return None
         if pi > para_from:
-            text.append('\n'); pos.append(content[pi - 1]['endIndex'] - 1); bold.append('0')
+            text.append('\n'); pos.append(content[pi - 1]['endIndex'] - 1); bold.append('0'); locked.append(False)
         for idx, ch, f in _chars(p):
-            if f['ins'] or f['del']: locked = True
+            locked.append(bool(f['ins'] or f['del']))
             text.append(ch); pos.append(idx); bold.append('1' if f['bold'] else '0')
     pos.append(content[para_to]['endIndex'] - 1)
     return ''.join(text), pos, ''.join(bold), locked
+
+
+def touches_suggestion(old, new, locked):
+    """Whether turning ``old`` into ``new`` changes a character of a suggestion (or types inside one). Text next to a
+    suggestion can still be changed, like in the doc."""
+    for tag, i1, i2, _, _ in SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag == 'equal': continue
+        if any(locked[i1:i2]): return True
+        if i1 == i2 and 0 < i1 < len(old) and locked[i1 - 1] and locked[i1]: return True
+    return False
 
 
 def replace_requests(pos, old, new, old_bmask, new_bmask):
@@ -448,9 +458,11 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask=''):
     if not span or span[0] != old:
         raise ListenError('ドキュメントの方でここが直されていたので、ドキュメントから読み直しました。', 409)
     _, pos, doc_bmask, locked = span
-    if locked:
-        raise ListenError('ここには提案（提案モードの直し）が入っているので、直せません。先に提案を承認か却下してください。', 409)
-    old_bmask = doc_bmask
+    if touches_suggestion(old, new, locked):
+        raise ListenError('提案（提案モードの直し）の文字は直せません。先に提案を承認か却下してください。', 409)
+    # Boldness is compared on the screen's own terms (bold marks, not the heading style), so only what the owner
+    # switched with Ctrl+B is written.
+    if len(old_bmask or '') != len(old): old_bmask = doc_bmask
     new_bmask = (new_bmask or '')[:len(new)].ljust(len(new), '0')
     if new == old and new_bmask == old_bmask: return {'changed': False}
     content = doc['body']['content']
