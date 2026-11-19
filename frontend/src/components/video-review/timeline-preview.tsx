@@ -56,6 +56,8 @@ type Props = {
   onCaptionMove?: (clipId: string, nudge: { x: number; y: number }) => void;
   /** 再生の速さ（1 = 等倍。L キーで 2・3…）。音は声の高さを変えずに速くする */
   rate?: number;
+  /** この速さ以上は鍵のコマだけを拾って見せる（スマホは4、PC は5） */
+  skimFrom?: number;
 };
 
 type VisualClip = {
@@ -259,14 +261,15 @@ const BLEND_OPS: Record<string, GlobalCompositeOperation> = {
 // プレビューを描く画素の倍率の上限: 長い辺 1920px まで（書き出しの 1080p と同じ細かさ）
 const MAX_CANVAS_LONG_SIDE = 1920;
 
-export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange, onPick, onPoint, onCaptionMove, rate: rateProp = 1 }: Props) {
+export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange, onPick, onPoint, onCaptionMove, rate: rateProp = 1, skimFrom = 5 }: Props) {
   const rate = Number.isFinite(rateProp) && rateProp > 0 ? rateProp : 1;
   const rateRef = useRef(rate);
   rateRef.current = rate;
-  // 5倍以上は、動画の要素を速回しせず、鍵のコマ（画面用の写しで0.5秒おき）だけを拾って見せる。
+  // skimFrom 倍以上は、動画の要素を速回しせず、鍵のコマ（画面用の写しで0.5秒おき）だけを拾って見せる。
   // 要素を5倍・10倍で回すと解読が追いつかず、絵がほとんど止まったままになった（2026-11-19 スマホの幅で測った）。
+  // スマホは4倍から（S24 で要素を4〜4.9倍で回すと、映像が声から最大0.8秒遅れ、12秒に1.4秒止まった）。
   // PC の L（4倍まで）は今までどおり要素を回す。
-  const SKIM_KEYS_RATE = 5;
+  const SKIM_KEYS_RATE = skimFrom;
   const skimKeysRef = useRef(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
