@@ -13,7 +13,7 @@
 // which cached frame is drawn where — it never reloads media, so no black, no stall, and
 // scrubbing is frame-accurate.
 
-import { createFile, DataStream, type MP4File, type MP4ArrayBuffer } from 'mp4box';
+import { readMp4Index } from './mp4-index';
 import { readLocalRange } from './local-media';
 import { mediaFetch } from './media-route';
 import { perfLog } from '@/lib/perf-log';
@@ -160,35 +160,24 @@ export class AssetFrameSource {
     const idx = new Uint8Array((ftyp?.byteLength || 0) + moov.byteLength);
     if (ftyp) idx.set(ftyp, 0);
     idx.set(moov, ftyp?.byteLength || 0);
-    const ab = idx.buffer as MP4ArrayBuffer;
-    ab.fileStart = 0;
-    const file: MP4File = createFile();
-    const trackInfo = await new Promise<{ id: number; codec: string }>((resolve, reject) => {
-      file.onError = (e) => reject(new Error(String(e)));
-      file.onReady = (info) => {
-        const vt = info.videoTracks?.[0];
-        if (!vt) return reject(new Error('no video track'));
-        this.duration = info.duration / (info.timescale || 1);
-        this.width = vt.track_width;
-        this.height = vt.track_height;
-        this.description = extractDescription(file, vt.id);
-        resolve({ id: vt.id, codec: vt.codec });
-      };
-      file.appendBuffer(ab);
-      file.flush();
-      setTimeout(() => reject(new Error('moov parse timeout')), 5000);
-    });
-    this.codec = trackInfo.codec;
-    for (const s of file.getTrackSamplesInfo(trackInfo.id) || []) {
-      this.samples.push({
-        cts: s.cts / s.timescale, dur: s.duration / s.timescale,
-        ctsUs: Math.round((s.cts / s.timescale) * 1e6), isSync: s.is_sync,
-        offset: s.offset, size: s.size,
-      });
+    // 目次を読むのは裏の処理で（長い録画では画面が0.2〜0.4秒止まっていた。2026-11-19）
+    const ix = await readMp4Index(idx, 'video');
+    if (ix.kind !== 'video') throw new Error('no video track');
+    this.duration = ix.duration;
+    this.width = ix.width;
+    this.height = ix.height;
+    this.description = ix.description;
+    this.codec = ix.codec;
+    const n = ix.cts.length;
+    const samples: Sample[] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const cts = ix.cts[i];
+      samples[i] = { cts, dur: ix.dur[i], ctsUs: Math.round(cts * 1e6), isSync: ix.sync[i] === 1, offset: ix.offset[i], size: ix.size[i] };
     }
+    this.samples = samples;
 
     if (!this.samples.length) throw new Error('no samples');
-    this.presOrder = this.samples.map((_, i) => i).sort((a, b) => this.samples[a].cts - this.samples[b].cts);
+    this.presOrder = Array.from(ix.presOrder); // 時刻順の並べ替えも裏で済ませてある
     this.samples.forEach((s, i) => this.ctsToIndex.set(s.ctsUs, i));
     if (!this.duration) {
       const last = this.samples[this.presOrder[this.presOrder.length - 1]];
@@ -579,21 +568,6 @@ export class AssetFrameSource {
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-// Extract the codec-private description (avcC / hvcC / ...) mp4box parsed, stripped of its
-// 8-byte box header — exactly what VideoDecoderConfig.description wants for avc1/hvc1.
-function extractDescription(file: MP4File, trackId: number): Uint8Array | undefined {
-  const trak = file.getTrackById(trackId);
-  for (const entry of trak.mdia.minf.stbl.stsd.entries) {
-    const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
-    if (box) {
-      const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
-      box.write(stream);
-      return new Uint8Array(stream.buffer, 8); // drop box size+type header
-    }
-  }
-  return undefined;
 }
 
 // ---------------------------------------------------------------------------

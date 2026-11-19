@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { ArrowLeft, ChevronDown, ChevronRight, Clapperboard, Film, Folder, FolderOpen, Image as ImageIcon, Loader2, Music, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -144,6 +144,8 @@ export function ProductionWorkspace({
   const [assets, setAssets] = useState<ProductionAsset[]>([]);
   const [contents, setContents] = useState<ProductionContent[]>([]);
   const [selectedContent, setSelectedContent] = useState<ProductionContent | null>(null);
+  const [opening, startOpening] = useTransition();
+  const [openingContentId, setOpeningContentId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   // If we deep-linked into a content (refresh while editing), show a loading state until the
   // content loads — NOT the project/material list, which used to flash for a moment first.
@@ -868,8 +870,11 @@ export function ProductionWorkspace({
   const folders = ASSET_FOLDERS
     .map((folder) => ({ ...folder, items: assets.filter(folder.test) }))
     .filter((folder) => folder.items.length > 0);
+  // 作品を開く: 押した札にすぐ「開いています」を出し、エディターの組み立ては画面を止めずに進める
+  // （長い作品では組み立てに0.3〜1秒かかり、その間クリックしたまま画面が固まっていた。2026-11-19）
   const openContent = (content: ProductionContent) => {
-    setSelectedContent(content);
+    setOpeningContentId(content.id);
+    startOpening(() => setSelectedContent(content));
     setUrlContentId(content.id);
   };
   // 「新規作成」: 空のタイムラインの作品を作ってすぐ開く。右の「ダンと制作」で話しながら組み立てる
@@ -1033,8 +1038,13 @@ export function ProductionWorkspace({
                 onClick={() => openContent(content)}
                 className="overflow-hidden rounded-lg border border-border text-left hover:border-primary"
               >
-                <span className="flex aspect-video items-center justify-center overflow-hidden bg-muted">
+                <span className="relative flex aspect-video items-center justify-center overflow-hidden bg-muted">
                   <ContentCover roomId={roomId} content={content} fallback={<Film className="h-6 w-6 text-muted-foreground" />} />
+                  {opening && openingContentId === content.id ? (
+                    <span data-opening-content className="absolute inset-0 flex items-center justify-center gap-1.5 bg-black/45 text-[12px] font-medium text-white">
+                      <Loader2 className="h-4 w-4 animate-spin" />開いています
+                    </span>
+                  ) : null}
                 </span>
                 <span className="block truncate px-2.5 pt-2 text-[13px] font-medium">{content.title}</span>
                 <span className="block px-2.5 pb-2 text-[11px] text-muted-foreground">
