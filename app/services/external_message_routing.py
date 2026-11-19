@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -115,7 +117,42 @@ def _first_routing_key(*texts: Optional[str]) -> Optional[str]:
 
 # 「確実」とみなす照合理由（ヘッダ/合言葉=事実）。これらは内容判定を挟まず即確定。
 # 送信者アドレス+直近(external_recipient_id_recent)は弱いので内容判定でダブルチェックする。
-STRONG_REASONS = frozenset({"external_thread_id", "in_reply_to_message_id", "routing_key"})
+STRONG_REASONS = frozenset({"external_thread_id", "in_reply_to_message_id", "routing_key", "sent_form_reply"})
+
+
+def _normalized(text: str) -> str:
+    return "".join(unicodedata.normalize("NFKC", text).casefold().split())
+
+
+def _matching_form(forms, sender: str, subject: str, body: str):
+    """Require distinctive quoted detail or a supplier plus a matching part number."""
+    received = _normalized(subject + "\n" + body)
+    domain = sender.rpartition("@")[2].lower()
+    scores = {}
+    for form in forms:
+        room = form.get("source_room_id")
+        if not room:
+            continue
+        data = form.get("action_data") or {}
+        sent = data.get("final_body") or form.get("content") or ""
+        lines = {_normalized(line).lstrip(">・") for line in sent.splitlines()}
+        quotes = [line for line in lines if len(line) >= 24 and line in received]
+        parts = re.findall(r"(?<![A-Za-z0-9])[A-Za-z0-9][A-Za-z0-9.-]{4,}[A-Za-z0-9]", sent)
+        part = any(any(c.isalpha() for c in word) and any(c.isdigit() for c in word)
+                   and _normalized(word) in received for word in parts)
+        company = _normalized(str(data.get("to") or "")).removesuffix("ご担当者様")
+        target = data.get("target") or {}
+        host = urlsplit(str(target.get("url") or "")).hostname or ""
+        supplier = (len(company) >= 3 and company in received) or (domain and (host == domain or host.endswith("." + domain)))
+        if len(quotes) < 2 and not (supplier and (part or quotes)):
+            continue
+        score = (len(quotes), sum(map(len, quotes)), bool(supplier and part))
+        if room not in scores or score > scores[room][0]:
+            scores[room] = (score, form)
+    ranked = sorted(scores.values(), key=lambda entry: entry[0], reverse=True)
+    if ranked and (len(ranked) == 1 or ranked[0][0] > ranked[1][0]):
+        return ranked[0][1]
+    return None
 
 
 @dataclass(frozen=True)
@@ -197,7 +234,7 @@ class ExternalMessageRoutingService:
             "routed_at": now,
             "processing_result": {
                 **(detected_message.get("processing_result") or {}),
-                "external_route_id": match.route["id"],
+                ("sent_form_id" if match.reason == "sent_form_reply" else "external_route_id"): match.route["id"],
                 "origin_room_id": room_id,
                 "routing_reason": match.reason,
                 "routing_confidence": match.confidence,
@@ -306,6 +343,14 @@ class ExternalMessageRoutingService:
             route = self._latest_route(user_id, channel, "routing_key", routing_key.upper())
             if route:
                 return RouteMatch(route=route, confidence=0.95, reason="routing_key")
+
+        if channel in ("gmail", "email", "icloud"):
+            forms = (self.supabase.table("dan_proposals").select("id,content,action_data,source_room_id")
+                     .eq("user_id", user_id).eq("status", "sent").eq("action_data->>channel", "web_form")
+                     .order("responded_at", desc=True).limit(200).execute().data or [])
+            form = _matching_form(forms, recipient_id or "", subject, content)
+            if form:
+                return RouteMatch({"id": form["id"], "origin_room_id": form["source_room_id"]}, 0.95, "sent_form_reply")
 
         if recipient_id:
             route = self._latest_route(user_id, channel, "external_recipient_id", recipient_id)

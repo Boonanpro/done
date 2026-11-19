@@ -162,7 +162,10 @@ async def classify_and_route(
 
     # 既存案件のルームが特定できたら、通知タブではなくそのルームでダンを起動する。
     # 草案は wake されたダンがルーム文脈込みで自分で書くので、ここでは作らない。
-    if decision == "existing" and room_id:
+    if decision == "new":
+        from app.services.inbox import home_room
+        room_id = await home_room(detected_message["user_id"])
+    if decision in ("existing", "new") and room_id:
         try:
             from app.services.inbound_wakeup import schedule_room_wakeup
             woke = schedule_room_wakeup(detected_message, room_id, reason=f"content:{decision}")
@@ -188,6 +191,8 @@ async def classify_and_route(
             await asyncio.to_thread(_mark_woken)
             logger.info("[content-route] decision=%s room=%s (room wakeup)", decision, room_id)
             return {"decision": decision, "room_id": room_id, "proposal": None, "wakeup": True}
+        if decision == "new":
+            raise RuntimeError("Could not queue actionable mail in home room")
         # wake できなければ従来の提案フローに落ちる
 
     # 概要（reply の場合は返信草案も）を生成
