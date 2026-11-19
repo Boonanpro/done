@@ -35,7 +35,8 @@ def test_only_script_sentences_are_spoken():
     units = S.outline(doc)
     says = [u for u in units if u['kind'] == 'say']
     assert [u['speak'] for u in says] == ['中村です。', '今日は「大事なお知らせ。本当です。」があります！？', '次の段落です。']
-    assert [u['gap'] for u in says] == ['s', 'p', 'h']
+    # 11/19: one short pause everywhere, no longer stops at paragraphs and sections
+    assert [u['gap'] for u in says] == ['s', 's', 's']
     notes = [u['text'] for u in units if u['kind'] == 'note']
     assert 'A（本命）' in notes and '［笑顔で］' in notes and '狙い：登録してもらう。' in notes
 
@@ -96,4 +97,58 @@ def test_a_star_heading_inside_the_script_stays_in_the_script():
     assert star['level'] == 3 and star['read']
     said = [u for u in units if u['kind'] == 'say']
     assert [u['speak'] for u in said] == ['振り切りました。', '1つ目はこれです。']
-    assert said[1]['section'].startswith('◎追加特典') and said[0]['gap'] == 'h'
+    assert said[1]['section'].startswith('◎追加特典') and said[0]['gap'] == 's'
+
+
+def test_suggestions_show_where_they_are_and_are_listed_once():
+    doc = _doc(('◎台本\n', 'HEADING_2'),
+               [('古い', {}, {'suggestedDeletionIds': ['x']}), ('新しい', {}, {'suggestedInsertionIds': ['x']}), ('文です。', {}, {}),
+                ('消える文です。', {}, {'suggestedDeletionIds': ['y']}), ('残る文です。\n', {}, {})],
+               [('全部消える段落です。\n', {}, {'suggestedDeletionIds': ['z']})])
+    units = S.outline(doc)
+    for n, u in enumerate(units): u['n'] = n
+    says = [u for u in units if u['kind'] == 'say']
+    assert [u['speak'] for u in says] == ['新しい文です。', '残る文です。']
+    assert says[0]['segs'][:2] == [{'t': '古い', 'del': 'x'}, {'t': '新しい', 'ins': 'x'}]
+    # the deleted sentence between two kept ones is drawn with the one after it, struck through
+    assert {'t': '消える文です。', 'del': 'y'} in says[1]['segs'] and says[1]['locked']
+    gone = [u for u in units if u['kind'] == 'gone']
+    assert gone and gone[0]['segs'] == [{'t': '全部消える段落です。', 'del': 'z'}]
+    sug = {s['id']: s for s in S.suggestions_of(units)}
+    assert sug['x']['ins'] == '新しい' and sug['x']['del'] == '古い' and sug['z']['del'] == '全部消える段落です。'
+
+
+def test_top_part_keeps_pictures():
+    doc = _doc(('◎サムネ\n', 'HEADING_2'), '絵の下の文\n', ('◎台本\n', 'HEADING_2'), '本文です。\n')
+    doc['body']['content'][1]['paragraph']['elements'].insert(0, {'startIndex': 1, 'inlineObjectElement': {'inlineObjectId': 'i.0'}})
+    doc['inlineObjects'] = {'i.0': {'inlineObjectProperties': {'embeddedObject': {'imageProperties': {'contentUri': 'https://x/img'}}}}}
+    units = S.outline(doc)
+    assert {'kind': 'image', 'src': 'https://x/img'} in units
+
+
+def _apply(text, reqs, base=1):
+    """Apply delete / insert requests to a string the way the Docs API does (indices from ``base``)."""
+    doc = list(text)
+    for r in reqs:
+        if 'deleteContentRange' in r:
+            rg = r['deleteContentRange']['range']; del doc[rg['startIndex'] - base:rg['endIndex'] - base]
+        elif 'insertText' in r:
+            i = r['insertText']['location']['index'] - base; doc[i:i] = list(r['insertText']['text'])
+    return ''.join(doc)
+
+
+def test_accept_and_reject_write_what_docs_would():
+    # 「で」 suggested out, 「なら」 suggested in: 「一括でなら36万円」 as stored
+    text = '一括でなら36万円'
+    runs = [(3, 4, 'del', 'で', {}, 'NORMAL_TEXT', None), (4, 6, 'ins', 'なら', {'bold': True}, 'NORMAL_TEXT', None)]
+    assert _apply(text, S.decide_requests(runs, accept=True)) == '一括なら36万円'
+    assert _apply(text, S.decide_requests(runs, accept=False)) == '一括で36万円'
+    kept = [r for r in S.decide_requests(runs, accept=True) if 'updateTextStyle' in r]
+    assert kept[0]['updateTextStyle']['textStyle'] == {'bold': True} and kept[0]['updateTextStyle']['fields'] == '*'
+
+
+def test_accepted_new_paragraph_keeps_both_paragraph_styles():
+    runs = [(10, 15, 'ins', '見出し\n', {}, 'HEADING_3', 'NORMAL_TEXT')]
+    reqs = S.decide_requests(runs, accept=True)
+    styles = [r['updateParagraphStyle'] for r in reqs if 'updateParagraphStyle' in r]
+    assert [x['paragraphStyle']['namedStyleType'] for x in styles] == ['HEADING_3', 'NORMAL_TEXT']
