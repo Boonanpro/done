@@ -1306,10 +1306,13 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const ctx = mgr.ctx;
       let now = ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0);
       const ot = typeof ctx.getOutputTimestamp === 'function' ? ctx.getOutputTimestamp() : null;
-      if (ot && ot.contextTime && ot.performanceTime) now = ot.contextTime + (performance.now() - ot.performanceTime) / 1000;
+      // 出口の時刻が古い（音の仕組みが止められていた・裏から戻った直後）時は使わない。古い時刻に
+      // 経った時間を足すと、聞こえている所より何秒も先を指してしまう
+      if (ot && ot.contextTime && ot.performanceTime && performance.now() - ot.performanceTime < 500) now = ot.contextTime + (performance.now() - ot.performanceTime) / 1000;
       return an.t0 + an.rate * Math.max(0, now - an.ctxT0);
     };
     let lastWall = performance.now();
+    let lastT = playClockRef.current.t; // 最後に映した時刻（裏へ行って戻った時はここから続ける）
     let lastAheadWall = 0;
     // 上の段が画面を全部ふさいでいる間、その下の段の映像は再生しない（2026-11-15 本人「まともに再生できん
     // くらい重い」: X固定ポストの冒頭は1920×1080の動画が5段重なり、見えない4本まで同時に解読していた）。
@@ -1430,6 +1433,15 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         prepRequestRef.current = false;
         if (gate) enterPrep(clock.t, false);
       }
+      // 画面の描き直しが1秒以上止まっていた（別のアプリ・別の画面へ行って戻った）: 音の予約・映像の要素・
+      // 時計がそれぞれ勝手に進んでいて、そのまま続けると同じ所が二重に流れた（2026-11-19 本人「別の画面や
+      // 別のアプリに行ってから戻ると同じ場所が2回再生されながら進む」）。離れた所から全部そろえ直す。
+      if (phase === 'run' && dtMs > 1000) {
+        enterPrep(lastT, false);
+        prepStep(clock, nowWall);
+        rafRef.current = requestAnimationFrame(step);
+        return;
+      }
       if (phase === 'prep') {
         prepStep(clock, nowWall);
         rafRef.current = requestAnimationFrame(step);
@@ -1526,6 +1538,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         }
       }
       if (masterT != null && Number.isFinite(masterT) && masterT >= 0 && masterT < sequenceDuration) t = masterT;
+      lastT = t;
       clock.t = t;                     // mirror so the wall clock continues smoothly from the
       clock.wall = performance.now();  // master when the master drops out at a cut/gap
 
@@ -1631,7 +1644,20 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       rafRef.current = requestAnimationFrame(step);
     };
     rafRef.current = requestAnimationFrame(step);
+    // 裏へ行く時は音と映像の要素をその場で止める（画面の描き直しが止まると、予約済みの音と映像の要素だけが
+    // 先へ進み、戻った時に二重に流れる元になる）。戻ったら、離れた所からそろえ直して流れ出す。
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        if (phase === 'run') enterPrep(lastT, false);
+        else stopAudioNodes();
+      } else {
+        if (mgr && mgr.ctx.state !== 'running') void mgr.ctx.resume().catch(() => {});
+        if (phase === 'prep') { prepSince = performance.now(); const c = playClockRef.current; if (c) c.wall = performance.now(); }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       stopAudioNodes();
