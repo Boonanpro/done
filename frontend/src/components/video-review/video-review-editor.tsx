@@ -711,6 +711,9 @@ const PHONE_RATE_MAX = 5;
 const roundRate = (r: number) => Math.min(PHONE_RATE_MAX, Math.max(PHONE_RATE_MIN, Math.round(r * 10) / 10));
 // 速さの見せ方は「×2」「×1.3」（本人「倍ではなく×2とかで」）
 const rateText = (r: number) => `×${Math.round(r * 10) / 10}`;
+// 長押しと見なすまでの時間と、指を何px動かすと0.1変わるか（×1→×5 で約240px）
+const RATE_HOLD_MS = 350;
+const RATE_SLIDE_PX = 6;
 
 const DAN_HANDS_CSS = `
 /* 動かすのはダンが触っているクリップだけ。全部のクリップに効く印を段の外枠に付け外しすると、
@@ -4659,6 +4662,54 @@ export function VideoReviewEditor({
     phoneRateTimerRef.current = window.setTimeout(() => { phoneRateTimerRef.current = null; phoneCommitDraft(); }, 200);
   }, [phoneCommitDraft]);
   useEffect(() => () => { if (phoneRateTimerRef.current) window.clearTimeout(phoneRateTimerRef.current); }, []);
+  // 速さのボタンを長押しして、そのまま左右に指を動かすと ×1〜×5 を0.1刻みで変える（別のつまみは出さない）。
+  // 押してすぐ離すと今までどおり速さの札が開く（2026-11-19 本人「タップで別のスライダーが立ち上がるんじゃなくて
+  // 長押しでスライドできるように。タップでも変更はできるまま」）。
+  const [phoneRateSliding, setPhoneRateSliding] = useState(false);
+  const rateHoldRef = useRef<{ id: number; x: number; base: number; timer: number | null; sliding: boolean; moved: boolean } | null>(null);
+  const rateSuppressClickRef = useRef(false);
+  const onRatePointerDown = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const el = e.currentTarget;
+    try { el.setPointerCapture(e.pointerId); } catch { /* 古い端末 */ }
+    const hold = { id: e.pointerId, x: e.clientX, base: playRate, timer: null as number | null, sliding: false, moved: false };
+    hold.timer = window.setTimeout(() => {
+      hold.timer = null;
+      if (rateHoldRef.current !== hold || hold.moved) return;
+      hold.sliding = true;
+      hold.base = phoneRateDraftRef.current ?? hold.base;
+      setPhoneRateSliding(true);
+      setPhoneRateOpen(false);
+      setPhoneControls(true);
+      try { navigator.vibrate?.(12); } catch { /* 振動なし */ }
+    }, RATE_HOLD_MS);
+    rateHoldRef.current = hold;
+  }, [playRate]);
+  const onRatePointerMove = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    const hold = rateHoldRef.current;
+    if (!hold || hold.id !== e.pointerId) return;
+    const dx = e.clientX - hold.x;
+    if (!hold.sliding) {
+      // 長押しになる前に大きく動いたら、ただの指のずれ（長押しにしない）
+      if (Math.abs(dx) > 14) { hold.moved = true; if (hold.timer) { window.clearTimeout(hold.timer); hold.timer = null; } }
+      return;
+    }
+    e.preventDefault();
+    phoneDraftRate(hold.base + (dx / RATE_SLIDE_PX) * 0.1);
+  }, [phoneDraftRate]);
+  const endRateHold = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    const hold = rateHoldRef.current;
+    if (!hold || hold.id !== e.pointerId) return;
+    if (hold.timer) window.clearTimeout(hold.timer);
+    rateHoldRef.current = null;
+    if (hold.sliding) {
+      rateSuppressClickRef.current = true;
+      window.setTimeout(() => { rateSuppressClickRef.current = false; }, 400);
+      setPhoneRateSliding(false);
+      phoneCommitDraft();
+      setPhoneControls(true);
+    }
+  }, [phoneCommitDraft]);
   useEffect(() => {
     if (!compact) return;
     const read = () => setPhoneVp({ w: window.innerWidth, h: window.innerHeight });
@@ -4673,10 +4724,10 @@ export function VideoReviewEditor({
   const phoneLandscape = compact && phoneVp.w > phoneVp.h;
   // 再生中は、押してから3秒で映像の上のボタンを隠す（縦も横も YouTube と同じ。止めている間は出したまま）
   useEffect(() => {
-    if (!compact || !phoneControls || !playing || phoneMenuOpen || phoneRateOpen || (phoneLandscape && phoneChatOpen)) return;
+    if (!compact || !phoneControls || !playing || phoneMenuOpen || phoneRateOpen || phoneRateSliding || (phoneLandscape && phoneChatOpen)) return;
     const id = window.setTimeout(() => setPhoneControls(false), 3000);
     return () => window.clearTimeout(id);
-  }, [compact, phoneLandscape, phoneControls, playing, phoneChatOpen, phoneMenuOpen, phoneRateOpen]);
+  }, [compact, phoneLandscape, phoneControls, playing, phoneChatOpen, phoneMenuOpen, phoneRateOpen, phoneRateSliding]);
   useEffect(() => { if (!phoneControls) setPhoneRateOpen(false); }, [phoneControls]);
   // ブラウザで開いた時は、触った所で全画面にする（Chrome の住所の欄・タブの帯の分だけ狭くなるため。
   // 2026-11-17 本人）。全画面は人が触った時にしか入れないので、指を離した時に入れる。
@@ -5103,12 +5154,28 @@ export function VideoReviewEditor({
         <button
           type="button"
           data-phone-rate
-          onClick={() => setPhoneRateOpen((v) => !v)}
-          className={`flex h-9 min-w-[3.25rem] items-center justify-center rounded-full px-2 text-sm font-semibold tabular-nums ${playRate !== 1 || phoneRateOpen ? 'bg-white text-black' : ''}`}
+          data-phone-rate-sliding={phoneRateSliding ? '1' : undefined}
+          onClick={() => { if (rateSuppressClickRef.current) { rateSuppressClickRef.current = false; return; } setPhoneRateOpen((v) => !v); }}
+          onPointerDown={onRatePointerDown}
+          onPointerMove={onRatePointerMove}
+          onPointerUp={endRateHold}
+          onPointerCancel={endRateHold}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none', WebkitTouchCallout: 'none' }}
+          className={`flex h-9 min-w-[3.25rem] items-center justify-center rounded-full px-2 text-sm font-semibold tabular-nums ${playRate !== 1 || phoneRateOpen || phoneRateSliding ? 'bg-white text-black' : ''}`}
           aria-label={`再生の速さ ${rateText(playRate)}`}
         >
           {rateText(rateShown)}
         </button>
+        {phoneRateSliding ? (
+          <div data-phone-rate-slide className="pointer-events-none absolute bottom-11 right-0 z-40 w-[15rem] rounded-2xl bg-black/85 px-3 pb-3 pt-2 shadow-lg">
+            <div className="text-center text-2xl font-bold tabular-nums text-sky-300" data-phone-rate-value>{rateText(rateShown)}</div>
+            <div className="relative mt-1 h-1.5 rounded-full bg-white/25">
+              <div className="absolute inset-y-0 left-0 rounded-full bg-sky-400" style={{ width: `${((rateShown - PHONE_RATE_MIN) / (PHONE_RATE_MAX - PHONE_RATE_MIN)) * 100}%` }} />
+            </div>
+            <div className="mt-1 flex justify-between text-[11px] tabular-nums text-white/60"><span>×1</span><span>← 遅く・速く →</span><span>×5</span></div>
+          </div>
+        ) : null}
         {phoneRateOpen ? (
           <div data-phone-rate-list className="absolute bottom-11 right-0 z-40 w-[17.5rem] rounded-2xl bg-black/85 px-3 pb-3 pt-2 shadow-lg">
             <div className="flex flex-row justify-between">
@@ -5124,23 +5191,7 @@ export function VideoReviewEditor({
                 </button>
               ))}
             </div>
-            <div className="flex items-center gap-2 pt-1">
-              <span className="w-10 shrink-0 text-center text-base font-bold tabular-nums text-sky-300" data-phone-rate-value>{rateText(rateShown)}</span>
-              <input
-                type="range"
-                data-phone-rate-slider
-                min={PHONE_RATE_MIN}
-                max={PHONE_RATE_MAX}
-                step={0.1}
-                value={rateShown}
-                aria-label="再生の速さ"
-                onChange={(e) => { phoneDraftRate(Number(e.target.value)); setPhoneControls(true); }}
-                onPointerUp={() => phoneCommitDraft()}
-                onTouchEnd={() => phoneCommitDraft()}
-                onKeyUp={() => phoneCommitDraft()}
-                className="h-8 min-w-0 flex-1 accent-sky-400"
-              />
-            </div>
+            <div className="pt-1 text-center text-[11px] text-white/60">長押しして左右に動かすと0.1ずつ変わります</div>
           </div>
         ) : null}
       </div>
