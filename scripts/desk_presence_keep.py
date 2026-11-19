@@ -13,11 +13,15 @@ NAS の空きが RESERVE を割る前に書き出しを止める（下の2）。
 1回の実行でやること（launchd で1時間ごと）:
   1. 印の区間を集めて、近い区間（5分以内）はつなぐ。終わりが記録されていない印
      （Frigate の再起動で後からまとめて閉じられた印）は、次の印の始まりか4時間で切る。
-  2. まだ書き出していない区間を古い順に書き出す。NAS の空きが RESERVE を割りそうなら止める。
+  2. まだ書き出していない区間を、30分ずつに分けて古い順に書き出す。満杯の NAS では、空きが
+     足りない時は Frigate が自分で古い録画を消して空けるのを最長7分待ってから書き出す。
      書き出しが済んだら、動画の長さが録画の長さとほぼ同じかを ffprobe で確かめる。
+     まだ書き出していない区間に重なる印には Frigate の「消さない」（retain）を付け、満杯の時の
+     消去が在席の録画を飛ばして他の録画から消すようにする。書き出し終えたら外す。
   3. KEEP_DAYS に日数がある時だけ、書き出しの名前が「desk zaiseki」で始まりがそれより前の物を消す。
   4. --manage-retention の時だけ: まだ書き出していない一番古い区間より前の録画が消えてよい
-     日数まで continuous の日数を下げる（最小3日）。本人が机にいない時（開いた印が無く、
+     日数まで continuous の日数を下げる（最小3日）。日数が足りず一番古い未書き出しの区間が
+     消えそうな時は、逆に日数を上げる（RAISE_MARGIN 日の余裕）。本人が机にいない時（開いた印が無く、
      最後の印の終わりから10分以上）だけ、2時間に1回まで。下げたら Frigate を再起動し、
      戻ったことと日数を確かめる。
 """
@@ -53,6 +57,14 @@ MIN_CONTINUOUS_DAYS = 3
 # Frigate 自身が一番古い録画（書き出し済みの日か、書き出しの対象外の録画）から消すので、
 # ここは書き出し1本の途中で NAS が0にならない分だけ残せばよい。
 RESERVE_MIB = 2 * 1024
+# 11/19: 区間の書き出しの大きさを丸ごと空きから引いていたので、1時間を超える区間（4GB超）は
+# 満杯の NAS（空き 5〜9GiB）では空きが足りず、毎時止まり続けた。Frigate は空きが1時間分の
+# 録画（desk+office で約5.3GiB）を割ると5分ごとに一番古い録画を1時間分消すので、
+# 1本を30分（約2.2GiB）までに分ければ、空きを2GiB残したまま必ず書き出せる。
+CHUNK_SEC = 30 * 60
+LOW_SPACE_WAIT = 7 * 60      # Frigate の空け直し（5分ごと）を1回待つ
+RETAIN_MAX_SEC = 4 * 3600    # これより長い印は「消さない」を付けない（何日分も守ってしまう）
+RAISE_MARGIN = 3
 OWNER_AWAY_SEC = 600
 RESTART_COOLDOWN = 2 * 3600
 RUN_BUDGET = 50 * 60
@@ -171,6 +183,67 @@ def export_ranges(exports: list[dict]) -> list[tuple[float, float, dict]]:
             continue
         out.append((s, e, x))
     return out
+
+
+def split_chunks(s: float, e: float) -> list[tuple[float, float]]:
+    n = max(1, math.ceil((e - s) / CHUNK_SEC))
+    step = (e - s) / n
+    return [(s + i * step, s + (i + 1) * step if i < n - 1 else e) for i in range(n)]
+
+
+def pending_chunks(intervals, ranges, st: dict, oldest_rec: float, now: float) -> list[tuple[float, float]]:
+    """まだ書き出していない30分以内の区切り（古い順）。"""
+    out = []
+    for s, e in intervals:
+        if e > now - SETTLE or e < oldest_rec:
+            continue
+        if covered(s, e, ranges) >= 0.95:
+            continue
+        if st["failed"].get(f"{int(s)}-{int(e)}", {}).get("n", 0) >= 3:  # 11/19 より前の区間単位の失敗
+            continue
+        for a, b in split_chunks(s, e):
+            if covered(a, b, ranges) >= 0.95:
+                continue
+            if st["failed"].get(f"{int(a)}-{int(b)}", {}).get("n", 0) >= 3:
+                continue
+            out.append((a, b))
+    return out
+
+
+def retain_wanted(events: list[dict], pending: list[tuple[float, float]]) -> set[str]:
+    """未書き出しの区切りに重なる、閉じた短い印の id。"""
+    want = set()
+    for x in events:
+        s, e = x["start_time"], x.get("end_time")
+        if e is None or e - s > RETAIN_MAX_SEC:
+            continue
+        if any(a <= e + POST and s - PRE <= b for a, b in pending):
+            want.add(x["id"])
+    return want
+
+
+def sync_retain(st: dict, events: list[dict], pending) -> None:
+    want = retain_wanted(events, pending)
+    had = set(st.get("retained", []))
+    added = removed = failed = 0
+    for i in sorted(want - had):
+        code, _ = api("POST", f"/api/events/{i}/retain")
+        if code == 200:
+            had.add(i)
+            added += 1
+        else:
+            failed += 1
+    for i in sorted(had - want):  # 自分で付けた物だけ外す
+        code, _ = api("DELETE", f"/api/events/{i}/retain")
+        if code in (200, 404):
+            had.discard(i)
+            removed += 1
+        else:
+            failed += 1
+    st["retained"] = sorted(had)
+    save_state(st)
+    if added or removed or failed:
+        log("retain_sync", added=added, removed=removed, failed=failed, total=len(had))
 
 
 def covered(s: float, e: float, ranges) -> float:
@@ -327,18 +400,7 @@ def run(args) -> int:
         exports = get("/api/exports")
     ranges = trusted_ranges(st, exports, include_running=True) if not args.plan else export_ranges(exports)
 
-    todo = []
-    for s, e in intervals:
-        if e > now - SETTLE:
-            continue
-        if e < oldest_rec:
-            continue
-        if covered(s, e, ranges) >= 0.95:
-            continue
-        key = f"{int(s)}-{int(e)}"
-        if st["failed"].get(key, {}).get("n", 0) >= 3:
-            continue
-        todo.append((s, e))
+    todo = pending_chunks(intervals, ranges, st, oldest_rec, now)
     log("plan", intervals=len(intervals), todo=len(todo), todo_hours=round(sum(e - s for s, e in todo) / 3600, 1),
         open_now=open_now, oldest_recording_day=rec_days[0] if rec_days else None)
 
@@ -347,6 +409,7 @@ def run(args) -> int:
             print(fmt(s), "-", fmt(e), round((e - s) / 60), "min")
         return 0
 
+    sync_retain(st, events, todo)
     bw = bandwidth_mib_per_h()
     done = 0
     for s, e in todo:
@@ -354,9 +417,18 @@ def run(args) -> int:
             break
         need = (e - s) / 3600 * bw
         free = storage_free_mib()
+        waited = 0.0
+        t_wait = time.time()
+        while free - need < RESERVE_MIB and time.time() - t_wait < LOW_SPACE_WAIT:
+            time.sleep(30)
+            free = storage_free_mib()
+            waited = time.time() - t_wait
         if free - need < RESERVE_MIB:
-            log("stop_low_space", free_gib=round(free / 1024, 1), need_gib=round(need / 1024, 1))
+            log("stop_low_space", free_gib=round(free / 1024, 1), need_gib=round(need / 1024, 1),
+                waited_s=round(waited))
             break
+        if waited:
+            log("waited_space", waited_s=round(waited), free_gib=round(free / 1024, 1))
         rec = recorded_seconds(s, e)
         key = f"{int(s)}-{int(e)}"
         if rec < 5:
@@ -379,6 +451,8 @@ def run(args) -> int:
 
     exports = get("/api/exports")
     delete_old_exports(exports, now, dry=False)
+    left = pending_chunks(intervals, trusted_ranges(st, exports, include_running=True), st, oldest_rec, now)
+    sync_retain(st, events, left)
 
     if args.manage_retention:
         manage_retention(st, now)
@@ -392,17 +466,18 @@ def manage_retention(st: dict, now: float) -> None:
     events = fetch_events(oldest_rec - 86400)
     intervals, open_now, last_end = presence_intervals(events, now)
     ranges = trusted_ranges(st, get("/api/exports"), include_running=False)
-    pending = [s for s, e in intervals
-               if e >= oldest_rec and covered(s, e, ranges) < 0.95
-               and st["failed"].get(f"{int(s)}-{int(e)}", {}).get("n", 0) < 3]
+    pending = [a for a, b in pending_chunks(intervals, ranges, st, oldest_rec, now + SETTLE)]
     oldest_pending = min(pending) if pending else now
     # 一番古い未書き出しの区間より前だけが消える日数（1日の余裕を足す）
     target = max(MIN_CONTINUOUS_DAYS, math.ceil((now - oldest_pending) / 86400) + 1)
     cur = current_continuous_days()
     log("retention_check", current_days=cur, target_days=target, pending=len(pending),
         open_now=open_now, minutes_since_present=round((now - last_end) / 60) if last_end else None)
-    if target >= cur:
-        return
+    if target > cur:
+        # 一番古い未書き出しの区間が日数の決まりで消える所まで来た -> 余裕を足して上げる
+        target = target + RAISE_MARGIN
+    elif target == cur or (target > MIN_CONTINUOUS_DAYS and cur - target <= RAISE_MARGIN):
+        return  # 上げた直後に下げ直して再起動を繰り返さない
     if open_now or now - last_end < OWNER_AWAY_SEC:
         log("retention_wait_owner_present")
         return
