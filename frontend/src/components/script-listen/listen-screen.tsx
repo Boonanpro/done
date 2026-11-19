@@ -787,7 +787,7 @@ export function ListenScreen({ docId }: { docId: string }) {
         <div className="fixed inset-x-0 bottom-0 z-40 max-h-[70dvh] overflow-y-auto rounded-t-2xl border-t border-stone-200 bg-[#faf8f4] px-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] pt-2 shadow-2xl">
           <div className="mb-2 flex items-center justify-between">
             <div className="text-[13px] font-semibold text-stone-700">
-              {sheet.kind === 'suggestion' ? 'ダンの提案' : sheet.kind === 'compose' ? 'コメントを書く' : 'コメント'}
+              {sheet.kind === 'suggestion' ? '提案' : sheet.kind === 'compose' ? 'コメントを書く' : 'コメント'}
             </div>
             <button type="button" aria-label="閉じる" onClick={() => { setSheet(null); setDraft(null); }} className="rounded-full p-1.5 text-stone-500 active:bg-stone-200">
               <X className="h-5 w-5" />
