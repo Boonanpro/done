@@ -703,8 +703,14 @@ function parseFps(value: unknown): number | null {
 }
 
 
-// スマホの速さの並び（2026-11-19 本人「最大10倍。音声のピッチを変えず」）
-const PHONE_RATES = [1, 1.5, 2, 3, 5, 10];
+// スマホの速さ: ×1〜×5 を0.1刻みのつまみで。よく使う速さはつまみの上の札でも選べる
+// （2026-11-19 本人「最大10倍。音声のピッチを変えず」→「10倍を消して4倍を追加。1〜5倍をスライダーで0.1単位」「×2で表現」）
+const PHONE_RATES = [1, 1.5, 2, 3, 4, 5];
+const PHONE_RATE_MIN = 1;
+const PHONE_RATE_MAX = 5;
+const roundRate = (r: number) => Math.min(PHONE_RATE_MAX, Math.max(PHONE_RATE_MIN, Math.round(r * 10) / 10));
+// 速さの見せ方は「×2」「×1.3」（本人「倍ではなく×2とかで」）
+const rateText = (r: number) => `×${Math.round(r * 10) / 10}`;
 
 const DAN_HANDS_CSS = `
 /* 動かすのはダンが触っているクリップだけ。全部のクリップに効く印を段の外枠に付け外しすると、
@@ -4631,6 +4637,28 @@ export function VideoReviewEditor({
   const [phoneMenuOpen, setPhoneMenuOpen] = useState(false);
   const [phoneControls, setPhoneControls] = useState(true);
   const [phoneRateOpen, setPhoneRateOpen] = useState(false);
+  // つまみを動かしている途中の速さ（まだ再生には使っていない数字）
+  const [phoneRateDraft, setPhoneRateDraft] = useState<number | null>(null);
+  const phoneRateDraftRef = useRef<number | null>(null);
+  const phoneRateTimerRef = useRef<number | null>(null);
+  const phoneCommitRate = useCallback((r: number) => {
+    if (phoneRateTimerRef.current) { window.clearTimeout(phoneRateTimerRef.current); phoneRateTimerRef.current = null; }
+    phoneRateDraftRef.current = null;
+    setPhoneRateDraft(null);
+    setPlayRate(roundRate(r));
+  }, []);
+  const phoneCommitDraft = useCallback(() => {
+    const d = phoneRateDraftRef.current;
+    if (d != null) phoneCommitRate(d);
+  }, [phoneCommitRate]);
+  const phoneDraftRate = useCallback((r: number) => {
+    const v = roundRate(r);
+    phoneRateDraftRef.current = v;
+    setPhoneRateDraft(v);
+    if (phoneRateTimerRef.current) window.clearTimeout(phoneRateTimerRef.current);
+    phoneRateTimerRef.current = window.setTimeout(() => { phoneRateTimerRef.current = null; phoneCommitDraft(); }, 200);
+  }, [phoneCommitDraft]);
+  useEffect(() => () => { if (phoneRateTimerRef.current) window.clearTimeout(phoneRateTimerRef.current); }, []);
   useEffect(() => {
     if (!compact) return;
     const read = () => setPhoneVp({ w: window.innerWidth, h: window.innerHeight });
@@ -4787,11 +4815,12 @@ export function VideoReviewEditor({
               updateSequenceClip(clipId, { style: { ...((c?.style || {}) as Record<string, unknown>), x: nudge.x, y: nudge.y } } as Partial<SequenceClip>);
             }}
             rate={playRate}
+            skimFrom={compact ? 4 : 5}
           />
         )}
         {playing && playRate !== 1 && !(compact && phoneControls) ? (
           <div className="pointer-events-none absolute right-2 top-2 z-30 rounded bg-black/70 px-2 py-0.5 text-sm font-semibold text-white" data-testid="play-rate">
-            {playRate}倍速
+            {rateText(playRate)}
           </div>
         ) : null}
         {/* Browser only: in the desktop app the NATIVE engine composites the pop-out
@@ -5066,8 +5095,9 @@ export function VideoReviewEditor({
         <ArrowLeft className="h-5 w-5" />
       </button>
     ) : null;
-    // 速さ（声の高さはそのまま）。押すとボタンの上に横一列の並びが開き、選ぶと閉じる（縦に並べると縦持ちの低い映像からはみ出す）
-    const rateLabel = (r: number) => `${r}倍`;
+    // 速さ（声の高さはそのまま）。押すとボタンの上に、よく使う速さの札と ×1〜×5 のつまみ（0.1刻み）が開く。
+    // つまみを動かしている間は数字だけ変え、指を止めて0.2秒か離した時に速さを替える（替えるたびに再生の輪を作り直すため）。
+    const rateShown = phoneRateDraft ?? playRate;
     const rateButton = (
       <div className="relative shrink-0">
         <button
@@ -5075,23 +5105,42 @@ export function VideoReviewEditor({
           data-phone-rate
           onClick={() => setPhoneRateOpen((v) => !v)}
           className={`flex h-9 min-w-[3.25rem] items-center justify-center rounded-full px-2 text-sm font-semibold tabular-nums ${playRate !== 1 || phoneRateOpen ? 'bg-white text-black' : ''}`}
-          aria-label={`再生の速さ ${rateLabel(playRate)}`}
+          aria-label={`再生の速さ ${rateText(playRate)}`}
         >
-          {rateLabel(playRate)}
+          {rateText(rateShown)}
         </button>
         {phoneRateOpen ? (
-          <div data-phone-rate-list className="absolute bottom-11 right-0 z-40 flex flex-row overflow-hidden rounded-full bg-black/85 px-1 shadow-lg">
-            {PHONE_RATES.map((r) => (
-              <button
-                key={r}
-                type="button"
-                data-phone-rate-choice={r}
-                onClick={() => { setPlayRate(r); setPhoneRateOpen(false); setPhoneControls(true); }}
-                className={`h-10 shrink-0 whitespace-nowrap px-2.5 text-sm font-semibold tabular-nums ${r === playRate ? 'text-sky-300' : 'text-white'}`}
-              >
-                {rateLabel(r)}
-              </button>
-            ))}
+          <div data-phone-rate-list className="absolute bottom-11 right-0 z-40 w-[17.5rem] rounded-2xl bg-black/85 px-3 pb-3 pt-2 shadow-lg">
+            <div className="flex flex-row justify-between">
+              {PHONE_RATES.map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  data-phone-rate-choice={r}
+                  onClick={() => { phoneCommitRate(r); setPhoneRateOpen(false); setPhoneControls(true); }}
+                  className={`h-9 shrink-0 whitespace-nowrap px-1.5 text-sm font-semibold tabular-nums ${r === rateShown ? 'text-sky-300' : 'text-white'}`}
+                >
+                  {rateText(r)}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <span className="w-10 shrink-0 text-center text-base font-bold tabular-nums text-sky-300" data-phone-rate-value>{rateText(rateShown)}</span>
+              <input
+                type="range"
+                data-phone-rate-slider
+                min={PHONE_RATE_MIN}
+                max={PHONE_RATE_MAX}
+                step={0.1}
+                value={rateShown}
+                aria-label="再生の速さ"
+                onChange={(e) => { phoneDraftRate(Number(e.target.value)); setPhoneControls(true); }}
+                onPointerUp={() => phoneCommitDraft()}
+                onTouchEnd={() => phoneCommitDraft()}
+                onKeyUp={() => phoneCommitDraft()}
+                className="h-8 min-w-0 flex-1 accent-sky-400"
+              />
+            </div>
           </div>
         ) : null}
       </div>
