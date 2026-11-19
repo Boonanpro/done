@@ -351,7 +351,6 @@ def edit(doc_id, old, new, para=None, start=None):
     """Replace one sentence in the doc. ``old`` is the sentence as the screen showed it; the doc is read again first
     and, when it no longer has that sentence where it was (or anywhere, uniquely), nothing is written."""
     new = (new or '').replace('\r', '').replace('\n', ' ').strip()
-    if not new: raise ListenError('空の文にはできません。文を消す時はドキュメントで消してください。')
     _follow(doc_id)
     doc = fetch(doc_id)
     says = [u for u in outline(doc) if u['kind'] == 'say']
@@ -364,11 +363,25 @@ def edit(doc_id, old, new, para=None, start=None):
     if u['locked']:
         raise ListenError('この文には提案（提案モードの直し）が入っているので、ここでは直せません。ドキュメントで提案を決めてから直してください。', 409)
     if new == old: return {'changed': False}
-    reqs = edit_requests(u['start'], old, new, u.get('bmask', ''))
+    # Emptying a sentence deletes it (with the space after it, or with its paragraph when it was the whole paragraph).
+    reqs = delete_requests(doc, u) if not new else edit_requests(u['start'], old, new, u.get('bmask', ''))
     _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
           body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
     _log_owner_edit(doc_id, doc.get('title', ''), old, new)
     return {'changed': True, 'requests': len(reqs)}
+
+
+def delete_requests(doc, u):
+    content = doc.get('body', {}).get('content', [])
+    el = content[u['para']] if 0 <= u.get('para', -1) < len(content) else {}
+    p = el.get('paragraph') or {}
+    whole = ''.join(c[1] for c in _chars(p) if not c[2]['del']).strip() == u['text']
+    if whole and el.get('endIndex') and el is not content[-1]:
+        return [{'deleteContentRange': {'range': {'startIndex': el['startIndex'], 'endIndex': el['endIndex']}}}]
+    end = u['end']
+    after = next((c for c in _chars(p) if c[0] == end), None)
+    if after and after[1] in ' 　': end += _units16(after[1])
+    return [{'deleteContentRange': {'range': {'startIndex': u['start'], 'endIndex': end}}}]
 
 
 def _log_owner_edit(doc_id, title, old, new):
@@ -609,7 +622,7 @@ def _owner_words(text):
 def add_comment(doc_id, quote, text, start=None, sentence=''):
     from app.services import gdoc_drive as G
     text = _owner_words(text)
-    if not ensure_watched(doc_id):
+    if not owner_only(doc_id) or not ensure_watched(doc_id):
         raise ListenError('お客さんも開けるドキュメントなので、ここからはコメントできません（ダンの返事がお客さんにも見えるため）。'
                           '作業用の台本で書いてください。', 403)
     body = {'content': text}
@@ -629,7 +642,7 @@ def add_comment(doc_id, quote, text, start=None, sentence=''):
 def reply(doc_id, comment_id, text):
     from app.services import gdoc_drive as G
     text = _owner_words(text)
-    if not ensure_watched(doc_id):
+    if not owner_only(doc_id) or not ensure_watched(doc_id):
         raise ListenError('お客さんも開けるドキュメントなので、ここからは返事を書けません。', 403)
     made = G.request(_account(doc_id), 'POST', f'files/{doc_id}/comments/{comment_id}/replies', {'content': text}, {'fields': 'id'})
     _poke(doc_id)

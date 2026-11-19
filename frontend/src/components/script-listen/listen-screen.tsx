@@ -364,8 +364,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     const next = (el.textContent || '').replace(/\s*\n+\s*/g, '').trim();
     editingRef.current = null;
     setArmed(null);
-    if (!next || next === u.text) {
-      if (!next) toast.error('空の文にはできません。文を消す時はドキュメントで消してください。');
+    if (next === u.text) {
       setRemount(r => r + 1);
       return;
     }
@@ -586,14 +585,17 @@ export function ListenScreen({ docId }: { docId: string }) {
             suppressContentEditableWarning
             spellCheck={false}
             onClick={() => onSayClick(i, u)}
-            onFocus={() => { editingRef.current = { n: u.n, dirty: false }; }}
             onInput={() => {
-              if (editingRef.current) editingRef.current.dirty = true;
+              // Only typing counts as editing: a click to listen leaves the caret here, and that must not stop the
+              // doc from being read again or the screen from following the voice.
+              editingRef.current = { n: u.n, dirty: true };
               if (playingRef.current) stop();
             }}
             onBlur={e => { if (editingRef.current?.dirty) save(u, e.currentTarget); else editingRef.current = null; }}
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.blur(); }
+              // Space before any typing still means play / pause (the caret sits here after a click to listen).
+              if (e.code === 'Space' && !e.nativeEvent.isComposing && !editingRef.current?.dirty) { e.preventDefault(); toggle(); }
               if (e.key === 'Escape') {
                 editingRef.current = null;
                 setRemount(r => r + 1);
@@ -740,7 +742,7 @@ export function ListenScreen({ docId }: { docId: string }) {
               </div>
             )}
             <div className="mt-8 text-center text-[12px] text-stone-400">
-              {touch ? '文を押すとそこから聞けます。もう一度押すと直せます。' : '文を押すとそこから聞けます。そのまま打つと直せて、Enter でドキュメントに入ります。'}
+              {touch ? '文を押すとそこから聞けます。もう一度押すと直せます。' : '文を押すとそこから聞けます。そのまま打つと直せて、Enter でドキュメントに入ります（文を全部消すと、その文が消えます）。'}
               文字を選ぶとコメントできます。
             </div>
           </div>

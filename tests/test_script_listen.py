@@ -155,3 +155,18 @@ def test_accepted_new_paragraph_keeps_both_paragraph_styles():
     reqs = S.decide_requests(runs, accept=True)[1]
     styles = [r['updateParagraphStyle'] for r in reqs if 'updateParagraphStyle' in r]
     assert [x['paragraphStyle']['namedStyleType'] for x in styles] == ['HEADING_3', 'NORMAL_TEXT']
+
+
+def test_emptying_a_sentence_deletes_it_or_its_paragraph():
+    doc = _doc(('◎台本\n', 'HEADING_2'), '一つ目です。 二つ目です。\n', 'ひとりの段落です。\n', '最後です。\n')
+    # the last element needs endIndex like the Docs API gives
+    for el in doc['body']['content']:
+        p = el['paragraph']; n = sum(S._units16(c) for e in p['elements'] for c in e['textRun']['content'])
+        el['endIndex'] = el['startIndex'] + n
+    says = [u for u in S.outline(doc) if u['kind'] == 'say']
+    first, alone = says[0], says[2]
+    r = S.delete_requests(doc, first)[0]['deleteContentRange']['range']
+    assert r['endIndex'] - r['startIndex'] == len('一つ目です。 ')          # the space after it goes too
+    r = S.delete_requests(doc, alone)[0]['deleteContentRange']['range']
+    para = doc['body']['content'][alone['para']]
+    assert (r['startIndex'], r['endIndex']) == (para['startIndex'], para['endIndex'])   # with its newline

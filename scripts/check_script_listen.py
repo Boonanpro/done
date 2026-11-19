@@ -130,6 +130,20 @@ def main():
             page.screenshot(path=str(out_dir / f'{stamp}-edited.png'))
             page.get_by_role('button', name='止める', exact=True).click()
 
+            # 3b. a click to listen leaves the caret in the sentence: Space must pause, not type into the doc
+            if not a.phone:
+                quiet = says[5]
+                sp = page.locator(f'span[data-n="{quiet["n"]}"]')
+                sp.scroll_into_view_if_needed(); sp.click()
+                page.wait_for_timeout(1500)
+                page.keyboard.press('Space')
+                page.wait_for_timeout(800)
+                paused = page.get_by_role('button', name='聞く', exact=True).is_visible()
+                page.locator('body').click(position={'x': 5, 'y': 300})      # move focus away (a blur would save a change)
+                page.wait_for_timeout(2500)
+                still = any(u['text'] == quiet['text'] for u in S.read(a.edit_doc)['units'] if u['kind'] == 'say')
+                result['space_after_click'] = {'paused': paused, 'doc_unchanged': still}
+
             # 4. someone else changes the doc
             other = says[6]
             mark = f'（ドキュメント側の直し{stamp[-6:]}）'
