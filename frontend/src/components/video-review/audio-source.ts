@@ -10,7 +10,7 @@
 // それを Web Audio の時計で、クリップの境目の時刻ぴったりに鳴らす。頭出しの待ちが無くなる。
 // mp4 以外（wav・mp3 など短い音の素材）は丸ごと読んで decodeAudioData する。
 
-import { createFile, type MP4File, type MP4ArrayBuffer } from 'mp4box';
+import { readMp4Index } from './mp4-index';
 import { readLocalRange } from './local-media';
 import { mediaFetch } from './media-route';
 import { stretchChannels } from './time-stretch';
@@ -135,43 +135,19 @@ export class AssetAudioSource {
     const idx = new Uint8Array((ftyp?.byteLength || 0) + moov.byteLength);
     if (ftyp) idx.set(ftyp, 0);
     idx.set(moov, ftyp?.byteLength || 0);
-    const ab = idx.buffer as MP4ArrayBuffer;
-    ab.fileStart = 0;
-    const file: MP4File = createFile();
-    type ATrack = { id: number; codec: string; audio?: { sample_rate: number; channel_count: number } };
-    const info = await new Promise<{ duration: number; timescale: number; audioTracks?: ATrack[] }>((resolve, reject) => {
-      file.onError = (e) => reject(new Error(String(e)));
-      file.onReady = (i) => resolve(i as unknown as { duration: number; timescale: number; audioTracks?: ATrack[] });
-      file.appendBuffer(ab);
-      file.flush();
-      setTimeout(() => reject(new Error('moov parse timeout')), 5000);
-    });
-    this.duration = info.duration / (info.timescale || 1);
-    const at = info.audioTracks?.[0];
-    if (!at) { this.silent = true; return; }
-    this.codec = at.codec;
-    this.sampleRate = at.audio?.sample_rate || 48000;
-    this.channels = Math.max(1, Math.min(2, at.audio?.channel_count || 2));
-    const trak = file.getTrackById(at.id) as unknown as {
-      mdia: { mdhd?: { timescale: number }; minf: { stbl: { stsd: { entries: Array<{ esds?: { esd?: { descs?: Array<{ descs?: Array<{ data?: Uint8Array }> }> } } }> } } } };
-      edts?: { elst?: { entries?: Array<{ segment_duration: number; media_time: number }> } };
-    };
-    const dsi = trak.mdia.minf.stbl.stsd.entries[0]?.esds?.esd?.descs?.[0]?.descs?.[0]?.data;
-    if (dsi) this.description = new Uint8Array(dsi);
-    // 編集リスト（AAC の先頭の詰め物の分）: 再生機（<video>）と同じ時刻に揃える
-    const mts = trak.mdia.mdhd?.timescale || 0;
-    let shift = 0;
-    const entries = trak.edts?.elst?.entries || [];
-    let empty = 0;
-    for (const e of entries) {
-      if (e.media_time === -1) { empty += e.segment_duration / (info.timescale || 1); continue; }
-      if (mts) shift = e.media_time / mts;
-      break;
-    }
-    for (const s of file.getTrackSamplesInfo(at.id) || []) {
-      this.samples.push({ pt: s.cts / s.timescale - shift + empty, dur: s.duration / s.timescale, offset: s.offset, size: s.size });
-    }
-    this.samples.sort((a, b) => a.pt - b.pt);
+    // 目次を読むのは裏の処理で（長い録画では画面が0.2〜0.4秒止まっていた。2026-11-19）
+    const ix = await readMp4Index(idx, 'audio');
+    if (ix.kind !== 'audio') throw new Error('bad index');
+    this.duration = ix.duration;
+    if (ix.silent && !ix.codec) { this.silent = true; return; }
+    this.codec = ix.codec;
+    this.sampleRate = ix.sampleRate;
+    this.channels = ix.channels;
+    if (ix.description) this.description = ix.description;
+    const n = ix.pt.length;
+    const samples: ASample[] = new Array(n);
+    for (let i = 0; i < n; i++) samples[i] = { pt: ix.pt[i], dur: ix.dur[i], offset: ix.offset[i], size: ix.size[i] };
+    this.samples = samples;
     if (!this.samples.length) { this.silent = true; return; }
     const support = await AudioDecoder.isConfigSupported(this.decoderConfig()).catch(() => ({ supported: false }));
     if (!support.supported) throw new Error(`codec not supported ${this.codec}`);

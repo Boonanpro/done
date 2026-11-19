@@ -3099,6 +3099,9 @@ export function VideoReviewEditor({
     if (track) {
       track.style.transformOrigin = '0 0';
       track.style.transform = k === 1 ? '' : `scaleX(${k})`;
+      // 引き伸ばしている間は、今の絵をそのまま伸ばして見せる（伸ばすたびに描き直すと、Windows では
+      // つまみを動かす1回ごとに画面の塗り直しが重なって固まっていた。2026-11-19）
+      track.style.willChange = k === 1 ? '' : 'transform';
     }
     zoomPreview.set(target === committed ? null : target);
     placePlayhead(liveTimeRef.current);
@@ -3132,7 +3135,7 @@ export function VideoReviewEditor({
     const pending = zoomPreview.get();
     if (pending != null && pending !== timelineZoom) { showZoom(pending); return; }
     zoomScaleRef.current = 1;
-    if (timelineRef.current) timelineRef.current.style.transform = '';
+    if (timelineRef.current) { timelineRef.current.style.transform = ''; timelineRef.current.style.willChange = ''; }
     zoomPreview.set(null);
     placePlayhead(liveTimeRef.current);
   }, [timelineZoom, zoomPreview, showZoom, placePlayhead]);

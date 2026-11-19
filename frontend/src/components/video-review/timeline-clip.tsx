@@ -127,6 +127,25 @@ function loadPeaks(url: string): Promise<Uint8Array | null> {
   return p;
 }
 
+// 山を2つずつ最大でまとめた段（段 k は 2^k 個ずつ）。素材ごとに1回だけ作る
+const PEAK_LEVELS = 16;
+const peakLevels = new WeakMap<Uint8Array, Uint8Array[]>();
+function peakLevel(peaks: Uint8Array, level: number): Uint8Array {
+  let levels = peakLevels.get(peaks);
+  if (!levels) { levels = [peaks]; peakLevels.set(peaks, levels); }
+  while (levels.length <= level) {
+    const prev = levels[levels.length - 1];
+    const next = new Uint8Array(Math.ceil(prev.length / 2));
+    for (let i = 0; i < next.length; i += 1) {
+      const p = prev[2 * i];
+      const q = 2 * i + 1 < prev.length ? prev[2 * i + 1] : 0;
+      next[i] = p > q ? p : q;
+    }
+    levels.push(next);
+  }
+  return levels[level];
+}
+
 // --- 絵の帯: 帯ごとに1回だけ読み、1コマの縦横比を覚える --------------------------------------------
 const STRIP_FRAMES = 30;
 const stripAspect = new Map<string, number | Promise<number>>();
@@ -170,8 +189,10 @@ function Waveform({ url, sourceStart, sourceEnd, widthPx, volume, dark }: {
   useEffect(() => {
     const c = ref.current;
     if (!c || !peaks) return;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const cw = Math.max(1, Math.min(4096, Math.round(widthPx * dpr)));
+    // 波形は細かさが要らないので、画面の倍率は1.5倍まで・横は2048点までで描く。Windows（倍率2.2倍）では
+    // ズームのたびに長い音のクリップで数千本の線を描き直して、画面が止まっていた（2026-11-19）
+    const dpr = Math.min(1.5, window.devicePixelRatio || 1);
+    const cw = Math.max(1, Math.min(2048, Math.round(widthPx * dpr)));
     const ch = Math.max(1, Math.round((c.clientHeight || 30) * dpr));
     if (c.width !== cw) c.width = cw;
     if (c.height !== ch) c.height = ch;
@@ -183,16 +204,23 @@ function Waveform({ url, sourceStart, sourceEnd, widthPx, volume, dark }: {
     const span = Math.max(1, (sourceEnd - sourceStart) * PEAKS_PER_SEC);
     const mid = ch / 2;
     const gain = Math.min(VOL_MAX, Math.max(0, volume));
+    // 1本の線に入る山の数に合わせて、山を2つずつまとめた段から読む（長い音でも線の数だけの手間）
+    const per = span / cw;
+    const level = Math.max(0, Math.min(PEAK_LEVELS - 1, Math.floor(Math.log2(Math.max(1, per)))));
+    const lv = peakLevel(peaks, level);
+    const scale = 2 ** level;
+    const path = new Path2D();
     for (let x = 0; x < cw; x += 1) {
-      const i0 = Math.floor(a + (x / cw) * span);
-      const i1 = Math.max(i0 + 1, Math.floor(a + ((x + 1) / cw) * span));
+      const i0 = Math.floor((a + (x / cw) * span) / scale);
+      const i1 = Math.max(i0 + 1, Math.floor((a + ((x + 1) / cw) * span) / scale));
       let m = 0;
-      for (let i = i0; i < i1 && i < peaks.length; i += 1) if (peaks[i] > m) m = peaks[i];
+      for (let i = i0; i < i1 && i < lv.length; i += 1) if (lv[i] > m) m = lv[i];
       if (!m) continue;
       // 小さい音も見えるように平方根で。音量を上げ下げすると波形も大きさが変わる
       const h = Math.min(mid, Math.sqrt(m / 255) * mid * gain * 0.95);
-      g.fillRect(x, mid - h, 1, Math.max(1, h * 2));
+      path.rect(x, mid - h, 1, Math.max(1, h * 2));
     }
+    g.fill(path);
   }, [peaks, sourceStart, sourceEnd, widthPx, volume, dark]);
   return <canvas ref={ref} className="pointer-events-none absolute inset-0 h-full w-full" />;
 }
