@@ -387,9 +387,11 @@ def decide(doc_id, sid, accept):
             runs.append((e['startIndex'], end, 'ins' if sid in ins else 'del', r['content'], r.get('textStyle') or {}, pstyle, nxt))
     if not runs:
         raise ListenError('この提案はもうありません。ドキュメントの方で決められたかもしれません。', 409)
-    reqs = decide_requests(runs, accept, body_end)
+    text_reqs, style_reqs = decide_requests(runs, accept, body_end)
     _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
-          body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+          body={'requests': text_reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+    if style_reqs:
+        _docs('POST', f'{doc_id}:batchUpdate', doc['_account'], body={'requests': style_reqs})
     added = ''.join(r[3] for r in runs if r[2] == 'ins').strip()
     removed = ''.join(r[3] for r in runs if r[2] == 'del').strip()
     _log_owner_action(doc_id, doc.get('title', ''), action='accept' if accept else 'reject', suggestion=sid,
@@ -398,25 +400,38 @@ def decide(doc_id, sid, accept):
 
 
 def decide_requests(runs, accept, body_end=None):
-    """runs: (start, end, 'ins'|'del', text, textStyle, paragraph style, next paragraph's style) of one suggestion."""
-    reqs = []
+    """runs: (start, end, 'ins'|'del', text, textStyle, paragraph style, next paragraph's style) of one suggestion.
+    Returns (text requests, style requests). The styles go in a second write at the final positions: written in the
+    same write, text put back next to the suggestion's other runs still counted as suggested and lost its bold (11/19)."""
+    text_reqs, kept = [], []
     for start, end, kind, text, style, pstyle, nxt in sorted(runs, key=lambda r: r[0], reverse=True):
         if body_end and end >= body_end:          # the doc's last newline cannot be deleted
             end, text = end - 1, text[:-1]
             if end <= start: continue
-        reqs.append({'deleteContentRange': {'range': {'startIndex': start, 'endIndex': end}}})
+        text_reqs.append({'deleteContentRange': {'range': {'startIndex': start, 'endIndex': end}}})
         if (kind == 'ins') != accept: continue     # this text goes
+        text_reqs.append({'insertText': {'location': {'index': start}, 'text': text}})
+        kept.append((start, end, text, style, pstyle, nxt))
+    gone = sorted((r[0], r[1]) for r in runs if (r[2] == 'ins') != accept)
+    style_reqs = []
+    for start, end, text, style, pstyle, nxt in sorted(kept):
+        at = start - sum(min(b, start) - a for a, b in gone if a < start)
         size = sum(_units16(c) for c in text)
-        reqs.append({'insertText': {'location': {'index': start}, 'text': text}})
-        reqs.append({'updateTextStyle': {'range': {'startIndex': start, 'endIndex': start + size}, 'textStyle': style, 'fields': '*'}})
+        # A weight in weightedFontFamily wins over bold (11/19: bold text came back thin); keep only the family.
+        style = dict(style)
+        family = (style.pop('weightedFontFamily', None) or {}).get('fontFamily')
+        if family: style['weightedFontFamily'] = {'fontFamily': family}
+        style_reqs.append({'updateTextStyle': {'range': {'startIndex': at, 'endIndex': at + size}, 'textStyle': style, 'fields': '*'}})
         if text.endswith('\n'):
             # Deleting the newline joined two paragraphs; writing it again split them with one style. Put both back.
-            reqs.append({'updateParagraphStyle': {'range': {'startIndex': start, 'endIndex': start + size},
-                                                  'paragraphStyle': {'namedStyleType': pstyle}, 'fields': 'namedStyleType'}})
+            style_reqs.append({'updateParagraphStyle': {'range': {'startIndex': at, 'endIndex': at + size},
+                                                        'paragraphStyle': {'namedStyleType': pstyle}, 'fields': 'namedStyleType'}})
             if nxt:
-                reqs.append({'updateParagraphStyle': {'range': {'startIndex': start + size, 'endIndex': start + size + 1},
-                                                      'paragraphStyle': {'namedStyleType': nxt}, 'fields': 'namedStyleType'}})
-    return reqs
+                style_reqs.append({'updateParagraphStyle': {'range': {'startIndex': at + size, 'endIndex': at + size + 1},
+                                                            'paragraphStyle': {'namedStyleType': nxt}, 'fields': 'namedStyleType'}})
+    # Paragraph styles first: setting a paragraph's named style clears the text styles inside it (11/19, bold was lost).
+    style_reqs.sort(key=lambda r: 'updateParagraphStyle' not in r)
+    return text_reqs, style_reqs
 
 
 # ---------------------------------------------------------------- comments (the doc's own comments, both ways)

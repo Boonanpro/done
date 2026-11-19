@@ -141,14 +141,17 @@ def test_accept_and_reject_write_what_docs_would():
     # 「で」 suggested out, 「なら」 suggested in: 「一括でなら36万円」 as stored
     text = '一括でなら36万円'
     runs = [(3, 4, 'del', 'で', {}, 'NORMAL_TEXT', None), (4, 6, 'ins', 'なら', {'bold': True}, 'NORMAL_TEXT', None)]
-    assert _apply(text, S.decide_requests(runs, accept=True)) == '一括なら36万円'
-    assert _apply(text, S.decide_requests(runs, accept=False)) == '一括で36万円'
-    kept = [r for r in S.decide_requests(runs, accept=True) if 'updateTextStyle' in r]
-    assert kept[0]['updateTextStyle']['textStyle'] == {'bold': True} and kept[0]['updateTextStyle']['fields'] == '*'
+    assert _apply(text, S.decide_requests(runs, accept=True)[0]) == '一括なら36万円'
+    assert _apply(text, S.decide_requests(runs, accept=False)[0]) == '一括で36万円'
+    style = S.decide_requests(runs, accept=True)[1][0]['updateTextStyle']
+    # 「で」 (index 3) is gone, so 「なら」 now starts at 3
+    assert style['range'] == {'startIndex': 3, 'endIndex': 5} and style['textStyle'] == {'bold': True} and style['fields'] == '*'
+    style = S.decide_requests(runs, accept=False)[1][0]['updateTextStyle']
+    assert style['range'] == {'startIndex': 3, 'endIndex': 4}
 
 
 def test_accepted_new_paragraph_keeps_both_paragraph_styles():
     runs = [(10, 15, 'ins', '見出し\n', {}, 'HEADING_3', 'NORMAL_TEXT')]
-    reqs = S.decide_requests(runs, accept=True)
+    reqs = S.decide_requests(runs, accept=True)[1]
     styles = [r['updateParagraphStyle'] for r in reqs if 'updateParagraphStyle' in r]
     assert [x['paragraphStyle']['namedStyleType'] for x in styles] == ['HEADING_3', 'NORMAL_TEXT']
