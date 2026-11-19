@@ -703,6 +703,9 @@ function parseFps(value: unknown): number | null {
 }
 
 
+// スマホの速さの並び（2026-11-19 本人「最大10倍。音声のピッチを変えず」）
+const PHONE_RATES = [1, 1.5, 2, 3, 5, 10];
+
 const DAN_HANDS_CSS = `
 /* 動かすのはダンが触っているクリップだけ。全部のクリップに効く印を段の外枠に付け外しすると、
    2,000個を超えるクリップの見た目を毎回計算し直して画面が止まっていた（2026-11-16）。 */
@@ -1133,10 +1136,11 @@ export function VideoReviewEditor({
   const [playing, setPlaying] = useState(false);
   // 再生の速さ（2026-11-15 本人「L を押したら、音のピッチを変えずに倍速再生」）。L で 2倍→3倍→4倍、
   // Space・再生ボタン・止めると等倍に戻る。音の高さはプレビューが保つ。
+  // スマホの形では映像の上の速さのボタンで選び（最大10倍。2026-11-19 本人）、止めても再生し直しても選んだ速さのまま。
   const [playRate, setPlayRate] = useState(1);
   const playingNowRef = useRef(false);
   playingNowRef.current = playing;
-  useEffect(() => { if (!playing) setPlayRate(1); }, [playing]);
+  useEffect(() => { if (!playing && !compact) setPlayRate(1); }, [playing, compact]);
   // Frame-step rate for ←/→ = the TIMELINE/output frame rate, NOT the source clip's declared fps.
   // Proxies are CFR 30 and the export renders at 30fps, so the timeline is effectively 30fps; one
   // arrow press should advance exactly one displayed/output frame. (Stepping at the source rate —
@@ -4626,6 +4630,7 @@ export function VideoReviewEditor({
   const [phoneChatOpen, setPhoneChatOpen] = useState(false);
   const [phoneMenuOpen, setPhoneMenuOpen] = useState(false);
   const [phoneControls, setPhoneControls] = useState(true);
+  const [phoneRateOpen, setPhoneRateOpen] = useState(false);
   useEffect(() => {
     if (!compact) return;
     const read = () => setPhoneVp({ w: window.innerWidth, h: window.innerHeight });
@@ -4640,10 +4645,11 @@ export function VideoReviewEditor({
   const phoneLandscape = compact && phoneVp.w > phoneVp.h;
   // 再生中は、押してから3秒で映像の上のボタンを隠す（縦も横も YouTube と同じ。止めている間は出したまま）
   useEffect(() => {
-    if (!compact || !phoneControls || !playing || phoneMenuOpen || (phoneLandscape && phoneChatOpen)) return;
+    if (!compact || !phoneControls || !playing || phoneMenuOpen || phoneRateOpen || (phoneLandscape && phoneChatOpen)) return;
     const id = window.setTimeout(() => setPhoneControls(false), 3000);
     return () => window.clearTimeout(id);
-  }, [compact, phoneLandscape, phoneControls, playing, phoneChatOpen, phoneMenuOpen]);
+  }, [compact, phoneLandscape, phoneControls, playing, phoneChatOpen, phoneMenuOpen, phoneRateOpen]);
+  useEffect(() => { if (!phoneControls) setPhoneRateOpen(false); }, [phoneControls]);
   // ブラウザで開いた時は、触った所で全画面にする（Chrome の住所の欄・タブの帯の分だけ狭くなるため。
   // 2026-11-17 本人）。全画面は人が触った時にしか入れないので、指を離した時に入れる。
   // Android では全画面の時に画面の端からなぞると「戻る」になって全画面が解ける（帯を左右に送る時に起きやすい）。
@@ -4723,7 +4729,7 @@ export function VideoReviewEditor({
     }
     return out;
   }, [compact, timelineLanes, sequenceAssetMap]);
-  const phoneSetPlaying = useCallback((p: boolean) => { if (p) setPlayRate(1); setPlaying(p); }, []);
+  const phoneSetPlaying = useCallback((p: boolean) => { setPlaying(p); }, []);
   const phonePrimeScale = useRef(false);
   useEffect(() => {
     // 最初は画面の幅に約20秒が映る細かさ（短い作品は全体が映る）
@@ -4783,7 +4789,7 @@ export function VideoReviewEditor({
             rate={playRate}
           />
         )}
-        {playing && playRate !== 1 ? (
+        {playing && playRate !== 1 && !(compact && phoneControls) ? (
           <div className="pointer-events-none absolute right-2 top-2 z-30 rounded bg-black/70 px-2 py-0.5 text-sm font-semibold text-white" data-testid="play-rate">
             {playRate}倍速
           </div>
@@ -5060,6 +5066,36 @@ export function VideoReviewEditor({
         <ArrowLeft className="h-5 w-5" />
       </button>
     ) : null;
+    // 速さ（声の高さはそのまま）。押すとボタンの上に横一列の並びが開き、選ぶと閉じる（縦に並べると縦持ちの低い映像からはみ出す）
+    const rateLabel = (r: number) => `${r}倍`;
+    const rateButton = (
+      <div className="relative shrink-0">
+        <button
+          type="button"
+          data-phone-rate
+          onClick={() => setPhoneRateOpen((v) => !v)}
+          className={`flex h-9 min-w-[3.25rem] items-center justify-center rounded-full px-2 text-sm font-semibold tabular-nums ${playRate !== 1 || phoneRateOpen ? 'bg-white text-black' : ''}`}
+          aria-label={`再生の速さ ${rateLabel(playRate)}`}
+        >
+          {rateLabel(playRate)}
+        </button>
+        {phoneRateOpen ? (
+          <div data-phone-rate-list className="absolute bottom-11 right-0 z-40 flex flex-row overflow-hidden rounded-full bg-black/85 px-1 shadow-lg">
+            {PHONE_RATES.map((r) => (
+              <button
+                key={r}
+                type="button"
+                data-phone-rate-choice={r}
+                onClick={() => { setPlayRate(r); setPhoneRateOpen(false); setPhoneControls(true); }}
+                className={`h-10 shrink-0 whitespace-nowrap px-2.5 text-sm font-semibold tabular-nums ${r === playRate ? 'text-sky-300' : 'text-white'}`}
+              >
+                {rateLabel(r)}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
     const fullButton = phoneCanFull ? (
       <button type="button" data-phone-full onClick={phoneToggleFull} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full" aria-label={phoneFull ? '全画面をやめる' : '全画面'}>
         {phoneFull ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
@@ -5133,6 +5169,7 @@ export function VideoReviewEditor({
                 ) : null}
                 <div className="flex items-center">
                   <PhoneTime ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} className="min-w-0 flex-1 px-1 font-mono text-xs tabular-nums text-white/90 drop-shadow" />
+                  {rateButton}
                   {fullButton}
                 </div>
                 <PhoneSeekBar ctl={phoneScrub} liveTimeRef={liveTimeRef} duration={contentDuration || 0} onSeek={seekTimeline} playing={playing} setPlaying={phoneSetPlaying} />

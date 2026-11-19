@@ -263,6 +263,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const rate = Number.isFinite(rateProp) && rateProp > 0 ? rateProp : 1;
   const rateRef = useRef(rate);
   rateRef.current = rate;
+  // 5倍以上は、動画の要素を速回しせず、鍵のコマ（画面用の写しで0.5秒おき）だけを拾って見せる。
+  // 要素を5倍・10倍で回すと解読が追いつかず、絵がほとんど止まったままになった（2026-11-19 スマホの幅で測った）。
+  // PC の L（4倍まで）は今までどおり要素を回す。
+  const SKIM_KEYS_RATE = 5;
+  const skimKeysRef = useRef(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   // WebCodecs frame decoders, one per asset URL (shared across all clips of that asset). Used
@@ -936,7 +941,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const frozen = isFrozen(clip);
       const lo = ss;
       const hi = frozen ? ss : Number(clip.source_end ?? ss);
-      const frame = fs.peek(clipSourceTime(clip, t), lo, hi);
+      // 鍵のコマだけ拾う早送りでは、少し前の鍵のコマを出してよい（素材の1.5秒＝10倍で実時間0.15秒）
+      const frame = fs.peek(clipSourceTime(clip, t), lo, hi, skimKeysRef.current && playingRef.current ? 1.5 : 0.18);
       if (!frame) return null;
       return joinAlpha(clip, { src: frame, vw: frame.width || fs.width, vh: frame.height || fs.height });
     },
@@ -996,8 +1002,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (!fs.canProvide(expected)) continue;  // 素材の外・壊れた素材
         const ss = Number(clip.source_start || 0);
         const frozen = isFrozen(clip);
-        const got = fs.peek(expected, ss, frozen ? ss : Number(clip.source_end ?? ss));
-        if (got && Math.abs(fs.lastShownTime - expected) < 0.07) continue;
+        const skim = mode === 'run' && skimKeysRef.current;
+        const got = fs.peek(expected, ss, frozen ? ss : Number(clip.source_end ?? ss), skim ? 1.5 : 0.18);
+        if (got && Math.abs(fs.lastShownTime - expected) < (skim ? 1.5 : 0.07)) continue;
         return false;
       }
       return true;
@@ -1272,6 +1279,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     }
     if (!playClockRef.current) playClockRef.current = { wall: performance.now(), t: currentTime };
     const R = rateRef.current; // 速さが変わるとこの輪は作り直される（deps の rate）
+    const skimKeys = R >= SKIM_KEYS_RATE;
+    skimKeysRef.current = skimKeys;
     // 音を Web Audio で鳴らす時は、その時計を再生の時計にする（聞こえている時刻＝映っている時刻）。
     // ここに来るのは再生を始めた時と、再生中に段の中身が変わった時。どちらも今の時刻から予約し直す。
     const mgr = audioMgrRef.current;
@@ -1323,7 +1332,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     };
     // 映像の要素ごとの再生の速さ（再生の速さ × クリップの速さ）
     const speedById = new Map(visualClips.map((vc) => [String(vc.clip.id), clipSpeed(vc.clip)]));
-    const rateOf = (id: string) => R * (speedById.get(id) ?? 1);
+    // 映像の要素の速さは16倍までしか付けられない（それより上は Chrome が例外を投げる）
+    const rateOf = (id: string) => Math.min(16, R * (speedById.get(id) ?? 1));
     const PREROLL = 1.5; // pre-seek a clip about to start so its first frame is ready at the cut
     const LEAD = 0.4;    // 映像の要素を境目より前から走らせておく長さ
     // 映像と音がそろって流れ出せるまで、再生ヘッド・音・映像を全部止めて待つ（2026-11-13 本人
@@ -1447,6 +1457,15 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           if (fs) void fs.ready.then(() => fs.seekTo(Number(vc.clip.source_start || 0)));
           continue;
         }
+        if (skimKeys) {
+          // 鍵のコマだけ拾う: 要素は止め、今の時刻の手前の鍵のコマを解読させる（同じコマは1回だけ）
+          const ve = videosRef.current.get(id);
+          if (ve && !ve.paused) ve.pause();
+          const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
+          const fs = url ? framesRef.current.get(url) : null;
+          if (fs) { const kt = fs.keyTimeAt(clipSourceTime(vc.clip, t)); if (kt >= 0) void fs.seekTo(kt); }
+          continue;
+        }
         const v = videosRef.current.get(id);
         if (!v) continue;
         activeVids.add(id);
@@ -1468,7 +1487,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           // 再生中の要素を頭出しすると、その間（0.2〜0.3秒）止まって、かえってずれが広がる（頭出し→止まる→
           // また頭出し、を繰り返していた）。大きく外れた時だけ頭出しし、ふだんは速さを段で変えて追いつかせる。
           // 毎コマ細かく速さを変えると、ブラウザが再生を引っかける。
-          const want = Rv * (signed < -0.06 ? 1.25 : signed < -0.02 ? 1.06 : signed > 0.06 ? 0.8 : signed > 0.02 ? 0.94 : drift < 0.008 ? 1 : v.playbackRate / Rv);
+          const want = Math.min(16, Rv * (signed < -0.06 ? 1.25 : signed < -0.02 ? 1.06 : signed > 0.06 ? 0.8 : signed > 0.02 ? 0.94 : drift < 0.008 ? 1 : v.playbackRate / Rv));
           if ((!prevActiveVideoRef.current.has(id) && (v.paused ? drift > 0.04 : drift > 0.25 * Rv)) || drift > 0.7 * Rv) {
             try { v.currentTime = expected; } catch { /* not ready */ }
             if (v.playbackRate !== Rv) v.playbackRate = Rv;
@@ -1514,6 +1533,14 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const id = String(vc.clip.id);
         if (activeVids.has(id) || isFrozen(vc.clip)) continue;
         if (!(vc.clip.timeline_start > t && vc.clip.timeline_start <= t + PREROLL * R)) continue;
+        if (skimKeys) {
+          // 鍵のコマだけ拾う早送り: 要素は走らせず、始まりの鍵のコマだけ先に解読しておく
+          if (vc.clip.timeline_start > t + 0.5 * R) continue;
+          const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
+          const fs = url ? framesRef.current.get(url) : null;
+          if (fs) { const kt = fs.keyTimeAt(Number(vc.clip.source_start || 0)); if (kt >= 0) void fs.seekTo(kt); }
+          continue;
+        }
         // 始まった時に上の段にふさがれているクリップは、前もって走らせない
         if (fixLayers) {
           const at = vc.clip.timeline_start + 0.001;
@@ -1564,7 +1591,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if ((!prevActiveAudioRef.current.has(id) && aDrift > 0.04) || aDrift > 0.3) a.currentTime = expected;
         a.muted = false;
         a.preservesPitch = true;
-        if (a.playbackRate !== R * clipSpeed(c)) a.playbackRate = R * clipSpeed(c);
+        { const ra = Math.min(16, R * clipSpeed(c)); if (a.playbackRate !== ra) a.playbackRate = ra; }
         a.volume = c.volume == null ? 1 : Math.max(0, Math.min(1, Number(c.volume) || 0));
         if (a.paused) void a.play().catch(() => {});
         if (a.paused || a.seeking || a.readyState < 3 || Math.abs(a.currentTime - expected) > 0.25) elementGap = true;
@@ -1585,7 +1612,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       // 映像か音が時計に追いついていない: 0.15秒続いたら、全部止めてそろうまで待つ（時計だけ進めない）
       const visualOk = drawn && visualReadyAt(t, 'run');
       if (!visualOk) { const st = previewStats(); st.frozenMs = (st.frozenMs || 0) + dtMs; feelFrozen(dtMs); }
-      if (gate && (!visualOk || audioGap)) {
+      // 4倍以上の早送りでは、映像が追いつかなくても時計と音を止めない（絵は前のコマのまま、追いついた所から出る）。
+      // 切れ目ごとに準備を待つと、10倍のつもりが7倍しか進まず何度も止まる（2026-11-19 本人「スマホで最大10倍」）。
+      const skim = R >= 4;
+      if (gate && ((!visualOk && !skim) || audioGap)) {
         if (!badSince) badSince = nowWall;
         else if (nowWall - badSince > 150) {
           enterPrep(t, true);
