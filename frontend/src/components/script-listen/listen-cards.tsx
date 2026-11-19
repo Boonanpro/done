@@ -2,7 +2,7 @@
 
 // 台本を聞く画面のコメントと提案の札（2026-11-19）。コメントは Google ドキュメントのコメントそのもの
 // （app/services/script_listen.py の comments）。ここで書くと、ドキュメントで書いた時と同じくダンが返事と直しをする。
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, Loader2, MessageSquare, RotateCcw, X } from 'lucide-react';
 
 import type { Seg, Suggestion, Thread } from '@/lib/script-listen-api';
@@ -45,6 +45,13 @@ const WHO: Record<string, string> = { owner: 'みきさん', dan: 'ダン' };
 function ReplyBox({ onSend, placeholder, autoFocus }: { onSend: (text: string) => Promise<void>; placeholder: string; autoFocus?: boolean }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const box = useRef<HTMLTextAreaElement | null>(null);
+  // Focus after the card has been moved beside its words; a plain autoFocus scrolled the page to the top (11/19).
+  useEffect(() => {
+    if (!autoFocus) return;
+    const t = window.setTimeout(() => box.current?.focus({ preventScroll: true }), 60);
+    return () => window.clearTimeout(t);
+  }, [autoFocus]);
   const send = async () => {
     if (!text.trim() || busy) return;
     setBusy(true);
@@ -53,7 +60,7 @@ function ReplyBox({ onSend, placeholder, autoFocus }: { onSend: (text: string) =
   return (
     <div className="mt-2">
       <textarea
-        autoFocus={autoFocus}
+        ref={box}
         value={text}
         onChange={e => setText(e.target.value)}
         onKeyDown={e => {

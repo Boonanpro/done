@@ -97,7 +97,7 @@ export const listenApi = {
   edit: (id: string, old: string, next: string, start: number) =>
     json<{ changed: boolean }>(`/doc/${encodeURIComponent(id)}/edit`, { old, new: next, start }),
   comments: (id: string) => json<{ threads: Thread[]; can_comment: boolean }>(`/doc/${encodeURIComponent(id)}/comments`),
-  addComment: (id: string, body: { text: string; quote: string; start?: number | null }) =>
+  addComment: (id: string, body: { text: string; quote: string; start?: number | null; sentence?: string }) =>
     json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments`, body),
   reply: (id: string, cid: string, text: string) =>
     json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments/${encodeURIComponent(cid)}/reply`, { text }),

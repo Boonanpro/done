@@ -84,11 +84,12 @@ class NewComment(BaseModel):
     text: str
     quote: str = ''
     start: int | None = None
+    sentence: str = ''
 
 
 @router.post('/doc/{doc_id}/comments')
 async def add_comment(doc_id: str, body: NewComment, user: TokenData = Depends(get_current_user)):
-    try: return await run_in_threadpool(S.add_comment, S.doc_id_from(doc_id), body.quote, body.text, body.start)
+    try: return await run_in_threadpool(S.add_comment, S.doc_id_from(doc_id), body.quote, body.text, body.start, body.sentence)
     except Exception as exc: _fail(exc)
 
 

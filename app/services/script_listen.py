@@ -260,6 +260,29 @@ def outline(doc):
     return units
 
 
+_image_cache: dict = {}
+
+
+def _inline_images(units):
+    """The doc's picture links only open from a server (a browser signed in to Google gets refused, 11/19), so the
+    pictures of the top part (the thumbnail) travel inside the answer."""
+    import base64
+    for u in [x for x in units if x['kind'] == 'image'][:4]:
+        src = u['src']
+        key = src.split('?')[0]
+        if key not in _image_cache:
+            try:
+                r = httpx.get(src, timeout=15, follow_redirects=True)
+                r.raise_for_status()
+                if len(r.content) > 3_000_000: continue
+                kind = r.headers.get('content-type', 'image/jpeg').split(';')[0]
+                _image_cache[key] = f'data:{kind};base64,' + base64.b64encode(r.content).decode()
+                if len(_image_cache) > 30: _image_cache.pop(next(iter(_image_cache)))
+            except Exception:
+                continue
+        u['src'] = _image_cache[key]
+
+
 def suggestions_of(units):
     """Each suggestion once, with the text it adds and removes and the first unit it shows in."""
     out = {}
@@ -282,6 +305,7 @@ def read(doc_id, voice=DEFAULT_VOICE):
             u['key'] = clip_key(u['speak'], voice, u['gap'])
             u['ready'] = (CACHE / f"{u['key']}.mp3").exists()
             u['seconds'] = _meta(u['key']).get('seconds')
+    _inline_images(units)
     title = doc.get('title', '')
     watch_soon(doc_id)
     return {'doc_id': doc_id, 'title': title, 'revision': doc.get('revisionId'), 'version': doc.get('revisionId'),
@@ -519,6 +543,20 @@ def _anchors():
     except Exception: return {}
 
 
+def anchor_start(a):
+    return a.get('start') if isinstance(a, dict) else a
+
+
+def anchor_note(comment_ids):
+    """For Dan's answer: the sentence each comment made on the listening screen was written on."""
+    anchors = _anchors()
+    lines = [f"{cid}: 文「{anchors[cid]['sentence']}」" for cid in comment_ids
+             if isinstance(anchors.get(cid), dict) and anchors[cid].get('sentence')]
+    if not lines: return ''
+    return ('台本を聞く画面から書かれたコメントの場所（Googleでは本文の位置が残らないので、ここで分かる）。'
+            'quote はその文の中で本人が選んだ言葉:\n' + '\n'.join(lines))
+
+
 def _who(item, private):
     text = (item.get('content') or '').strip()
     if text.startswith(('ダン：', 'ダン:', '【変えた所】', '【根拠】')): return 'dan'
@@ -555,7 +593,7 @@ def comments(doc_id):
                          'text': text, 'at': item.get('createdTime')})
         quote = html.unescape((t.get('quotedFileContent') or {}).get('value') or '')
         out.append({'id': t['id'], 'quote': quote, 'resolved': bool(t.get('resolved')), 'messages': msgs,
-                    'at': t.get('createdTime'), 'working': busy.get(t['id']), 'start': anchors.get(t['id'])})
+                    'at': t.get('createdTime'), 'working': busy.get(t['id']), 'start': anchor_start(anchors.get(t['id']))})
     out.sort(key=lambda x: x['at'] or '')
     return {'threads': out, 'can_comment': private}
 
@@ -568,7 +606,7 @@ def _owner_words(text):
     return text
 
 
-def add_comment(doc_id, quote, text, start=None):
+def add_comment(doc_id, quote, text, start=None, sentence=''):
     from app.services import gdoc_drive as G
     text = _owner_words(text)
     if not ensure_watched(doc_id):
@@ -578,10 +616,12 @@ def add_comment(doc_id, quote, text, start=None):
     quote = (quote or '').strip()
     if quote: body['quotedFileContent'] = {'mimeType': 'text/html', 'value': quote}
     made = G.request(_account(doc_id), 'POST', f'files/{doc_id}/comments', body, {'fields': 'id'})
-    if start is not None:
-        STATE.mkdir(parents=True, exist_ok=True)
-        anchors = _anchors(); anchors[made['id']] = start
-        ANCHORS.write_text(json.dumps(anchors))
+    # Where it was written. Docs keeps no place for a comment made through the API, so Dan's answer reads the sentence
+    # from here (gdoc_events.prompt): 11/19 a comment on 「行動力」 could have meant any of ten sentences.
+    STATE.mkdir(parents=True, exist_ok=True)
+    anchors = _anchors()
+    anchors[made['id']] = {'start': start, 'sentence': (sentence or '').strip()[:600], 'doc_id': doc_id}
+    ANCHORS.write_text(json.dumps(anchors, ensure_ascii=False))
     _poke(doc_id)
     return {'id': made['id']}
 

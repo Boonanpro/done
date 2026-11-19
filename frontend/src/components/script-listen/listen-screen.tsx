@@ -25,7 +25,7 @@ const VOICE_KEY = 'script-listen-voice';
 const posKey = (doc: string) => `script-listen-pos-${doc}`;
 // Every clip ends with 0.16 s of silence (+0.03 s kept after the voice). The next clip starts this many seconds of the
 // clip before its end, so only silence is cut and the switch to the next clip happens inside the pause.
-const LEAD = 0.13;
+const LEAD = 0.17;
 
 type Clip = { url: string; el: HTMLAudioElement };
 type Sheet = { kind: 'threads'; ids: string[] } | { kind: 'suggestion'; id: string } | { kind: 'compose' } | { kind: 'all' } | null;
@@ -428,7 +428,9 @@ export function ListenScreen({ docId }: { docId: string }) {
   const sendComment = async (text: string) => {
     if (!draft) return;
     try {
-      await listenApi.addComment(docId, { text, quote: draft.quote, start: draft.start });
+      const at = units.find(u => u.n === draft.n);
+      const sentence = at && 'text' in at ? at.text : '';
+      await listenApi.addComment(docId, { text, quote: draft.quote, start: draft.start, sentence });
       setDraft(null);
       setSheet(null);
       const list = await loadComments();
@@ -706,7 +708,7 @@ export function ListenScreen({ docId }: { docId: string }) {
             {top.length > 0 && (
               <section className="mb-6 rounded-lg border border-stone-200 bg-white/80 px-4 py-3">
                 {top.map(u => {
-                  if (u.kind === 'image') return <img key={u.n} src={u.src} alt="サムネ" className="my-2 w-full max-w-md rounded-md border border-stone-200" />;
+                  if (u.kind === 'image') return <img key={u.n} src={u.src} alt="サムネ" referrerPolicy="no-referrer" className="my-2 w-full max-w-md rounded-md border border-stone-200" />;
                   if (u.kind === 'heading') {
                     return (
                       <div key={u.n} id={`u-${u.n}`} data-n={u.n} className="mt-3 flex items-center gap-2 text-[14px] font-bold text-stone-700 first:mt-0">
