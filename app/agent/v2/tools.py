@@ -4323,9 +4323,16 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
             if not ref:
                 return {"success": False, "error": "ref is required"}
 
+            challenge_url = page.url
+            target = urlparse(challenge_url)
+            youtube_sms = (
+                source == "sms" and target.scheme == "https"
+                and target.hostname in {"www.youtube.com", "youtube.com"}
+                and target.path.rstrip("/") == "/verify"
+            )
             otp_code = await otp_service.wait_for_otp(
                 user_id=user_id,
-                service=params.get("service"),
+                service="youtube" if youtube_sms else params.get("service"),
                 source=source,
                 email_address=email_address,
                 timeout_seconds=timeout_seconds,
@@ -4358,6 +4365,8 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
                 )
                 return state
 
+            if youtube_sms and page.url != challenge_url:
+                return {"success": False, "error": "YouTube verification page changed while waiting."}
             await _fill_code_into_inputs(page, ref, otp_code)
             if params.get("press_enter", False):
                 await page.keyboard.press("Enter")
