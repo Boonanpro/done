@@ -80,3 +80,17 @@ def test_scheduled_send_with_owner_words_in_watch_note():
     note = "明日の朝9時に吉田さんへ請求書メールを送る。本人の言葉「明日の朝9時に吉田さんへ送っておいて」"
     assert check(approval="明日の朝9時に吉田さんへ送っておいて", latest_owner_message=msg("おはよう"),
                  watch_notes=[note], proposal=prop())["ok"]
+
+
+def test_reply_request_with_object_particle_and_another_task():
+    for instruction in ("相手の要求に答える返信をして。", "取引先にお返事をしてください。"):
+        message = msg(instruction + "\nあと部品の調達状況も知りたい。")
+        for updated, expected in ((T0, True), (T2, False)):
+            assert check(approval=instruction, latest_owner_message=message,
+                         watch_notes=[], proposal=prop(updated=updated))["ok"] == expected
+
+
+def test_partial_reply_quote_is_not_an_instruction():
+    for text in ("返信をしていいか聞いて", "返信をしてほしくない", "「返信をして」と書いた例文です"):
+        assert not check(approval="返信をして", latest_owner_message=msg(text),
+                         watch_notes=[], proposal=prop())["ok"]
