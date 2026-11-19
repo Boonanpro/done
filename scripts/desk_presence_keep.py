@@ -47,7 +47,12 @@ SETTLE = 600             # 区間が終わってからこの秒数たってか�
 UNKNOWN_END_CAP = 4 * 3600
 KEEP_DAYS: float | None = None   # None＝消さない（本人 11/18）
 MIN_CONTINUOUS_DAYS = 3
-RESERVE_MIB = 25 * 1024  # 書き出した後も NAS にこれだけは空けておく
+# 書き出した後も NAS にこれだけは空けておく。
+# 11/18 は 25GiB にして、満杯の NAS で書き出しが1本も進まず止まった（空き 5〜8GiB のまま）。
+# 書き出しが進まないと continuous の日数も下げられず、空きが増えない。書き出しで空きが減ると
+# Frigate 自身が一番古い録画（書き出し済みの日か、書き出しの対象外の録画）から消すので、
+# ここは書き出し1本の途中で NAS が0にならない分だけ残せばよい。
+RESERVE_MIB = 2 * 1024
 OWNER_AWAY_SEC = 600
 RESTART_COOLDOWN = 2 * 3600
 RUN_BUDGET = 50 * 60
