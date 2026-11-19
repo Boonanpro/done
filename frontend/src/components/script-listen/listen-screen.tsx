@@ -395,9 +395,10 @@ export function ListenScreen({ docId }: { docId: string }) {
     root.querySelectorAll('[data-on]').forEach(el => el.removeAttribute('data-on'));
     root.querySelectorAll('[data-cm]').forEach(el => el.removeAttribute('data-cm'));
     const u = says[cur];
-    if (u) root.querySelectorAll(`[data-n="${u.n}"]`).forEach(el => el.setAttribute('data-on', ''));
+    // While the owner types, the sentence they are in is not banded (11/19「黄色い枠…余計なものを付けるな」).
+    if (u && (playing || !dirtyRef.current)) root.querySelectorAll(`[data-n="${u.n}"]`).forEach(el => el.setAttribute('data-on', ''));
     threadsAt.forEach((_, n) => root.querySelectorAll(`[data-n="${n}"]`).forEach(el => el.setAttribute('data-cm', '')));
-  }, [says, cur, threadsAt]);
+  }, [says, cur, threadsAt, playing]);
   useEffect(() => { applyMarks(); }, [applyMarks]);
 
   const sayAtPos = useCallback((pos: Pos | null) => {
@@ -482,6 +483,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     typedRef.current = true;
     lastInput.current = Date.now();
     if (playingRef.current) stop();
+    editorRef.current?.querySelectorAll('[data-on]').forEach(el => el.removeAttribute('data-on'));
     setSelBtn(null);
     scheduleSave();
   }, [scheduleSave, stop]);
@@ -492,6 +494,8 @@ export function ListenScreen({ docId }: { docId: string }) {
     const run = (async () => {
       await flush();
       if (!dirtyRef.current) return;
+      // Keys typed while that was being written are not in the doc yet: reading it now would wipe them.
+      if (saveTimer.current != null || composingRef.current) return;
       const root = editorRef.current;
       const pos = root ? getPos(root) : null;
       dirtyRef.current = false;

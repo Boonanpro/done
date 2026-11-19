@@ -151,6 +151,8 @@ def run(a, result, out_dir, stamp, tok, sync_playwright):
             page.keyboard.insert_text('よ')
             new = target['text'][:-1] + 'よ' + target['text'][-1]
             result['typing_paused_player'] = page.get_by_role('button', name='聞く', exact=True).is_visible()
+            result['no_band_while_typing'] = page.locator('[data-testid=script-editor] [data-on]').count() == 0
+            page.screenshot(path=str(out_dir / f'{stamp}-typing.png'))
             result['typed'] = {'old': target['text'], 'new': new, 'in_doc_after_s': wait_doc(lambda: new in doc_says())}
 
             # 3c. Ctrl+Z takes it back, in the doc too; Ctrl+Shift+Z puts it again
@@ -193,6 +195,34 @@ def run(a, result, out_dir, stamp, tok, sync_playwright):
                 page.keyboard.press('Control+z')
                 joined = wait_doc(lambda: n_paras() == before_p)
                 result['enter'] = {'split_in_doc_s': split, 'joined_back_s': joined}
+
+            # 3e2. typing through an IME (how the owner types Japanese) lands once; Ctrl+Z takes it back
+            ime_t = says[7]
+            page.locator(f'span[data-n="{ime_t["n"]}"]').first.scroll_into_view_if_needed()
+            caret_end(ime_t['n'])
+            page.keyboard.press('ArrowLeft')
+            cdp = page.context.new_cdp_session(page)
+            cdp.send('Input.imeSetComposition', {'text': 'てすと', 'selectionStart': 3, 'selectionEnd': 3})
+            page.wait_for_timeout(300)
+            cdp.send('Input.imeSetComposition', {'text': 'テスト', 'selectionStart': 3, 'selectionEnd': 3})
+            page.wait_for_timeout(300)
+            cdp.send('Input.insertText', {'text': 'テスト'})
+            ime_new = ime_t['text'][:-1] + 'テスト' + ime_t['text'][-1]
+            got = wait_doc(lambda: ime_new in doc_says())
+            page.keyboard.press('Control+z')
+            gone = wait_doc(lambda: ime_t['text'] in doc_says() and ime_new not in doc_says())
+            result['ime'] = {'in_doc_once_s': got, 'undone_s': gone}
+
+            # 3e3. pasting two lines makes two paragraphs
+            n_paras = lambda: len(S.fetch(a.edit_doc)['body']['content'])
+            before_p = n_paras()
+            caret_end(ime_t['n'])
+            page.locator('[data-testid=script-editor]').evaluate("el => { const dt = new DataTransfer(); dt.setData('text/plain', '貼った一行目です。\\n貼った二行目です。');"
+                " el.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true})); }")
+            pasted = wait_doc(lambda: n_paras() == before_p + 1 and any('貼った二行目です。' == t for t in doc_says()))
+            page.keyboard.press('Control+z')
+            unpasted = wait_doc(lambda: n_paras() == before_p and not any('貼った' in t for t in doc_says()))
+            result['paste'] = {'two_paragraphs_s': pasted, 'undone_s': unpasted}
 
             # 3f. a selection across two paragraphs, and the comment mark beside it
             if not a.phone:
