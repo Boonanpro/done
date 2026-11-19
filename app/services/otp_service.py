@@ -648,7 +648,9 @@ class OTPService:
             "otp_code", "null"
         ).order("extracted_at", desc=True).limit(1)
 
-        if service:
+        if service == "youtube":
+            query = query.eq("service", "youtube")
+        elif service:
             # A code whose service could not be guessed from the text (service NULL) is still a candidate: the filter used to
             # drop it, and a forwarded Smart EX SMS (「【スマートEX】…」) sat unused for five minutes (2026-09-23).
             query = query.or_(f"service.eq.{service},service.is.null")
@@ -1247,6 +1249,7 @@ class OTPService:
             "amazon": ["amazon", "アマゾン"],
             "rakuten": ["楽天", "rakuten"],
             "ex_reservation": ["ex予約", "smartex", "スマートex", "新幹線", "jr"],
+            "youtube": ["youtube", "ユーチューブ"],
             "google": ["google", "グーグル"],
             "line": ["line", "ライン"],
             "yahoo": ["yahoo", "ヤフー"],
