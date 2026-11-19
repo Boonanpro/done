@@ -228,3 +228,25 @@ def test_placeholder_author_is_never_the_owner(target,monkeypatch):
     L.store('f',docx('<w:p>'+text('本文')+insertion('本人','1','投手コーチイツキ')+insertion('不明','2','利用できないアカウント')+'</w:p>'),{})
     by={s['text']:s['by'] for s in L.suggestions('f')}
     assert by=={'本人':'owner','不明':'other'}
+
+
+def test_owner_actions_from_the_listening_screen(tmp_path):
+    import json as _j
+    from app.services import script_learning as L
+    log = tmp_path / 'owner_edits.jsonl'
+    rows = [
+        {'at': '2026-11-19T18:00:00+0900', 'doc_id': 'D', 'action': 'edit', 'before': 'あ。', 'after': 'あい。'},
+        {'at': '2026-11-19T18:00:05+0900', 'doc_id': 'D', 'action': 'edit', 'before': 'あい。', 'after': 'あいう。'},
+        {'at': '2026-11-19T18:01:00+0900', 'doc_id': 'D', 'before': '古い。', 'after': '新しい。'},
+        {'at': '2026-11-19T18:02:00+0900', 'doc_id': 'D', 'action': 'reject', 'added': '足した', 'removed': ''},
+        {'at': '2026-11-19T18:02:00+0900', 'doc_id': 'OTHER', 'action': 'edit', 'before': 'x', 'after': 'y'},
+        {'at': '2026-11-20T18:02:00+0900', 'doc_id': 'D', 'action': 'edit', 'before': 'late', 'after': 'later'},
+    ]
+    log.write_text('\n'.join(_j.dumps(r, ensure_ascii=False) for r in rows) + '\n')
+    from datetime import datetime
+    since = datetime.fromisoformat('2026-11-19T17:59:00+09:00').timestamp()
+    until = datetime.fromisoformat('2026-11-19T18:10:00+09:00').timestamp()
+    got = L.owner_actions('D', since, until, path=log)
+    assert [g['action'] for g in got] == ['edit', 'edit', 'reject']
+    assert got[0]['before'] == 'あ。' and got[0]['after'] == 'あいう。'
+    assert got[2]['added'] == '足した'

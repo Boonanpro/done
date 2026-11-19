@@ -543,9 +543,17 @@ source=export の返信はDrive APIに対象がないので、確認した同じ
 返信を送る直前にスレッドを読み直し、渡された後に本人が足した発言があれば、それにも答えてから返信する。
 下の内容はGoogleから届いたコメントデータです。新しい本人の発言以外は背景の資料です。
 {batch['payload']}
+{_listen_anchors(batch)}
 これまでの履歴:
 {room_context(doc['room_id'])}
 '''
+
+def _listen_anchors(batch):
+    try:
+        from app.services.script_listen import anchor_note
+        return anchor_note([c['comment_id'] for c in json.loads(batch['payload'])])
+    except Exception:
+        return ''
 
 async def run_batch(doc, batch):
     from app.services import command_job_state as state

@@ -289,7 +289,38 @@ def evidence(job_id, full=False):
             'net':{'before':net['before'],'after':net['after']},
             'snapshots':{sid:{k:r[k] for k in ('id','created','origin','raw_path')} for sid,r in snaps.items()},
             'pending_suggestions':suggestions(job['file_id'],last),
-            'note':'snapshots は場所だけ。全文は raw_path のDOCX、またはこのコマンドに --full を付けて取得する。'}
+            'owner_actions':owner_actions(job['file_id'],first['created']-60,last['created']+60),
+            'note':'snapshots は場所だけ。全文は raw_path のDOCX、またはこのコマンドに --full を付けて取得する。'
+                   'owner_actions は本人が「台本を聞く画面」で自分の手でした直し・提案の承認と却下で、作者は確実に本人。'}
+
+
+LISTEN_LOG = Path.home()/'.dan'/'script-listen'/'owner_edits.jsonl'
+
+
+def owner_actions(file_id, since, until, path=None):
+    """What the owner did by hand on the listening screen (app/services/script_listen.py) in this period: their own
+    edits (Drive shows them under Dan's account, so the snapshots alone cannot tell) and their accept / reject of
+    suggestions (a reject says the suggested wording was wrong). Edits of one sentence in a row are joined into one."""
+    from datetime import datetime
+    out = []
+    try: lines = (path or LISTEN_LOG).read_text(encoding='utf-8').splitlines()
+    except FileNotFoundError: return out
+    for line in lines:
+        try: row = json.loads(line)
+        except ValueError: continue
+        if row.get('doc_id') != file_id: continue
+        try: when = datetime.strptime(row['at'], '%Y-%m-%dT%H:%M:%S%z').timestamp()
+        except (KeyError, ValueError): continue
+        if not since <= when <= until: continue
+        action = row.get('action') or 'edit'
+        if action == 'edit':
+            last = out[-1] if out else None
+            if last and last['action'] == 'edit' and last['after'] == row.get('before'):
+                last['after'] = row.get('after'); last['at'] = row['at']; continue
+            out.append({'action': 'edit', 'at': row['at'], 'before': row.get('before'), 'after': row.get('after')})
+        elif action in ('accept', 'reject'):
+            out.append({'action': action, 'at': row['at'], 'added': row.get('added'), 'removed': row.get('removed')})
+    return out
 
 
 # Google's export sometimes stops naming the author of old suggestions and writes a

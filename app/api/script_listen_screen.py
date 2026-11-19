@@ -61,3 +61,53 @@ class Edit(BaseModel):
 async def edit(doc_id: str, body: Edit, user: TokenData = Depends(get_current_user)):
     try: return await run_in_threadpool(S.edit, S.doc_id_from(doc_id), body.old, body.new, None, body.start)
     except Exception as exc: _fail(exc)
+
+
+class Decide(BaseModel):
+    id: str
+    accept: bool
+
+
+@router.post('/doc/{doc_id}/suggestion')
+async def decide(doc_id: str, body: Decide, user: TokenData = Depends(get_current_user)):
+    try: return await run_in_threadpool(S.decide, S.doc_id_from(doc_id), body.id, body.accept)
+    except Exception as exc: _fail(exc)
+
+
+@router.get('/doc/{doc_id}/comments')
+async def get_comments(doc_id: str, user: TokenData = Depends(get_current_user)):
+    try: return await run_in_threadpool(S.comments, S.doc_id_from(doc_id))
+    except Exception as exc: _fail(exc)
+
+
+class NewComment(BaseModel):
+    text: str
+    quote: str = ''
+    start: int | None = None
+    sentence: str = ''
+
+
+@router.post('/doc/{doc_id}/comments')
+async def add_comment(doc_id: str, body: NewComment, user: TokenData = Depends(get_current_user)):
+    try: return await run_in_threadpool(S.add_comment, S.doc_id_from(doc_id), body.quote, body.text, body.start, body.sentence)
+    except Exception as exc: _fail(exc)
+
+
+class Reply(BaseModel):
+    text: str
+
+
+@router.post('/doc/{doc_id}/comments/{comment_id}/reply')
+async def reply(doc_id: str, comment_id: str, body: Reply, user: TokenData = Depends(get_current_user)):
+    try: return await run_in_threadpool(S.reply, S.doc_id_from(doc_id), comment_id, body.text)
+    except Exception as exc: _fail(exc)
+
+
+class Settle(BaseModel):
+    reopen: bool = False
+
+
+@router.post('/doc/{doc_id}/comments/{comment_id}/settle')
+async def settle(doc_id: str, comment_id: str, body: Settle, user: TokenData = Depends(get_current_user)):
+    try: return await run_in_threadpool(S.settle, S.doc_id_from(doc_id), comment_id, body.reopen)
+    except Exception as exc: _fail(exc)

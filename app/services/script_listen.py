@@ -115,7 +115,8 @@ def _chars(paragraph):
         if not run: continue
         idx = el['startIndex']
         style = run.get('textStyle') or {}
-        flags = {'del': bool(run.get('suggestedDeletionIds')), 'ins': bool(run.get('suggestedInsertionIds')),
+        # del / ins are the suggestion ids (a tuple, empty when none), so they still read as true / false.
+        flags = {'del': tuple(run.get('suggestedDeletionIds') or ()), 'ins': tuple(run.get('suggestedInsertionIds') or ()),
                  'blue': _is_blue(style), 'bold': bool(style.get('bold'))}
         for ch in run['content']:
             out.append((idx, ch, flags))
@@ -158,8 +159,35 @@ def _raw(part):
     return ''.join(c[1] for c in part)
 
 
+def _segs(chars):
+    """A unit's characters as runs the screen draws: suggested insertions and deletions (with their suggestion id),
+    blue stage notes and bold are kept apart."""
+    out = []
+    for _, ch, f in chars:
+        key = (f['ins'][0] if f['ins'] else None, f['del'][0] if f['del'] else None, f['blue'], f['bold'])
+        if out and out[-1][0] == key: out[-1][1].append(ch)
+        else: out.append((key, [ch]))
+    segs = []
+    for (ins, dele, blue, bold), cs in out:
+        seg = {'t': ''.join(cs)}
+        if ins: seg['ins'] = ins
+        if dele: seg['del'] = dele
+        if blue: seg['blue'] = True
+        if bold: seg['b'] = True
+        segs.append(seg)
+    return segs
+
+
+def _image(doc, element):
+    obj = (doc.get('inlineObjects') or {}).get((element.get('inlineObjectElement') or {}).get('inlineObjectId'), {})
+    emb = (obj.get('inlineObjectProperties') or {}).get('embeddedObject') or {}
+    return (emb.get('imageProperties') or {}).get('contentUri')
+
+
 def outline(doc):
-    """The doc cut into what the screen shows: headings, notes and sentences. Only sentences are spoken."""
+    """The doc cut into what the screen shows: the title, the top part (thumbnail, title, aim) with its pictures, and
+    the script's headings, notes and sentences. Only sentences are spoken. Suggestions are shown as they are in the doc
+    (each unit carries ``segs``); the voice reads them as if accepted."""
     content = doc.get('body', {}).get('content', [])
     units, mode, seen_script = [], 'script', any(
         (el.get('paragraph') and ''.join(e.get('textRun', {}).get('content', '') for e in el['paragraph'].get('elements', [])).strip().startswith(SCRIPT_HEADING))
@@ -172,7 +200,16 @@ def outline(doc):
         chars = _chars(p)
         text = ''.join(c[1] for c in chars if not c[2]['del']).strip()
         style = (p.get('paragraphStyle') or {}).get('namedStyleType', 'NORMAL_TEXT')
-        if not text: continue
+        if mode != 'script':
+            for e in p.get('elements', []):
+                src = e.get('inlineObjectElement') and _image(doc, e)
+                if src: units.append({'kind': 'image', 'src': src})
+        if not text:
+            # A paragraph whose every character is a suggested deletion still shows, struck through.
+            if ''.join(c[1] for c in chars).strip() and any(c[2]['del'] for c in chars):
+                units.append({'kind': 'gone', 'text': ''.join(c[1] for c in chars).strip(), 'segs': _segs(chars),
+                              'para': pi, **({'section': 'top'} if mode != 'script' else {})})
+            continue
         if style == 'TITLE' or style == 'HEADING_1':
             units.append({'kind': 'title', 'text': text}); continue
         if text.startswith('◎'):
@@ -182,39 +219,81 @@ def outline(doc):
                 # A ◎ line inside the script (◎追加特典① …) is a small heading of the script, not a new top part.
                 # As a top-level heading the screen filed everything after it under 「読みません」 (11/18).
                 section = text
-                units.append({'kind': 'heading', 'level': 3, 'text': text, 'read': True}); continue
+                units.append({'kind': 'heading', 'level': 3, 'text': text, 'read': True, 'segs': _segs(chars)}); continue
             units.append({'kind': 'heading', 'level': 1, 'text': text, 'read': mode == 'script'}); continue
         if mode != 'script':
-            units.append({'kind': 'note', 'text': text, 'section': 'top'}); continue
+            units.append({'kind': 'note', 'text': text, 'section': 'top', 'segs': _segs(chars)}); continue
         if style in ('HEADING_2', 'HEADING_3') or re.match(r'^【\d+】', text) or text.startswith('▼'):
             level = 2 if (style == 'HEADING_2' or text.startswith('【')) else 3
             section = text
-            units.append({'kind': 'heading', 'level': level, 'text': text, 'read': True}); continue
+            units.append({'kind': 'heading', 'level': level, 'text': text, 'read': True, 'segs': _segs(chars)}); continue
         visible = [c for c in chars if not c[2]['del']]
         if all(c[2]['blue'] or not c[1].strip() for c in visible) or text.startswith('［'):
-            units.append({'kind': 'note', 'text': text}); continue
+            units.append({'kind': 'note', 'text': text, 'para': pi, 'segs': _segs(chars)}); continue
+        mine = []      # (unit, end) of this paragraph, to hand every character (deleted ones too) to a unit
         for part in _split(chars):
             while part and not part[0][1].strip(): part = part[1:]
             while part and not part[-1][1].strip(): part = part[:-1]
             if not part: continue
             speak = _speakable(part)
-            if not speak or not re.search(r'[\w぀-ヿ一-鿿]', speak):
-                units.append({'kind': 'note', 'text': _raw(part).strip()}); continue
-            start = part[0][0]
             end = part[-1][0] + _units16(part[-1][1])
+            if not speak or not re.search(r'[\w぀-ヿ一-鿿]', speak):
+                u = {'kind': 'note', 'text': _raw(part).strip(), 'para': pi}
+                units.append(u); mine.append((u, end)); continue
+            start = part[0][0]
             inside = [c for c in chars if start <= c[0] < end]
-            units.append({'kind': 'say', 'text': _raw(part).strip(), 'speak': speak, 'para': pi, 'start': start, 'end': end,
-                          'bmask': ''.join('1' if c[2]['bold'] else '0' for c in part),
-                          'bold': all(c[2]['bold'] for c in part if c[1].strip()),
-                          'locked': any(c[2]['ins'] or c[2]['del'] for c in inside), 'section': section, 'gap': 's'})
-    # Longer pause where a paragraph or a section ends.
-    says = [i for i, u in enumerate(units) if u['kind'] == 'say']
-    for n, i in enumerate(says):
-        nxt = says[n + 1] if n + 1 < len(says) else None
-        if nxt is None: units[i]['gap'] = 'h'
-        elif any(units[k]['kind'] == 'heading' for k in range(i + 1, nxt)): units[i]['gap'] = 'h'
-        elif units[nxt].get('para') != units[i].get('para'): units[i]['gap'] = 'p'
+            u = {'kind': 'say', 'text': _raw(part).strip(), 'speak': speak, 'para': pi, 'start': start, 'end': end,
+                 'bmask': ''.join('1' if c[2]['bold'] else '0' for c in part),
+                 'bold': all(c[2]['bold'] for c in part if c[1].strip()),
+                 'locked': any(c[2]['ins'] or c[2]['del'] for c in inside), 'section': section, 'gap': 's'}
+            units.append(u); mine.append((u, end))
+        # Characters between sentences (spaces, a deleted sentence) go to the sentence after them.
+        own = [[] for _ in mine]
+        for c in chars:
+            k = next((i for i, (_, end) in enumerate(mine) if c[0] < end), len(mine) - 1)
+            if k >= 0: own[k].append(c)
+        for (u, _), cs in zip(mine, own):
+            u['segs'] = _segs(cs)
+            if u['kind'] == 'say' and any(c[2]['ins'] or c[2]['del'] for c in cs): u['locked'] = True
+    # One short pause after every sentence: the owner wanted the whole script to run on without stops at paragraphs
+    # and sections (11/19, 「段落ごとに…多少の間がある…それも無くして全部一気に再生できるように」).
     return units
+
+
+_image_cache: dict = {}
+
+
+def _inline_images(units):
+    """The doc's picture links only open from a server (a browser signed in to Google gets refused, 11/19), so the
+    pictures of the top part (the thumbnail) travel inside the answer."""
+    import base64
+    for u in [x for x in units if x['kind'] == 'image'][:4]:
+        src = u['src']
+        key = src.split('?')[0]
+        if key not in _image_cache:
+            try:
+                r = httpx.get(src, timeout=15, follow_redirects=True)
+                r.raise_for_status()
+                if len(r.content) > 3_000_000: continue
+                kind = r.headers.get('content-type', 'image/jpeg').split(';')[0]
+                _image_cache[key] = f'data:{kind};base64,' + base64.b64encode(r.content).decode()
+                if len(_image_cache) > 30: _image_cache.pop(next(iter(_image_cache)))
+            except Exception:
+                continue
+        u['src'] = _image_cache[key]
+
+
+def suggestions_of(units):
+    """Each suggestion once, with the text it adds and removes and the first unit it shows in."""
+    out = {}
+    for u in units:
+        for seg in u.get('segs') or ():
+            for kind in ('ins', 'del'):
+                sid = seg.get(kind)
+                if not sid: continue
+                s = out.setdefault(sid, {'id': sid, 'ins': '', 'del': '', 'n': u['n']})
+                s[kind] += seg['t']
+    return list(out.values())
 
 
 def read(doc_id, voice=DEFAULT_VOICE):
@@ -226,9 +305,12 @@ def read(doc_id, voice=DEFAULT_VOICE):
             u['key'] = clip_key(u['speak'], voice, u['gap'])
             u['ready'] = (CACHE / f"{u['key']}.mp3").exists()
             u['seconds'] = _meta(u['key']).get('seconds')
+    _inline_images(units)
     title = doc.get('title', '')
+    watch_soon(doc_id)
     return {'doc_id': doc_id, 'title': title, 'revision': doc.get('revisionId'), 'version': doc.get('revisionId'),
-            'voice': voice, 'voices': [{'id': v['id'], 'name': v['name']} for v in VOICES], 'units': units}
+            'voice': voice, 'voices': [{'id': v['id'], 'name': v['name']} for v in VOICES], 'units': units,
+            'suggestions': suggestions_of(units)}
 
 
 def version(doc_id):
@@ -269,7 +351,7 @@ def edit(doc_id, old, new, para=None, start=None):
     """Replace one sentence in the doc. ``old`` is the sentence as the screen showed it; the doc is read again first
     and, when it no longer has that sentence where it was (or anywhere, uniquely), nothing is written."""
     new = (new or '').replace('\r', '').replace('\n', ' ').strip()
-    if not new: raise ListenError('空の文にはできません。文を消す時はドキュメントで消してください。')
+    _follow(doc_id)
     doc = fetch(doc_id)
     says = [u for u in outline(doc) if u['kind'] == 'say']
     hit = [u for u in says if u['text'] == old and u.get('start') == start]
@@ -281,19 +363,297 @@ def edit(doc_id, old, new, para=None, start=None):
     if u['locked']:
         raise ListenError('この文には提案（提案モードの直し）が入っているので、ここでは直せません。ドキュメントで提案を決めてから直してください。', 409)
     if new == old: return {'changed': False}
-    reqs = edit_requests(u['start'], old, new, u.get('bmask', ''))
+    # Emptying a sentence deletes it (with the space after it, or with its paragraph when it was the whole paragraph).
+    reqs = delete_requests(doc, u) if not new else edit_requests(u['start'], old, new, u.get('bmask', ''))
     _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
           body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
     _log_owner_edit(doc_id, doc.get('title', ''), old, new)
     return {'changed': True, 'requests': len(reqs)}
 
 
+def delete_requests(doc, u):
+    content = doc.get('body', {}).get('content', [])
+    el = content[u['para']] if 0 <= u.get('para', -1) < len(content) else {}
+    p = el.get('paragraph') or {}
+    whole = ''.join(c[1] for c in _chars(p) if not c[2]['del']).strip() == u['text']
+    if whole and el.get('endIndex') and el is not content[-1]:
+        return [{'deleteContentRange': {'range': {'startIndex': el['startIndex'], 'endIndex': el['endIndex']}}}]
+    end = u['end']
+    after = next((c for c in _chars(p) if c[0] == end), None)
+    if after and after[1] in ' 　': end += _units16(after[1])
+    return [{'deleteContentRange': {'range': {'startIndex': u['start'], 'endIndex': end}}}]
+
+
 def _log_owner_edit(doc_id, title, old, new):
-    # The doc shows these edits under Dan's Google account; this file keeps that they were the owner's words.
+    # The doc shows these edits under Dan's Google account; this file keeps that they were the owner's words. The
+    # learning reads it (script_learning.owner_actions).
+    _log_owner_action(doc_id, title, action='edit', before=old, after=new)
+
+
+def _log_owner_action(doc_id, title, **fields):
     STATE.mkdir(parents=True, exist_ok=True)
     with (STATE / 'owner_edits.jsonl').open('a', encoding='utf-8') as f:
-        f.write(json.dumps({'at': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'doc_id': doc_id, 'title': title,
-                            'before': old, 'after': new, 'by': 'owner', 'via': 'script-listen'}, ensure_ascii=False) + '\n')
+        f.write(json.dumps({'at': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'doc_id': doc_id, 'title': title, 'by': 'owner',
+                            'via': 'script-listen', **fields}, ensure_ascii=False) + '\n')
+
+
+# ---------------------------------------------------------------- suggestions (accept / reject on the screen)
+
+def decide(doc_id, sid, accept):
+    """Accept or reject one suggestion the way Docs does. The Docs API has no accept/reject, so the same result is
+    written: text that stays is deleted and written again as plain text with its style, text that goes is deleted.
+    Tried on a copy 11/19: Docs then shows the suggestion as settled."""
+    _follow(doc_id)
+    doc = fetch(doc_id)
+    content = doc.get('body', {}).get('content', [])
+    body_end = content[-1].get('endIndex') if content else None
+    runs = []
+    paras = [el for el in content if el.get('paragraph')]
+    for k, el in enumerate(paras):
+        p = el['paragraph']
+        pstyle = (p.get('paragraphStyle') or {}).get('namedStyleType', 'NORMAL_TEXT')
+        nxt = (paras[k + 1]['paragraph'].get('paragraphStyle') or {}).get('namedStyleType', 'NORMAL_TEXT') if k + 1 < len(paras) else None
+        for e in p.get('elements', []):
+            r = e.get('textRun')
+            if not r: continue
+            ins, dele = r.get('suggestedInsertionIds') or [], r.get('suggestedDeletionIds') or []
+            if sid not in ins and sid not in dele: continue
+            if set(ins) | set(dele) != {sid}:
+                raise ListenError('この提案は別の提案と重なっているので、ドキュメントで決めてください。', 409)
+            end = e.get('endIndex', e['startIndex'] + sum(_units16(c) for c in r['content']))
+            runs.append((e['startIndex'], end, 'ins' if sid in ins else 'del', r['content'], r.get('textStyle') or {}, pstyle, nxt))
+    if not runs:
+        raise ListenError('この提案はもうありません。ドキュメントの方で決められたかもしれません。', 409)
+    text_reqs, style_reqs = decide_requests(runs, accept, body_end)
+    _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
+          body={'requests': text_reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+    if style_reqs:
+        _docs('POST', f'{doc_id}:batchUpdate', doc['_account'], body={'requests': style_reqs})
+    added = ''.join(r[3] for r in runs if r[2] == 'ins').strip()
+    removed = ''.join(r[3] for r in runs if r[2] == 'del').strip()
+    _log_owner_action(doc_id, doc.get('title', ''), action='accept' if accept else 'reject', suggestion=sid,
+                      added=added, removed=removed)
+    return {'done': True}
+
+
+def decide_requests(runs, accept, body_end=None):
+    """runs: (start, end, 'ins'|'del', text, textStyle, paragraph style, next paragraph's style) of one suggestion.
+    Returns (text requests, style requests). The styles go in a second write at the final positions: written in the
+    same write, text put back next to the suggestion's other runs still counted as suggested and lost its bold (11/19)."""
+    text_reqs, kept = [], []
+    for start, end, kind, text, style, pstyle, nxt in sorted(runs, key=lambda r: r[0], reverse=True):
+        if body_end and end >= body_end:          # the doc's last newline cannot be deleted
+            end, text = end - 1, text[:-1]
+            if end <= start: continue
+        text_reqs.append({'deleteContentRange': {'range': {'startIndex': start, 'endIndex': end}}})
+        if (kind == 'ins') != accept: continue     # this text goes
+        text_reqs.append({'insertText': {'location': {'index': start}, 'text': text}})
+        kept.append((start, end, text, style, pstyle, nxt))
+    gone = sorted((r[0], r[1]) for r in runs if (r[2] == 'ins') != accept)
+    style_reqs = []
+    for start, end, text, style, pstyle, nxt in sorted(kept):
+        at = start - sum(min(b, start) - a for a, b in gone if a < start)
+        size = sum(_units16(c) for c in text)
+        # A weight in weightedFontFamily wins over bold (11/19: bold text came back thin); keep only the family.
+        style = dict(style)
+        family = (style.pop('weightedFontFamily', None) or {}).get('fontFamily')
+        if family: style['weightedFontFamily'] = {'fontFamily': family}
+        style_reqs.append({'updateTextStyle': {'range': {'startIndex': at, 'endIndex': at + size}, 'textStyle': style, 'fields': '*'}})
+        if text.endswith('\n'):
+            # Deleting the newline joined two paragraphs; writing it again split them with one style. Put both back.
+            style_reqs.append({'updateParagraphStyle': {'range': {'startIndex': at, 'endIndex': at + size},
+                                                        'paragraphStyle': {'namedStyleType': pstyle}, 'fields': 'namedStyleType'}})
+            if nxt:
+                style_reqs.append({'updateParagraphStyle': {'range': {'startIndex': at + size, 'endIndex': at + size + 1},
+                                                            'paragraphStyle': {'namedStyleType': nxt}, 'fields': 'namedStyleType'}})
+    # Paragraph styles first: setting a paragraph's named style clears the text styles inside it (11/19, bold was lost).
+    style_reqs.sort(key=lambda r: 'updateParagraphStyle' not in r)
+    return text_reqs, style_reqs
+
+
+# ---------------------------------------------------------------- comments (the doc's own comments, both ways)
+#
+# The page writes and reads the doc's comments through Drive, so a comment made here is the same comment the owner
+# would make in Google Docs: the comment watcher (gdoc_events) hands it to Dan, Dan answers in the thread and fixes the
+# text as suggestions, and the learning (script_learning) keeps it. Docs shows comments made through the API in its list
+# without a place in the text ("元のコンテンツは削除されました"); the page places them by the quoted words.
+
+ANCHORS = STATE / 'anchors.json'
+_private: dict = {}
+_watching: set = set()
+
+
+def _account(doc_id):
+    from app.services import gdoc_events as E
+    with E.db() as c:
+        row = c.execute('SELECT account FROM docs WHERE file_id=?', (doc_id,)).fetchone()
+    return row['account'] if row else ACCOUNTS[0]
+
+
+def owner_only(doc_id):
+    """Only the owner's accounts can open the doc (cached 10 min). Dan answers comments only there: elsewhere a
+    customer would read the answers."""
+    from app.services import gdoc_events as E
+    hit = _private.get(doc_id)
+    if hit and time.time() - hit[1] < 600: return hit[0]
+    value = E.owner_only(_account(doc_id), doc_id)
+    _private[doc_id] = (value, time.time())
+    return value
+
+
+def ensure_watched(doc_id):
+    """The comment watcher and the learning both follow this doc. True when they do."""
+    from app.services import gdoc_events as E
+    from app.services import script_learning as L
+    with E.db() as c:
+        row = c.execute('SELECT * FROM docs WHERE file_id=?', (doc_id,)).fetchone()
+    if not row:
+        if not owner_only(doc_id): return False
+        try: E.register(doc_id, E.room_for_file(doc_id), ACCOUNTS[0])
+        except ValueError: pass             # registered meanwhile
+        with E.db() as c:
+            row = c.execute('SELECT * FROM docs WHERE file_id=?', (doc_id,)).fetchone()
+    with L.db() as c:
+        target = c.execute('SELECT enabled FROM targets WHERE file_id=?', (doc_id,)).fetchone()
+    if not target:
+        # The first snapshot is the starting point the owner's later edits are compared with.
+        L.enable(dict(row))
+    return True
+
+
+def watch_soon(doc_id):
+    """Opening a script on the screen starts following it (once per process), so its first edit is already learned."""
+    if doc_id in _watching: return
+    _watching.add(doc_id)
+
+    def run():
+        try: ensure_watched(doc_id)
+        except Exception:
+            import logging
+            logging.exception('script-listen could not follow %s', doc_id)
+            _watching.discard(doc_id)
+    threading.Thread(target=run, name='script-listen-watch', daemon=True).start()
+
+
+def _follow(doc_id):
+    """Before the owner's first write: the learning's starting point must be taken before it, not after."""
+    try: ensure_watched(doc_id)
+    except Exception:
+        import logging
+        logging.exception('script-listen could not follow %s', doc_id)
+
+
+def _poke(doc_id):
+    """Tell the comment watcher to read the doc now instead of waiting for Google's notice."""
+    from app.services import gdoc_events as E
+    with E.db() as c:
+        c.execute('UPDATE docs SET dirty=dirty+1 WHERE file_id=?', (doc_id,))
+    E.signal()
+
+
+def _anchors():
+    try: return json.loads(ANCHORS.read_text())
+    except Exception: return {}
+
+
+def anchor_start(a):
+    return a.get('start') if isinstance(a, dict) else a
+
+
+def anchor_note(comment_ids):
+    """For Dan's answer: the sentence each comment made on the listening screen was written on."""
+    anchors = _anchors()
+    lines = [f"{cid}: 文「{anchors[cid]['sentence']}」" for cid in comment_ids
+             if isinstance(anchors.get(cid), dict) and anchors[cid].get('sentence')]
+    if not lines: return ''
+    return ('台本を聞く画面から書かれたコメントの場所（Googleでは本文の位置が残らないので、ここで分かる）。'
+            'quote はその文の中で本人が選んだ言葉:\n' + '\n'.join(lines))
+
+
+def _who(item, private):
+    text = (item.get('content') or '').strip()
+    if text.startswith(('ダン：', 'ダン:', '【変えた所】', '【根拠】')): return 'dan'
+    if item.get('author', {}).get('me') or private: return 'owner'
+    return 'other'
+
+
+def comments(doc_id):
+    """The doc's threads, oldest first, with who wrote each message and whether Dan is working on it."""
+    import html
+    from app.services import gdoc_drive as G
+    from app.services import gdoc_events as E
+    threads = G.comments(_account(doc_id), doc_id)
+    private = owner_only(doc_id)
+    busy = {}
+    with E.db() as c:
+        for r in c.execute("SELECT payload,status FROM batches WHERE file_id=? AND status IN ('pending','running','needs_room')",
+                           (doc_id,)):
+            for ch in json.loads(r['payload']):
+                busy[ch['comment_id']] = r['status']
+    anchors = _anchors()
+    out = []
+    for t in threads:
+        if t.get('deleted'): continue
+        msgs = []
+        for item in [t, *t.get('replies', [])]:
+            if item.get('deleted'): continue
+            text = (item.get('content') or '').strip()
+            if not text:
+                if item.get('action'):
+                    msgs.append({'id': item['id'], 'action': item['action'], 'who': _who(item, private), 'at': item.get('createdTime')})
+                continue
+            msgs.append({'id': item['id'], 'who': _who(item, private), 'name': (item.get('author') or {}).get('displayName'),
+                         'text': text, 'at': item.get('createdTime')})
+        quote = html.unescape((t.get('quotedFileContent') or {}).get('value') or '')
+        out.append({'id': t['id'], 'quote': quote, 'resolved': bool(t.get('resolved')), 'messages': msgs,
+                    'at': t.get('createdTime'), 'working': busy.get(t['id']), 'start': anchor_start(anchors.get(t['id']))})
+    out.sort(key=lambda x: x['at'] or '')
+    return {'threads': out, 'can_comment': private}
+
+
+def _owner_words(text):
+    text = (text or '').strip()
+    if not text: raise ListenError('空のままでは送れません。')
+    if text.startswith(('ダン：', 'ダン:', '【変えた所】', '【根拠】')):
+        raise ListenError('「ダン：」で始まる文はダンの返事と見分けられないので、別の書き出しにしてください。')
+    return text
+
+
+def add_comment(doc_id, quote, text, start=None, sentence=''):
+    from app.services import gdoc_drive as G
+    text = _owner_words(text)
+    if not owner_only(doc_id) or not ensure_watched(doc_id):
+        raise ListenError('お客さんも開けるドキュメントなので、ここからはコメントできません（ダンの返事がお客さんにも見えるため）。'
+                          '作業用の台本で書いてください。', 403)
+    body = {'content': text}
+    quote = (quote or '').strip()
+    if quote: body['quotedFileContent'] = {'mimeType': 'text/html', 'value': quote}
+    made = G.request(_account(doc_id), 'POST', f'files/{doc_id}/comments', body, {'fields': 'id'})
+    # Where it was written. Docs keeps no place for a comment made through the API, so Dan's answer reads the sentence
+    # from here (gdoc_events.prompt): 11/19 a comment on 「行動力」 could have meant any of ten sentences.
+    STATE.mkdir(parents=True, exist_ok=True)
+    anchors = _anchors()
+    anchors[made['id']] = {'start': start, 'sentence': (sentence or '').strip()[:600], 'doc_id': doc_id}
+    ANCHORS.write_text(json.dumps(anchors, ensure_ascii=False))
+    _poke(doc_id)
+    return {'id': made['id']}
+
+
+def reply(doc_id, comment_id, text):
+    from app.services import gdoc_drive as G
+    text = _owner_words(text)
+    if not owner_only(doc_id) or not ensure_watched(doc_id):
+        raise ListenError('お客さんも開けるドキュメントなので、ここからは返事を書けません。', 403)
+    made = G.request(_account(doc_id), 'POST', f'files/{doc_id}/comments/{comment_id}/replies', {'content': text}, {'fields': 'id'})
+    _poke(doc_id)
+    return {'id': made['id']}
+
+
+def settle(doc_id, comment_id, reopen=False):
+    from app.services import gdoc_drive as G
+    G.request(_account(doc_id), 'POST', f'files/{doc_id}/comments/{comment_id}/replies',
+              {'action': 'reopen' if reopen else 'resolve', 'content': ''}, {'fields': 'id'})
+    return {'done': True}
 
 
 # ---------------------------------------------------------------- speech
