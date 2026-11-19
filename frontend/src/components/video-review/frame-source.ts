@@ -366,7 +366,7 @@ export class AssetFrameSource {
    *  range. This is the cut-frame fix — a clip can never display another clip's / a trimmed-out
    *  region's footage, but it also won't go black as long as any of its own frames are cached
    *  (showing a slightly stale frame of the SAME clip while the exact one decodes). */
-  peek(timeSec: number, rangeLo: number, rangeHi: number): ImageBitmap | null {
+  peek(timeSec: number, rangeLo: number, rangeHi: number, maxStale = 0.18): ImageBitmap | null {
     this.lastShownTime = -1;
     if (this.failed || !this.samples.length) return null;
     const pos = this.presPosAtTime(timeSec);
@@ -379,7 +379,7 @@ export class AssetFrameSource {
     // from the playhead (showing a frozen, stale frame while the head moved on, especially when
     // GPU decode lagged behind a scrub). Beyond the window we return null so the compositor HOLDS
     // the last good frame instead — never a wrong/old frame masquerading as the current one.
-    const MAX_STALE = 0.18; // seconds
+    const MAX_STALE = maxStale; // seconds（ふだん0.18。早送りで鍵のコマだけ拾う時は広げる）
     for (let back = pos - 1; back >= 0; back--) {
       const di = this.presOrder[back];
       const cts = this.samples[di].cts;
@@ -395,6 +395,14 @@ export class AssetFrameSource {
       if (cf) { this.lastShownTime = cts; return cf; }
     }
     return null;
+  }
+
+  /** timeSec の所かその前で一番近い鍵のコマ（それだけで解読できるコマ）の時刻。無ければ -1。
+   *  10倍の早送りでは動画を速回しせずに、鍵のコマだけを拾って見せる（2026-11-19） */
+  keyTimeAt(timeSec: number): number {
+    const i = this.indexAtTime(timeSec);
+    if (i < 0) return -1;
+    return this.samples[this.keyframeFor(i)].cts;
   }
 
   /** Source time (seconds) of the frame the LAST peek() returned (-1 if none) — for diagnostics. */
