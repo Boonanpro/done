@@ -468,6 +468,9 @@ async def handle(user_id, item, own, prepare=None):
             else:
                 told[key] = now
                 data['told'] = {k: t for k, t in told.items() if now - t < REPEAT_HOURS*3600*2}; save(user_id, data)
+    if hint and not awaited:
+        decision['room_id'] = hint
+        decision['watch_id'] = ''
     if (hint or belongs) and not decision.get('room_id'):
         decision['room_id'] = hint or belongs
     room = None
