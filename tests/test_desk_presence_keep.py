@@ -3,6 +3,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import desk_presence_keep as d  # noqa: E402
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_real_log(monkeypatch, tmp_path):
+    # 本物の記録（~/.dan/workspace/data/desk-presence-keep）に試験の行を書かない
+    monkeypatch.setattr(d, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(d, "LOG_FILE", tmp_path / "log.jsonl")
 
 
 def ev(s, e):
@@ -57,3 +65,73 @@ def test_exports_are_kept_without_limit(monkeypatch):
     assert calls == []
     monkeypatch.setattr(d, "KEEP_DAYS", 180)
     assert d.delete_old_exports([old], now=400 * 86400, dry=False) == 1
+
+
+def test_long_interval_is_split_into_chunks():
+    """11/19: 1時間を超える区間は満杯の NAS で空きが足りず毎時止まった -> 30分以内に分ける。"""
+    ch = d.split_chunks(0, 84 * 60)
+    assert len(ch) == 3 and ch[0][0] == 0 and ch[-1][1] == 84 * 60
+    assert all(b - a <= d.CHUNK_SEC for a, b in ch)
+    assert d.split_chunks(0, 60) == [(0, 60)]
+
+
+def test_pending_chunks_skip_exported_parts():
+    st = {"failed": {}}
+    now = 10_000_000
+    iv = [[0.0, 3600.0]]
+    ranges = [(0.0, 1800.0, {})]
+    p = d.pending_chunks(iv, ranges, st, oldest_rec=0, now=now)
+    assert p == [(1800.0, 3600.0)]
+    assert d.pending_chunks(iv, [(0.0, 3600.0, {})], st, 0, now) == []
+
+
+def test_retain_only_closed_short_events_in_pending():
+    evs = [{"id": "a", "start_time": 100, "end_time": 200},
+           {"id": "open", "start_time": 150, "end_time": None},
+           {"id": "long", "start_time": 0, "end_time": 10 * 3600},
+           {"id": "far", "start_time": 9000, "end_time": 9100}]
+    assert d.retain_wanted(evs, [(90.0, 300.0)]) == {"a"}
+
+
+def test_sync_retain_removes_only_its_own(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(d, "api", lambda m, p, *a, **k: calls.append((m, p)) or (200, {}))
+    monkeypatch.setattr(d, "STATE_FILE", tmp_path / "s.json")
+    monkeypatch.setattr(d, "LOG_FILE", tmp_path / "l.jsonl")
+    st = {"failed": {}, "retained": ["old"]}
+    evs = [{"id": "a", "start_time": 100, "end_time": 200}]
+    d.sync_retain(st, evs, [(90.0, 300.0)])
+    assert ("POST", "/api/events/a/retain") in calls
+    assert ("DELETE", "/api/events/old/retain") in calls
+    assert st["retained"] == ["a"]
+
+
+def test_low_space_waits_for_frigate_then_exports(monkeypatch, tmp_path):
+    """空きが足りない時は止めずに Frigate の空け直しを待ってから書き出す。"""
+    monkeypatch.setattr(d, "STATE_FILE", tmp_path / "s.json")
+    monkeypatch.setattr(d, "LOG_FILE", tmp_path / "l.jsonl")
+    frees = iter([3000.0, 3000.0, 9000.0, 9000.0])
+    monkeypatch.setattr(d, "storage_free_mib", lambda: next(frees))
+    monkeypatch.setattr(d.time, "sleep", lambda s: None)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(d.time, "time", lambda: now)
+    monkeypatch.setattr(d, "get", lambda path, timeout=60: (
+        [{"day": "2026-01-01"}] if "summary" in path else [] if "exports" in path else []))
+    monkeypatch.setattr(d, "fetch_events", lambda after: [])
+    monkeypatch.setattr(d, "presence_intervals", lambda ev, n: ([[now - 7200, now - 5400]], False, 0))
+    monkeypatch.setattr(d, "bandwidth_mib_per_h", lambda: 4500.0)
+    monkeypatch.setattr(d, "recorded_seconds", lambda s, e: e - s)
+    done = []
+    monkeypatch.setattr(d, "export_one", lambda s, e, r: done.append((s, e)) or (True, "x1"))
+    monkeypatch.setattr(d, "sync_retain", lambda *a: None)
+    monkeypatch.setattr(d, "reconcile_exports", lambda *a: None)
+
+    class A:
+        plan = False
+        max = 0
+        manage_retention = False
+    # 時計を進めて待ちの打ち切りを確かめられるよう、呼ぶたびに少し進める
+    t = [now]
+    monkeypatch.setattr(d.time, "time", lambda: (t.__setitem__(0, t[0] + 1) or t[0]))
+    assert d.run(A()) == 0
+    assert done == [(now - 7200, now - 5400)]
