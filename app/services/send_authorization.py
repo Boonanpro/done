@@ -29,6 +29,8 @@ _EXEC_WORDS = re.compile(
     r"\bsend\b|\bpost\b)",
     re.IGNORECASE,
 )
+# 助詞を伴う依頼は本人の文の終わりまで読む。引用・質問の途中を切り出しても依頼にしない。
+_REPLY_REQUEST = re.compile(r"(?:返信|返事)を(?:して(?:ください|下さい|おいて)?|お願いします)[。！!]*$")
 _STANDING_WORDS = re.compile(r"(承認不要|承認なし|承認無し|確認不要|確認なし|そのまま送|自動で送|報告だけ|報告のみ)")
 
 
@@ -85,7 +87,12 @@ def check(
     if _NEG_WORDS.search(msg_text):
         return {"ok": False, "basis": "", "reason": (
             "本人の最新の発言に、待つ・送らない・止める意味の言葉があります。送らずに、本人に送ってよいか聞くこと。")}
-    if not _EXEC_WORDS.search(approval):
+    reply_request = any(
+        _REPLY_REQUEST.search(sentence) and sentence in quote
+        for sentence in (_norm(part) for part in re.split(r"[。！!\n]+", msg_text))
+        if sentence
+    )
+    if not (_EXEC_WORDS.search(approval) or reply_request):
         return {"ok": False, "basis": "", "reason": (
             f"「{approval.strip()[:40]}」は送ることを名指していません。「進めて」「いいよ」「OK」や、"
             "別の作業と一緒に頼まれた言葉は送る許可に数えません。送らずに、カードのまま本人に送ってよいか聞くこと。")}
