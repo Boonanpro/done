@@ -170,3 +170,60 @@ def test_emptying_a_sentence_deletes_it_or_its_paragraph():
     r = S.delete_requests(doc, alone)[0]['deleteContentRange']['range']
     para = doc['body']['content'][alone['para']]
     assert (r['startIndex'], r['endIndex']) == (para['startIndex'], para['endIndex'])   # with its newline
+
+
+def _ends(doc):
+    for el in doc['body']['content']:
+        p = el['paragraph']; n = sum(S._units16(c) for e in p['elements'] for c in e['textRun']['content'])
+        el['endIndex'] = el['startIndex'] + n
+    return doc
+
+
+def test_every_paragraph_shows_exactly_the_doc_text():
+    # The screen is one editing surface (11/19): what it draws for each paragraph must be the doc's own text, so a
+    # change can be sent as「these paragraphs read X, now read Y」.
+    doc = _ends(_doc(('台本 第1稿\n', 'TITLE'), ('◎サムネ\n', 'HEADING_2'), 'A（本命）\n', '\n', ('◎台本\n', 'HEADING_2'),
+                     ('【1】はじめに\n', 'HEADING_2'), [('［笑顔で］\n', BLUE, {})],
+                     [('中村です。  今日は', {}, {}), ('古い', {}, {'suggestedDeletionIds': ['x']}),
+                      ('新しい', {}, {'suggestedInsertionIds': ['y']}), ('話です。 \n', {'bold': True}, {})],
+                     '　\n', '最後です。\n'))
+    units = S.outline(doc)
+    shown = {}
+    for u in units:
+        if u['kind'] == 'image': continue
+        assert 'para' in u and 'segs' in u, u
+        shown[u['para']] = shown.get(u['para'], '') + ''.join(s['t'] for s in u['segs'])
+    assert sorted(shown) == list(range(len(doc['body']['content'])))
+    for pi, text in shown.items():
+        assert S._para_span(doc, pi, pi)[0] == text
+
+
+def test_typing_next_to_a_suggestion_is_allowed_but_not_inside_it():
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'),
+                     [('前の', {}, {}), ('古い', {}, {'suggestedDeletionIds': ['x']}), ('文です。\n', {}, {})]))
+    old, pos, _, locked = S._para_span(doc, 1, 1)
+    assert old == '前の古い文です。'
+    assert not S.touches_suggestion(old, '前の古い文でした。', locked)
+    assert not S.touches_suggestion(old, 'すごく前の古い文です。', locked)
+    assert S.touches_suggestion(old, '前の古文です。', locked)
+    assert S.touches_suggestion(old, '前の古xい文です。', locked)
+
+
+def test_enter_and_joining_paragraphs_write_newlines():
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '一つ目です。二つ目です。\n', '三つ目です。\n'))
+    old, pos, bm, _ = S._para_span(doc, 1, 2)
+    assert old == '一つ目です。二つ目です。\n三つ目です。'
+    body = '◎台本\n一つ目です。二つ目です。\n三つ目です。\n'
+    split = S.replace_requests(pos, old, '一つ目です。\n二つ目です。\n三つ目です。', bm, '0' * 20)
+    assert _apply(body, split) == '◎台本\n一つ目です。\n二つ目です。\n三つ目です。\n'
+    joined = S.replace_requests(pos, old, '一つ目です。二つ目です。三つ目です。', bm, '0' * 20)
+    assert _apply(body, joined) == '◎台本\n一つ目です。二つ目です。三つ目です。\n'
+
+
+def test_bold_is_written_only_where_the_screen_changed_it():
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '大事な話です。\n'))
+    old, pos, bm, _ = S._para_span(doc, 1, 1)
+    reqs = S.replace_requests(pos, old, old, '0' * 7, '0011000')
+    st = [r['updateTextStyle'] for r in reqs]
+    assert len(st) == 1 and st[0]['textStyle'] == {'bold': True}
+    assert (st[0]['range']['startIndex'] - pos[0], st[0]['range']['endIndex'] - pos[0]) == (2, 4)

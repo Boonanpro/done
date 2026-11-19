@@ -320,7 +320,8 @@ def owner_actions(file_id, since, until, path=None):
             out.append({'action': 'edit', 'at': row['at'], 'before': row.get('before'), 'after': row.get('after')})
         elif action in ('accept', 'reject'):
             out.append({'action': action, 'at': row['at'], 'added': row.get('added'), 'removed': row.get('removed')})
-    return out
+    # Typing that was undone (Ctrl+Z on the screen) ends where it began: nothing the owner changed.
+    return [a for a in out if not (a['action'] == 'edit' and a['before'] == a['after'])]
 
 
 # Google's export sometimes stops naming the author of old suggestions and writes a

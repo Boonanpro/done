@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.chat_routes import TokenData, get_current_user
 from app.services import script_listen as S
@@ -60,6 +60,23 @@ class Edit(BaseModel):
 @router.post('/doc/{doc_id}/edit')
 async def edit(doc_id: str, body: Edit, user: TokenData = Depends(get_current_user)):
     try: return await run_in_threadpool(S.edit, S.doc_id_from(doc_id), body.old, body.new, None, body.start)
+    except Exception as exc: _fail(exc)
+
+
+class Replace(BaseModel):
+    para_from: int
+    para_to: int
+    old: str = Field(max_length=200_000)
+    new: str = Field(max_length=200_000)
+    old_bmask: str = Field('', max_length=200_000)
+    new_bmask: str = Field('', max_length=200_000)
+
+
+@router.post('/doc/{doc_id}/replace')
+async def replace(doc_id: str, body: Replace, user: TokenData = Depends(get_current_user)):
+    try:
+        return await run_in_threadpool(S.replace, S.doc_id_from(doc_id), body.para_from, body.para_to, body.old, body.new,
+                                       body.old_bmask, body.new_bmask)
     except Exception as exc: _fail(exc)
 
 
