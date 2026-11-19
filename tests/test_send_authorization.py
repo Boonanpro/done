@@ -94,3 +94,30 @@ def test_partial_reply_quote_is_not_an_instruction():
     for text in ("返信をしていいか聞いて", "返信をしてほしくない", "「返信をして」と書いた例文です"):
         assert not check(approval="返信をして", latest_owner_message=msg(text),
                          watch_notes=[], proposal=prop())["ok"]
+
+
+def test_prior_consent_binds_one_visible_draft_and_reviewed_conditions():
+    from app.services.send_authorization import review_prior
+    draft = dict(prop(), id="draft-a", source_room_id="draft-room", status="pending")
+    owner = dict(msg("相手の要求に答える返信をして。"), id="owner-a")
+    later = [msg("部品は届いた？", T2)]
+    def run(context="[送信案: draft-a]", rows=later, card=draft, receipt=""):
+        return review_prior(owner["content"], card, owner, context, rows, receipt)
+    first = run()
+    assert not first["ok"]
+    receipt = first["review_token"]
+    assert run(receipt=receipt)["ok"]
+    assert not run(context="[送信案: draft-b]", receipt=receipt)["ok"]
+    assert not run(card=dict(draft, updated_at=T2), receipt=receipt)["ok"]
+    assert not run(rows=[msg("一旦保留で", T2)], receipt=receipt)["ok"]
+    assert not run(rows=[msg("送らないで", T2)], receipt=receipt)["ok"]
+    assert not run(rows=[msg("価格が変わった", T2)], receipt=receipt)["ok"]
+
+
+def test_another_recipient_uses_own_review():
+    from app.services.send_authorization import review_prior
+    owner = dict(msg("この文面で送って。"), id="owner-b")
+    card = dict(prop(), id="draft-b", status="pending")
+    args = (owner["content"], card, owner, "/message-preview?proposal=draft-b", [msg("今何時？", T2)])
+    receipt = review_prior(*args, "")["review_token"]
+    assert review_prior(*args, receipt)["ok"]

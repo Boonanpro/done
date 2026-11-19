@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -108,8 +110,72 @@ def check(
     return {"ok": True, "basis": "owner_message", "reason": "本人の最新の発言に送る許可がある"}
 
 
+def review_prior(approval, proposal, owner, context, later, receipt):
+    """Revalidate an identified instruction against the draft visible at the time."""
+    denied = {"ok": False, "basis": "", "reason": "この返信案への元の指示、または承認時の条件を照合できません。"}
+    references = re.findall(r"\[送信案: ([\w-]+)\]|/message-preview\?proposal=([\w-]+)", context)
+    ids = {a or b for a, b in references}
+    if ids != {proposal.get("id")} or proposal.get("status") != "pending":
+        return denied
+    at = _ts(owner.get("created_at"))
+    updated = _ts(proposal.get("updated_at"))
+    if not at or not updated or updated > at:
+        return denied
+    # A fragment of a quotation or conditional question cannot be carried forward.
+    sentences = [part.strip() for part in re.split(r"[。！!\n]", owner["content"])]
+    directive = approval.strip().rstrip("。！!")
+    if directive not in sentences or not re.search(
+            r"(?:して|送って|送っといて|返して|送付して|出して)(?:ください|下さい|おいて)?$|お願いします$", directive):
+        return denied
+    original = check(approval=approval, latest_owner_message=owner, proposal=proposal, watch_notes=[])
+    if not original["ok"]:
+        return original
+    for row in later:
+        words = row.get("content") or ""
+        if row.get("sender_type", "human") == "human" and (
+                _NEG_WORDS.search(words) or re.search(r"保留|撤回|取り消|取消|送信中止|送信停止|やめて|やっぱり待", words)):
+            return dict(denied, reason="元の指示の後に保留・取り消しの可能性がある発言があります。")
+    evidence = [owner, approval, context, proposal, later]
+    token = hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+    if receipt != token:
+        return dict(denied, review_token=token, original=owner, context=context, subsequent=later,
+                    draft={"body": proposal.get("content"), "delivery": proposal.get("action_data")},
+                    reason="元の指示とその後の会話を読み、取り消し・変更・新着連絡・添付や期限の変化を実際の相手先でも確認すること。条件が同じ時だけ review_token を渡してください。")
+    return {"ok": True, "basis": "reviewed_owner_message", "reason": "同じ送信案と本人の元の指示を照合しました。"}
+
+
+def _prior(sb, room_id, user_id, proposal, owner_id, approval, receipt):
+    owner = (sb.table("chat_messages").select("id,content,created_at").eq("id", owner_id)
+             .eq("room_id", room_id).eq("sender_type", "human").eq("sender_id", user_id).limit(1).execute()).data
+    if not owner or not proposal or not proposal.get("id"):
+        return {"ok": False, "reason": "本人の元の指示または送信案がありません。"}
+    owner = owner[0]
+    before = (sb.table("chat_messages").select("content,sender_type,created_at").eq("room_id", room_id)
+              .lt("created_at", owner["created_at"]).order("created_at", desc=True).limit(1).execute()).data
+    context = ""
+    updated = _ts(proposal.get("updated_at"))
+    if before and updated and before[0]["sender_type"] == "ai" and _ts(before[0]["created_at"]) >= updated:
+        context = before[0]["content"]
+    source = proposal["source_room_id"]
+    # Older messages linked to the room containing the card, not the card itself.
+    linked_rooms = set(re.findall(r"/chat/([\w-]+)", context))
+    if linked_rooms == {source}:
+        cards = (sb.table("dan_proposals").select("id").eq("source_room_id", source)
+                 .eq("type", "outbound").eq("user_id", user_id)
+                 .lte("created_at", before[0]["created_at"]).limit(2).execute()).data
+        if cards == [{"id": proposal["id"]}]:
+            context += "\n[送信案: " + proposal["id"] + "]"
+    later = (sb.table("chat_messages").select("id,room_id,sender_type,content,created_at")
+             .in_("room_id", sorted({source, room_id})).gt("created_at", owner["created_at"])
+             .order("created_at").order("id").limit(101).execute()).data
+    if len(later) > 100:
+        return {"ok": False, "reason": "承認後の会話が多く、変更の有無を一度に照合できません。"}
+    return review_prior(approval, proposal, owner, context, later, receipt)
+
+
 async def authorize(
-    *, approval: str, room_id: str, user_id: str, proposal: Optional[Dict[str, Any]]
+    *, approval: str, room_id: str, user_id: str, proposal: Optional[Dict[str, Any]],
+    owner_message_id: str = "", review_token: str = "",
 ) -> Dict[str, Any]:
     """DB から材料を読んで check する。読めない時は通さない（送らない側に倒す）。"""
     import asyncio
@@ -118,14 +184,19 @@ async def authorize(
         from app.services.supabase_client import get_supabase_client
         from app.services import followups
         sb = get_supabase_client().client
+        if owner_message_id:
+            return _prior(sb, room_id, user_id, proposal, owner_message_id, approval, review_token)
         rows = (sb.table("chat_messages").select("content,created_at")
-                .eq("room_id", room_id).eq("sender_type", "human")
+                .eq("room_id", room_id).eq("sender_type", "human").eq("sender_id", user_id)
                 .order("created_at", desc=True).limit(1).execute()).data or []
         notes = [w.get("plain_note") or "" for w in followups.list_watches(room_id)]
         return (rows[0] if rows else None), notes
 
     try:
-        latest, notes = await asyncio.to_thread(_load)
+        loaded = await asyncio.to_thread(_load)
+        if owner_message_id:
+            return loaded
+        latest, notes = loaded
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "basis": "", "reason": f"本人の発言を読めず、送る許可を確かめられません（{e}）。送らないこと。"}
 

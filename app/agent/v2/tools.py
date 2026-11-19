@@ -696,7 +696,7 @@ COMPOSE_MESSAGE_TOOL = {
 
 【使い方】
 - propose: 文面を出す。ユーザーに「これで良ければ送ります」と言う代わりにこれを呼ぶ。呼んだ後は本文をチャットに繰り返さず、一言添えるだけでよい。件名が要るのは「メールの新規送信」だけ。
-- send: 既に出した送信案を送る（本人の最新の発言が「送って」のように送ることを名指して許した時だけ）。proposal_id と approval（その本人の言葉をそのまま）を渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。サーバー送信できないチャネル（LINE 等）では送信の代わりにカードが「送信中」にロックされ、送るべき本文が返る → あなたが browser でその本文を送り、mark_sent で確定する。
+- send: 既に出した送信案を送る（本人がこの送信を名指して許した時。後で別の発言がある時は lookup で元の発言IDを取り、owner_message_id を付けて照合する）。proposal_id と approval（その本人の言葉をそのまま）を渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。サーバー送信できないチャネル（LINE 等）では送信の代わりにカードが「送信中」にロックされ、送るべき本文が返る → あなたが browser でその本文を送り、mark_sent で確定する。
 - mark_sent: あなたが browser 等で自力送信した後、送信済みとして確定する（本文は DB の現在の版）。
 - release: 手動送信に失敗した時、「送信中」ロックを解除して下書きに戻す。
 - discard: 送信案を取り下げる。
@@ -728,8 +728,10 @@ COMPOSE_MESSAGE_TOOL = {
             "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
             "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
             "proposal_id": {"type": "string", "description": "send / mark_sent / discard 用: 対象の送信案ID"},
+            "owner_message_id": {"type": "string", "description": "send用。承認後に別の発言がある場合、この部屋で送る指示をした本人の発言ID。approvalにその指示の一文を写す。"},
+            "review_token": {"type": "string", "description": "send用。照合結果の会話と最新の相手とのやり取り・前提を確かめて変更も撤回もない場合だけ、返された値を渡す。"},
             "approved": {"type": "boolean", "description": "propose用: 本人の最新の発言が、この送信を名指して許している時だけ true（approval も渡す）。カードを出さず、続けて send する"},
-            "approval": {"type": "string", "description": "send と approved=true の時に必須: この送信を許した本人の最新の発言から、その言葉をそのまま写す（例:「それで送って」）。「進めて」「いいよ」など送ることを名指していない言葉、前の発言、承認の後に中身が変わった下書きでは送れない。予約・定期の送信（「明日9時に送っておいて」）は、見張りを立てる時に本人の言葉を note にそのまま写しておき、その言葉を渡す"},
+            "approval": {"type": "string", "description": "send と approved=true の時に必須: この送信を許した本人の最新の発言から、その言葉をそのまま写す（例:「それで送って」）。「進めて」「いいよ」など送ることを名指していない言葉、承認の後に中身が変わった下書きでは送れない。予約・定期の送信（「明日9時に送っておいて」）は、見張りを立てる時に本人の言葉を note にそのまま写しておき、その言葉を渡す"},
             "note": {"type": "string", "description": "mark_sent用: どう送ったか（任意）"},
         },
         "required": ["action"],
@@ -5015,10 +5017,12 @@ async def _execute_compose_message(
             from app.services import send_authorization as _auth
             cur = await _aio.to_thread(svc.get, pid, user_id)
             gate = await _auth.authorize(approval=params.get("approval") or "", room_id=room_id,
-                                         user_id=user_id, proposal=cur)
+                                         user_id=user_id, proposal=cur, owner_message_id=params.get("owner_message_id") or "",
+                                         review_token=params.get("review_token") or "")
             if not gate["ok"]:
-                return {"success": False, "sent": False, "error": "送っていません。" + gate["reason"]}
-            row = await svc.send(pid, user_id, sent_by="dan")
+                return {"success": False, "sent": False, "error": "送っていません。" + gate["reason"],
+                        **{k: gate[k] for k in ("review_token", "original", "context", "subsequent", "draft") if k in gate}}
+            row = await svc.send(pid, user_id, sent_by="dan", expected_revision=cur["updated_at"])
             if row.get("status") == "sending":
                 # 手動チャネル: 送信の代わりにカードをロックして本文を渡した。
                 # ダンはこの本文（＝ユーザーの編集を反映した版）をそのまま送ること。

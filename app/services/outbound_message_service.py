@@ -226,6 +226,8 @@ class OutboundMessageService:
         row = self.get(proposal_id, user_id)
         if not row:
             raise ValueError("送信案が見つかりません")
+        if expected_revision is not None and row.get("updated_at") != expected_revision:
+            raise ValueError("照合後に下書きが変更されました。")
         if row["status"] == "sending":
             raise ValueError("送信中（ダンが送信作業中）のため編集できません")
         if row["status"] != "pending":
@@ -441,7 +443,7 @@ class OutboundMessageService:
     # ------------------------------------------------------------------
     # 送信 / 送信済み記録 / 破棄
     # ------------------------------------------------------------------
-    async def send(self, proposal_id: str, user_id: str, *, sent_by: str) -> dict:
+    async def send(self, proposal_id: str, user_id: str, *, sent_by: str, expected_revision: Optional[str] = None) -> dict:
         """DB の現在本文で実送信する。sent_by = "user" | "dan"。
 
         サーバー送信できないチャネル（LINE 等）でダンが呼んだ場合は送信せず、
@@ -461,11 +463,13 @@ class OutboundMessageService:
         if channel not in SERVER_SENDABLE:
             if sent_by != "dan":
                 raise ValueError(f"{channel_label(channel)} はサーバーから直接送信できません。")
-            return self._claim_for_manual_send(row, ad)
+            return self._claim_for_send(row, ad)
         body = row["content"]
         to = ad.get("to")
         if not to:
             raise ValueError("宛先がありません")
+
+        self._claim_for_send(row, ad)
 
         if channel == "email":
             from app.config import settings
@@ -615,13 +619,13 @@ class OutboundMessageService:
             ad["send_result"] = {**res, "post_url": post_url}
         ad["from_account"] = account
 
-    def _claim_for_manual_send(self, row: dict, ad: dict) -> dict:
+    def _claim_for_send(self, row: dict, ad: dict) -> dict:
         """手動チャネルの送信前ロック。pending → sending（編集・ボタン無効）。
         以後ダンが mark_sent を忘れても「押せるカード」には戻らない（fail-safe）。"""
         ad["claimed_at"] = _now()
         r = self.sb.table("dan_proposals").update({
             "status": "sending", "action_data": ad,
-        }).eq("id", row["id"]).eq("status", "pending").execute()
+        }).eq("id", row["id"]).eq("status", "pending").eq("updated_at", row["updated_at"]).execute()
         if not r.data:
             raise ValueError("ロックに失敗しました（他所で状態が変わった可能性）")
         return r.data[0]
