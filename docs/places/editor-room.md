@@ -17,8 +17,8 @@ watches:
   - frontend/src/components/production/production-workspace.tsx
   - frontend/src/components/production/editor-dan-chat.tsx
   - frontend/src/app/production-workspace/page.tsx
-fingerprint: a834782558528362
-described: 42dfe96cda0aa6d2
+fingerprint: 4694935854402247
+described: 9841e5f8f3930a97
 ---
 # エディターの中の「ダンと制作」
 
@@ -26,7 +26,7 @@ described: 42dfe96cda0aa6d2
 
 ## 中にある物
 
-- `library` 制作ライブラリ。左に「新規作成」・作品の一覧・素材のフォルダ、真ん中に作品の絵の一覧と大きな「新規作成」。会話は無い（前にあったライブラリの部屋の会話は兄弟の部屋として読める）。
+- `library` 制作ライブラリ。左に「新規作成」・作品の一覧・素材のフォルダ、真ん中に作品の絵の一覧と大きな「新規作成」。作品の絵を押すと、その絵の上に「開いています」が出て、組み立て終わるとタイムラインに切り替わる（長い作品で0.1秒ほど。2026-11-19）。会話は無い（前にあったライブラリの部屋の会話は兄弟の部屋として読める）。
 - `content-chat` 作品を開いた画面（タイムラインとプレビュー）の右の欄。作品ごとに1つの部屋。この部屋のダンはその作品のタイムラインの道具（mcp__timeline__*）を持ち、再生位置と選んだクリップが「ここ」「これ」になる。
 - `toggle` 上の「ダンと制作」のボタンで欄を開け閉めする。
 - `voice` 欄の上の「話す」で、この作品のダンと通話する（2026-11-17）。みきさんが話している間の再生位置・選んだクリップ・プレビューでマウスを置いた所が、言葉ごとに記録され（app/services/voice_editor.py）、直す作業（チャットで頼んだ時と同じ作品の部屋の作業）に、その時の完成画面の絵（指した所に赤い丸）と一緒に渡る。作業は直す場所と中身を一言で言ってから直し、直す様子はタイムラインの上にダンの手として見える。
@@ -46,7 +46,8 @@ described: 42dfe96cda0aa6d2
 `python scripts/place_map.py stamp editor-room` が書き直す。手で直さない。
 
 - 見張るファイル: `frontend/src/app/production-workspace/page.tsx`, `frontend/src/components/production/editor-dan-chat.tsx`, `frontend/src/components/production/production-workspace.tsx`
-- ラベル: 「ダンと制作」、「作品と素材」、「作品」、「素材のフォルダ」、「作品の一覧」
+- ラベル: 「ダンと制作」、「欄の幅を変える」、「作品と素材」、「作品」、「素材のフォルダ」、「作品の一覧」
+- 試験の印: 「content-cover」
 
-<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "e65a8f6c81", "frontend/src/components/production/editor-dan-chat.tsx": "168fd73ca8", "frontend/src/components/production/production-workspace.tsx": "5e1338bc4a"} -->
+<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "bea301b706", "frontend/src/components/production/editor-dan-chat.tsx": "2276af678a", "frontend/src/components/production/production-workspace.tsx": "ddd608f161"} -->
 <!-- place_map:auto:end -->
