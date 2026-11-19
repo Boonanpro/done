@@ -209,6 +209,10 @@ def outline(doc):
             if ''.join(c[1] for c in chars).strip() and any(c[2]['del'] for c in chars):
                 units.append({'kind': 'gone', 'text': ''.join(c[1] for c in chars).strip(), 'segs': _segs(chars),
                               'para': pi, **({'section': 'top'} if mode != 'script' else {})})
+            elif units and not any(c[2]['ins'] or c[2]['del'] for c in chars):
+                # An empty line shows as one, so the owner can type into it like in the doc (11/19).
+                units.append({'kind': 'blank', 'text': '', 'segs': _segs(chars), 'para': pi,
+                              **({'section': 'top'} if mode != 'script' else {})})
             continue
         if style == 'TITLE' or style == 'HEADING_1':
             units.append({'kind': 'title', 'text': text}); continue
@@ -219,14 +223,14 @@ def outline(doc):
                 # A ◎ line inside the script (◎追加特典① …) is a small heading of the script, not a new top part.
                 # As a top-level heading the screen filed everything after it under 「読みません」 (11/18).
                 section = text
-                units.append({'kind': 'heading', 'level': 3, 'text': text, 'read': True, 'segs': _segs(chars)}); continue
+                units.append({'kind': 'heading', 'level': 3, 'text': text, 'read': True, 'segs': _segs(chars), 'para': pi}); continue
             units.append({'kind': 'heading', 'level': 1, 'text': text, 'read': mode == 'script'}); continue
         if mode != 'script':
-            units.append({'kind': 'note', 'text': text, 'section': 'top', 'segs': _segs(chars)}); continue
+            units.append({'kind': 'note', 'text': text, 'section': 'top', 'segs': _segs(chars), 'para': pi}); continue
         if style in ('HEADING_2', 'HEADING_3') or re.match(r'^【\d+】', text) or text.startswith('▼'):
             level = 2 if (style == 'HEADING_2' or text.startswith('【')) else 3
             section = text
-            units.append({'kind': 'heading', 'level': level, 'text': text, 'read': True, 'segs': _segs(chars)}); continue
+            units.append({'kind': 'heading', 'level': level, 'text': text, 'read': True, 'segs': _segs(chars), 'para': pi}); continue
         visible = [c for c in chars if not c[2]['del']]
         if all(c[2]['blue'] or not c[1].strip() for c in visible) or text.startswith('［'):
             units.append({'kind': 'note', 'text': text, 'para': pi, 'segs': _segs(chars)}); continue
@@ -368,6 +372,96 @@ def edit(doc_id, old, new, para=None, start=None):
     _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
           body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
     _log_owner_edit(doc_id, doc.get('title', ''), old, new)
+    return {'changed': True, 'requests': len(reqs)}
+
+
+def _para_span(doc, para_from, para_to):
+    """The paragraphs ``para_from``..``para_to`` of the doc as one text (paragraphs joined by '\n'), the doc index of
+    every character plus the end, and their boldness. None when one of them is not a plain paragraph."""
+    content = doc.get('body', {}).get('content', [])
+    if not (0 <= para_from <= para_to < len(content)): return None
+    text, pos, bold, locked = [], [], [], False
+    for pi in range(para_from, para_to + 1):
+        el = content[pi]
+        p = el.get('paragraph')
+        if p is None: return None
+        if pi > para_from:
+            text.append('\n'); pos.append(content[pi - 1]['endIndex'] - 1); bold.append('0')
+        for idx, ch, f in _chars(p):
+            if f['ins'] or f['del']: locked = True
+            text.append(ch); pos.append(idx); bold.append('1' if f['bold'] else '0')
+    pos.append(content[para_to]['endIndex'] - 1)
+    return ''.join(text), pos, ''.join(bold), locked
+
+
+def replace_requests(pos, old, new, old_bmask, new_bmask):
+    """Docs API requests that turn ``old`` (characters at ``pos``, '\n' between paragraphs) into ``new``. Text first,
+    from the end; then boldness, in the coordinates of the new text, only where it differs from what was there (so the
+    bold of headings, which comes from their named style, is left alone)."""
+    reqs, styles = [], []
+    base = pos[0]
+    npos, acc = [], base
+    for ch in new:
+        npos.append(acc); acc += _units16(ch)
+    npos.append(acc)
+    nb = lambda j: j < len(new_bmask) and new_bmask[j] == '1'
+    ob = lambda i: i < len(old_bmask) and old_bmask[i] == '1'
+    want = {}
+    ops = SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
+    for tag, i1, i2, j1, j2 in reversed(ops):
+        if tag == 'equal': continue
+        if i2 > i1:
+            reqs.append({'deleteContentRange': {'range': {'startIndex': pos[i1], 'endIndex': pos[i2]}}})
+        if j2 > j1:
+            reqs.append({'insertText': {'location': {'index': pos[i1]}, 'text': new[j1:j2]}})
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == 'equal':
+            for k in range(i2 - i1):
+                if ob(i1 + k) != nb(j1 + k): want[j1 + k] = nb(j1 + k)
+        else:
+            # New text takes the style of the character before it (Docs does that); set bold only where that is wrong.
+            like = i1 - 1 if i1 > 0 and old[i1 - 1] != '\n' else i2 if i2 < len(old) else i1 - 1
+            for j in range(j1, j2):
+                if nb(j) != (like >= 0 and ob(like)): want[j] = nb(j)
+    run = None
+    for j in sorted(want):
+        if new[j] == '\n': continue
+        if run and run[1] == j and run[2] == want[j]: run[1] = j + 1
+        else:
+            if run: styles.append(run)
+            run = [j, j + 1, want[j]]
+    if run: styles.append(run)
+    for a, b, v in styles:
+        reqs.append({'updateTextStyle': {'range': {'startIndex': npos[a], 'endIndex': npos[b]},
+                                         'textStyle': {'bold': v}, 'fields': 'bold'}})
+    return reqs
+
+
+def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask=''):
+    """What the owner typed on the screen, written into the doc: paragraphs ``para_from``..``para_to`` read ``old``
+    on the screen and now read ``new`` (with '\n' where a paragraph ends; boldness as '0'/'1' per character). The
+    doc is read again first; when those paragraphs no longer read ``old``, nothing is written."""
+    new = (new or '').replace('\r', '')
+    _follow(doc_id)
+    doc = fetch(doc_id)
+    span = _para_span(doc, para_from, para_to)
+    if not span or span[0] != old:
+        raise ListenError('ドキュメントの方でここが直されていたので、ドキュメントから読み直しました。', 409)
+    _, pos, doc_bmask, locked = span
+    if locked:
+        raise ListenError('ここには提案（提案モードの直し）が入っているので、直せません。先に提案を承認か却下してください。', 409)
+    old_bmask = doc_bmask
+    new_bmask = (new_bmask or '')[:len(new)].ljust(len(new), '0')
+    if new == old and new_bmask == old_bmask: return {'changed': False}
+    content = doc['body']['content']
+    if not new.strip('\n') and para_from == para_to == len(content) - 1 and not old:
+        return {'changed': False}
+    reqs = replace_requests(pos, old, new, old_bmask, new_bmask)
+    if not reqs: return {'changed': False}
+    _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
+          body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+    if new != old: _log_owner_edit(doc_id, doc.get('title', ''), old, new)
+    else: _log_owner_action(doc_id, doc.get('title', ''), action='bold', text=new)
     return {'changed': True, 'requests': len(reqs)}
 
 
