@@ -964,8 +964,10 @@ def activity(doc_id):
         try: ids = [x['comment_id'] for x in json.loads(r['payload'])]
         except Exception: ids = []
         events = []
+        results = {(e.get('text') or '').strip() for e in state.get('events') or [] if e.get('kind') == 'result'}
         for e in state.get('events') or []:
             if e.get('kind') not in _JOB_KINDS: continue
+            if e['kind'] == 'progress' and (e.get('text') or '').strip() in results: continue   # the answer, once
             text = (e.get('label') if e.get('kind') == 'tool' and e.get('label') else e.get('text')) or ''
             # The text Dan writes between steps is sometimes an English note to himself: not a line for the owner.
             if e['kind'] == 'progress' and len(_JP.findall(text)) * 2 < len(re.findall(r'[A-Za-z]', text)): continue
