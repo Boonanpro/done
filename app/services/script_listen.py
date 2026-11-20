@@ -817,15 +817,18 @@ def accept_all(doc_id):
         for e in p.get('elements', []):
             r = e.get('textRun')
             ioe = e.get('inlineObjectElement')
-            if ioe and (sid in (ioe.get('suggestedInsertionIds') or []) or sid in (ioe.get('suggestedDeletionIds') or [])):
-                # A picture in the suggestion (Dan puts screenshots in as suggestions, 11/20): written again plainly
-                # from its own picture link when it stays, taken out when it goes.
-                kind = 'ins' if sid in (ioe.get('suggestedInsertionIds') or []) else 'del'
+            if ioe and (ioe.get('suggestedInsertionIds') or ioe.get('suggestedDeletionIds')):
+                # A suggested picture (Dan's screenshots, 11/20): an added one written again plainly from its own
+                # picture link, a removed one taken out. (Copied from decide() with its sid/accept, it raised
+                # NameError and the button gave 500 on any doc with a suggested picture, 11/20.)
+                kind = 'del' if ioe.get('suggestedDeletionIds') else 'ins'
                 emb = ((doc.get('inlineObjects') or {}).get(ioe.get('inlineObjectId'), {}).get('inlineObjectProperties') or {}).get('embeddedObject') or {}
                 image = {'uri': (emb.get('imageProperties') or {}).get('contentUri'), 'size': emb.get('size')}
-                if (kind == 'ins') == accept and not image['uri']:
-                    raise ListenError('この提案の画像を読めませんでした。ドキュメントで決めてください。', 409)
+                if kind == 'ins' and not image['uri']:
+                    raise ListenError('提案の画像を読めませんでした。画像の提案はドキュメントで決めてください。', 409)
                 runs.append((e['startIndex'], e.get('endIndex', e['startIndex'] + 1), kind, '', {}, pstyle, nxt, image))
+                for sid in ioe.get('suggestedDeletionIds' if kind == 'del' else 'suggestedInsertionIds') or []:
+                    ids.setdefault(sid, {'added': '', 'removed': ''})['added' if kind == 'ins' else 'removed'] += '[画像]'
                 continue
             if not r: continue
             ins, dele = r.get('suggestedInsertionIds') or [], r.get('suggestedDeletionIds') or []
