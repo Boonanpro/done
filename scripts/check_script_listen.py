@@ -281,11 +281,13 @@ def run(a, result, out_dir, stamp, tok, sync_playwright):
                     page.get_by_role('button', name='却下').first.wait_for(timeout=10000)
                     page.screenshot(path=str(out_dir / f'{stamp}-suggestion-sheet.png'))
                 card_btn = page.get_by_role('button', name='却下').first
+                # The first card on screen, not the first in the doc's list: check the one actually pressed.
+                sid = card_btn.evaluate("el => el.closest('[data-card]')?.getAttribute('data-card')") or s0['id']
                 card_btn.scroll_into_view_if_needed()
                 card_btn.click()
                 page.wait_for_timeout(4000)
                 left = {x['id'] for x in S.read(a.edit_doc)['suggestions']}
-                result['suggestion'] = {'id': s0['id'], 'gone_from_doc': s0['id'] not in left}
+                result['suggestion'] = {'id': sid, 'gone_from_doc': sid not in left}
 
             # 6. a comment
             if a.comment:
