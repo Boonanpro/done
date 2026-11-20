@@ -17,8 +17,8 @@ watches:
   - frontend/src/components/script-listen/listen-screen.tsx
   - frontend/src/components/script-listen/listen-chat.tsx
   - app/services/script_rooms.py
-fingerprint: bb7050f91f83eec6
-described: 90e955b80654386f
+fingerprint: 3ffcf49676d86b4c
+described: 2185a2f3cba42415
 ---
 # 台本を聞く画面の「ダンと台本」
 
@@ -27,7 +27,9 @@ described: 90e955b80654386f
 ## 中にある物
 
 - `chat` 右の欄（PC）。上の帯の「ダン」で開け閉めする。スマホは上の「ダン」を押すと下から大きく開く。地は白（`.theme-light`。11/20 本人「黒じゃなくて白にして」）。
-- `share-copy` 上の帯の「共有」。押すと相手に送るリンク（お客さん用の写し。誰でも編集・コメントでき、コメントと未承認の提案は入らない）がコピーされる。写しが無ければ初めて押した時にできる。台本が写しより進んでいれば欄に「今の台本に更新する」。共有して、と言われたらこのボタンを案内する。
+- `share-copy` 上の帯の「共有」。押すと相手に送るリンク（お客さん用の写し。誰でも編集・コメントでき、コメントと未承認の提案は入らない）がコピーされる。写しが無ければ初めて押した時にできる。写しは台本を直すと数秒で自動で同じ文に書き換わる（提案の色は出ず直接。未承認の提案は写らない。11/21 本人「原本編集したら中村さんの方にも反映されて書き換わる」）。欄には最後に写した時刻と、相手が写しを直した数。共有して、と言われたらこのボタンを案内する。
+- `client-suggestion` 相手が写しの本文を直すと、台本に「相手の直し」の提案の札として入る。承認で台本に入り、却下で写しも元の文に戻る。決めるまで写しのその所は相手の文のまま。
+- 提案の文字を書き換えても提案のまま（承認・却下だけが決める。11/21 本人）。ダンの提案を書き換えると「みきさんの提案」に変わり、Google ドキュメントの画面からは消えて、この画面にだけ出る。
 - `decide-all` 下の再生の段の右にある「すべて承認」「すべて却下」。提案が1つでもある時だけ出る。
 - `dan-mark` ダンがドキュメントで文字を選んでいる・打ち込んでいる間だけ、その文が青く光り左に青い線が出る。考えている間は光らない。入った提案は一瞬光って、普通の緑と赤の線になる。
 - `screen-state` みきさんのカーソルの文・選んだ文字・サムネの編集を開いているか。画面が数秒ごとに知らせ、ダンの前置きに入る。
@@ -50,5 +52,5 @@ described: 90e955b80654386f
 - ラベル: 「書き方」、「画像を入れる」、「声」、「ドキュメント」、「ダンの作業の様子を見る」、「前の文」、「次の文」、「ダンと台本」、「閉じる」、「ダンが直している所へ」、「コメントを追加」
 - 試験の印: 「script-editor」、「chat-toggle」、「compare-toggle」、「image-add」、「dan-bar」、「ref-panel」、「listen-thumb」、「dan-glow」
 
-<!-- place_map:files {"app/services/script_rooms.py": "56c20031cd", "frontend/src/components/script-listen/listen-screen.tsx": "9c078e474e"} -->
+<!-- place_map:files {"app/services/script_rooms.py": "56c20031cd", "frontend/src/components/script-listen/listen-screen.tsx": "7057a47685"} -->
 <!-- place_map:auto:end -->
