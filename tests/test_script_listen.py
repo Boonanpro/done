@@ -422,7 +422,7 @@ def test_activity_lights_only_what_dans_browser_touches_now(tmp_path, monkeypatc
         with E.db() as c:
             c.execute('INSERT INTO batches(id,file_id,payload,status,created) VALUES(?,?,?,?,?)',
                       (bid, 'DOC', J.dumps([{'comment_id': bid}]), 'running', iso(now - 60)))
-        (jobs / f'{bid}.json').write_text(J.dumps({'created_at': iso(now - 60), 'updated_at': iso(now), 'events': [], **st}))
+        (jobs / f'{bid}.json').write_text(J.dumps({'created_at': iso(now - 60), 'updated_at': iso(now), 'state': 'running', 'events': [], **st}))
     job('typing', current_tool={'name': 'browser', 'touch': words})
     job('thinking', current_tool={'name': 'Bash'}, last_tool={'name': 'browser', 'touch': words, 'at': iso(now - 30)})
     job('just', current_tool=None, last_tool={'name': 'browser', 'touch': words, 'at': iso(now - 1)})
