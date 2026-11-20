@@ -25,6 +25,8 @@ from pathlib import Path
 
 import httpx
 
+from app.services import script_listen_marks as M
+
 ENGINE = os.environ.get('DAN_AIVIS_URL', 'http://127.0.0.1:10101')
 STATE = Path.home() / '.dan' / 'script-listen'
 CACHE = STATE / 'cache'
@@ -117,9 +119,11 @@ def _chars(paragraph):
         # del / ins are the suggestion ids (a tuple, empty when none), so they still read as true / false.
         flags = {'del': tuple(run.get('suggestedDeletionIds') or ()), 'ins': tuple(run.get('suggestedInsertionIds') or ()),
                  'blue': _is_blue(style), 'bold': bool(style.get('bold'))}
+        # The owner's added words (script_listen_marks) have no room in the doc yet: all of them sit where they go.
+        step = not run.get('_virtual')
         for ch in run['content']:
             out.append((idx, ch, flags))
-            idx += _units16(ch)
+            if step: idx += _units16(ch)
     while out and out[-1][1] == '\n': out.pop()
     return out
 
@@ -287,20 +291,29 @@ def _inline_images(units):
 
 
 def suggestions_of(units):
-    """Each suggestion once, with the text it adds and removes and the first unit it shows in."""
+    """Each suggestion once, with the text it adds and removes and the first unit it shows in. ``by`` owner: written
+    in suggestion mode on this screen (kept here, not in the doc)."""
     out = {}
     for u in units:
         for seg in u.get('segs') or ():
             for kind in ('ins', 'del'):
                 sid = seg.get(kind)
                 if not sid: continue
-                s = out.setdefault(sid, {'id': sid, 'ins': '', 'del': '', 'n': u['n']})
+                s = out.setdefault(sid, {'id': sid, 'ins': '', 'del': '', 'n': u['n'], 'by': 'owner' if M.is_owner(sid) else 'doc'})
                 s[kind] += seg['t']
     return list(out.values())
 
 
+def view(doc_id, doc=None):
+    """The doc with the owner's own suggestions laid in: (doc, the suggestions kept for it, {sid: paragraph})."""
+    doc = doc or fetch(doc_id)
+    sugs = M.load(OWNER_SUGS, doc_id)
+    shown, placed = M.overlay(doc, sugs)
+    return shown, sugs, placed
+
+
 def read(doc_id, voice=DEFAULT_VOICE):
-    doc = fetch(doc_id)
+    doc, _, _ = view(doc_id)
     units = outline(doc)
     for n, u in enumerate(units):
         u['n'] = n
@@ -403,7 +416,7 @@ def touches_suggestion(old, new, locked):
     return False
 
 
-def replace_requests(pos, old, new, old_bmask, new_bmask):
+def replace_requests(pos, old, new, old_bmask, new_bmask, ops=None):
     """Docs API requests that turn ``old`` (characters at ``pos``, '\n' between paragraphs) into ``new``. Text first,
     from the end; then boldness, in the coordinates of the new text, only where it differs from what was there (so the
     bold of headings, which comes from their named style, is left alone)."""
@@ -416,7 +429,7 @@ def replace_requests(pos, old, new, old_bmask, new_bmask):
     nb = lambda j: j < len(new_bmask) and new_bmask[j] == '1'
     ob = lambda i: i < len(old_bmask) and old_bmask[i] == '1'
     want = {}
-    ops = SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
+    ops = ops or SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
     for tag, i1, i2, j1, j2 in reversed(ops):
         if tag == 'equal': continue
         if i2 > i1:
@@ -446,35 +459,102 @@ def replace_requests(pos, old, new, old_bmask, new_bmask):
     return reqs
 
 
-def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask=''):
-    """What the owner typed on the screen, written into the doc: paragraphs ``para_from``..``para_to`` read ``old``
-    on the screen and now read ``new`` (with '\n' where a paragraph ends; boldness as '0'/'1' per character). The
-    doc is read again first; when those paragraphs no longer read ``old``, nothing is written."""
+GONE_HERE = 'ドキュメントの方でここが直されていたので、ドキュメントから読み直しました。'
+
+
+def _locate(shown, para_from, para_to, old, new, old_bmask, new_bmask):
+    """The paragraphs the screen means, in the doc as it is now. They may have moved (paragraphs added before them)
+    or been changed by someone else meanwhile (Dan's suggestion in the same paragraph, 11/20 本人「ダンがコメントを
+    考えている最中の文字を編集しようとすると弾かれる」): then the owner's change goes onto the new text when the two do
+    not touch the same words. Returns (para_from, para_to, tokens, end, old, new, new_bmask, rebased)."""
+    got = M.tokens(shown, para_from, para_to, _chars)
+    if got and M.text_of(got[0]) == old:
+        return para_from, para_to, got[0], got[1], old, new, new_bmask, False
+    for d in sorted(range(-40, 41), key=abs):
+        if not d: continue
+        g = M.tokens(shown, para_from + d, para_to + d, _chars)
+        if g and M.text_of(g[0]) == old:
+            return para_from + d, para_to + d, g[0], g[1], old, new, new_bmask, False
+    if got:
+        theirs = M.text_of(got[0])
+        merged = M.rebase(old, theirs, new, new_bmask, M.bmask_of(got[0]))
+        if merged:
+            return para_from, para_to, got[0], got[1], theirs, merged[0], merged[1], True
+    raise ListenError(GONE_HERE, 409)
+
+
+def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mode='edit', _depth=0):
+    """What the owner typed on the screen: paragraphs ``para_from``..``para_to`` read ``old`` on the screen and now
+    read ``new`` (with '\n' where a paragraph ends; boldness as '0'/'1' per character). ``mode`` 'edit' writes it
+    into the doc; 'suggest' keeps it as the owner's suggestion (the Docs API cannot write suggestions). Changing the
+    words of a suggestion settles it first, the way the owner means it (script_listen_marks)."""
+    if mode not in ('edit', 'suggest'): raise ListenError('書き方の指定が正しくありません。')
     new = (new or '').replace('\r', '')
     _follow(doc_id)
-    doc = fetch(doc_id)
-    span = _para_span(doc, para_from, para_to)
-    if not span or span[0] != old:
-        raise ListenError('ドキュメントの方でここが直されていたので、ドキュメントから読み直しました。', 409)
-    _, pos, doc_bmask, locked = span
-    if touches_suggestion(old, new, locked):
-        raise ListenError('提案（提案モードの直し）の文字は直せません。先に提案を承認か却下してください。', 409)
-    # Boldness is compared on the screen's own terms (bold marks, not the heading style), so only what the owner
-    # switched with Ctrl+B is written.
-    if len(old_bmask or '') != len(old): old_bmask = doc_bmask
-    new_bmask = (new_bmask or '')[:len(new)].ljust(len(new), '0')
-    if new == old and new_bmask == old_bmask: return {'changed': False}
+    with _owner_lock:
+        doc = fetch(doc_id)
+        shown, sugs, placed = view(doc_id, doc)
+        new_bmask = (new_bmask or '')[:len(new)].ljust(len(new), '0')
+        para_from, para_to, toks, end, old, new, new_bmask, rebased = _locate(shown, para_from, para_to, old, new,
+                                                                              old_bmask, new_bmask)
+        # Boldness is compared on the screen's own terms (bold marks, not the heading style), so only what the owner
+        # switched with Ctrl+B is written.
+        if not rebased and len(old_bmask or '') == len(old):
+            for t, b in zip(toks, old_bmask): t['b'] = b == '1'
+        if new == old and new_bmask == M.bmask_of(toks): return {'changed': False}
+        try:
+            new_toks, settled = M.plan(toks, new, new_bmask, mode)
+        except M.Refused as exc:
+            raise ListenError(str(exc), 409)
+        except M.Settle as need:
+            # Dan's suggestion is being typed over: decide it in the doc the way the owner means it, then the rest.
+            if _depth >= 2: raise ListenError(GONE_HERE, 409)
+            for sid, accept in need.decisions.items(): decide(doc_id, sid, accept, by_edit=True)
+            o2, ob2, n2, nb2 = M.drop_settled(toks, new, new_bmask, need.decisions)
+            out = replace(doc_id, para_from, para_to, o2, n2, ob2, nb2, mode, _depth + 1)
+            return {**out, 'changed': True, 'rebased': rebased or out.get('rebased', False),
+                    'settled': {**need.decisions, **(out.get('settled') or {})}}
+        out = _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, mode)
+        return {**out, 'rebased': rebased, 'settled': {**settled, **(out.get('settled') or {})}}
+
+
+def _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, mode, log=True):
+    """Write a planned change: the doc's own text, then the owner's suggestions in those paragraphs."""
+    a, pos, abm, b, bbm, xlock, ops = M.doc_change(toks, new_toks)
+    if any(any(xlock[i1:i2]) for tag, i1, i2, _, _ in ops if tag != 'equal'): raise ListenError(GONE_HERE, 409)
     content = doc['body']['content']
-    if not new.strip('\n') and para_from == para_to == len(content) - 1 and not old:
-        return {'changed': False}
-    reqs = replace_requests(pos, old, new, old_bmask, new_bmask)
-    if not reqs: return {'changed': False}
-    done = _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
-                 body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
-    if new != old: _log_owner_edit(doc_id, doc.get('title', ''), old, new)
-    else: _log_owner_action(doc_id, doc.get('title', ''), action='bold', text=new)
-    # The screen tells its own writes from other people's by this revision.
-    return {'changed': True, 'requests': len(reqs), 'revision': (done.get('writeControl') or {}).get('requiredRevisionId')}
+    reqs = []
+    if (a != b or abm != bbm) and not (not b.strip('\n') and para_from == para_to == len(content) - 1 and not a):
+        reqs = replace_requests(pos + [end], a, b, abm, bbm, ops)
+    revision = None
+    if reqs:
+        done = _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
+                     body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+        revision = (done.get('writeControl') or {}).get('requiredRevisionId')
+    now = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    fresh = M.regroup(new_toks, para_from, now=now)
+    old_here = {s['id']: s for s in sugs if para_from <= placed.get(s['id'], -1) <= para_to}
+    for f in fresh:                        # an owner suggestion keeps when it was first written
+        if f['id'] in old_here: f['at'] = old_here[f['id']].get('at') or now
+    after = M.store_after(sugs, placed, para_from, para_to, b.count('\n') - a.count('\n'), fresh)
+    if after != sugs: M.save(OWNER_SUGS, doc_id, after)
+    title = doc.get('title', '')
+    if log:
+        if a != b: _log_owner_edit(doc_id, title, a, b)
+        elif reqs: _log_owner_action(doc_id, title, action='bold', text=b)
+        kept = {f['id'] for f in fresh}
+        for f in fresh:
+            was = old_here.get(f['id'])
+            if not was or (was.get('del'), was.get('ins')) != (f['del'], f['ins']):
+                _log_owner_action(doc_id, title, action='suggest', suggestion=f['id'],
+                                  before=f['pre'] + f['del'] + f['post'], after=f['pre'] + f['ins'] + f['post'])
+        for sid in old_here:
+            if sid not in kept: _log_owner_action(doc_id, title, action='settle', suggestion=sid)
+    # The screen tells its own writes from other people's by this revision. ``reload``: what the screen shows is not
+    # what the doc now is (a suggestion was settled), so it reads the doc again.
+    gone = [sid for sid in old_here if sid not in {f['id'] for f in fresh}]
+    return {'changed': bool(reqs) or after != sugs, 'requests': len(reqs), 'revision': revision,
+            'reload': bool(gone) or (mode == 'suggest' and after != sugs)}
 
 
 def delete_requests(doc, u):
@@ -505,10 +585,12 @@ def _log_owner_action(doc_id, title, **fields):
 
 # ---------------------------------------------------------------- suggestions (accept / reject on the screen)
 
-def decide(doc_id, sid, accept):
+def decide(doc_id, sid, accept, by_edit=False):
     """Accept or reject one suggestion the way Docs does. The Docs API has no accept/reject, so the same result is
     written: text that stays is deleted and written again as plain text with its style, text that goes is deleted.
-    Tried on a copy 11/19: Docs then shows the suggestion as settled."""
+    Tried on a copy 11/19: Docs then shows the suggestion as settled. The owner's own suggestions (kept by the
+    screen) are written as a plain change, or dropped. ``by_edit``: the owner typed over its words."""
+    if M.is_owner(sid): return _decide_owner(doc_id, sid, accept)
     _follow(doc_id)
     doc = fetch(doc_id)
     content = doc.get('body', {}).get('content', [])
@@ -538,8 +620,45 @@ def decide(doc_id, sid, accept):
     added = ''.join(r[3] for r in runs if r[2] == 'ins').strip()
     removed = ''.join(r[3] for r in runs if r[2] == 'del').strip()
     _log_owner_action(doc_id, doc.get('title', ''), action='accept' if accept else 'reject', suggestion=sid,
-                      added=added, removed=removed)
+                      added=added, removed=removed, **({'by_edit': True} if by_edit else {}))
     return {'done': True}
+
+
+def _decide_owner(doc_id, sid, accept):
+    _follow(doc_id)
+    with _owner_lock:
+        doc = fetch(doc_id)
+        shown, sugs, placed = view(doc_id, doc)
+        p = placed.get(sid)
+        if p is None:
+            if any(s['id'] == sid for s in sugs):
+                M.save(OWNER_SUGS, doc_id, [s for s in sugs if s['id'] != sid])
+            raise ListenError('この提案の所の文がドキュメントの方で変わっていたので、提案を外しました。', 409)
+        toks, end = M.tokens(shown, p, p, _chars)
+        new_toks, _ = M.plan(toks, M.text_of(toks), M.bmask_of(toks), 'edit', force={sid: accept})
+        _write(doc_id, doc, sugs, placed, p, p, toks, end, new_toks, 'edit', log=False)
+        title = doc.get('title', '')
+        mine = next(s for s in sugs if s['id'] == sid)
+        if accept:
+            # The owner's own words: an edit for the learning, with the words around it.
+            _log_owner_edit(doc_id, title, mine['pre'] + mine['del'] + mine['post'], mine['pre'] + mine['ins'] + mine['post'])
+        _log_owner_action(doc_id, title, action='settle', suggestion=sid)
+    return {'done': True}
+
+
+def accept_all(doc_id):
+    """Every suggestion in the doc accepted, the owner's own first (they are found by the words around them), then
+    the doc's. Ones that cannot be (overlapping another) are left and counted."""
+    done = failed = 0
+    _, sugs, placed = view(doc_id)
+    for sid in sorted(placed, key=lambda x: placed[x]):
+        try: _decide_owner(doc_id, sid, True); done += 1
+        except ListenError: failed += 1
+    for s in suggestions_of(outline(fetch(doc_id))):
+        if M.is_owner(s['id']): continue
+        try: decide(doc_id, s['id'], True); done += 1
+        except ListenError: failed += 1
+    return {'accepted': done, 'failed': failed}
 
 
 def decide_requests(runs, accept, body_end=None):
@@ -585,6 +704,8 @@ def decide_requests(runs, accept, body_end=None):
 # without a place in the text ("元のコンテンツは削除されました"); the page places them by the quoted words.
 
 ANCHORS = STATE / 'anchors.json'
+OWNER_SUGS = STATE / 'owner_suggestions.json'
+_owner_lock = threading.RLock()
 _private: dict = {}
 _watching: set = set()
 
@@ -683,7 +804,12 @@ def anchor_note(comment_ids):
         a = anchors.get(cid)
         if not isinstance(a, dict): continue
         if a.get('sentence'): lines.append(f"{cid}: 文「{a['sentence']}」")
-        if isinstance(a.get('suggestion'), dict): about.append(f"{cid}: 提案（{_suggestion_words(a['suggestion'])}）")
+        if isinstance(a.get('suggestion'), dict):
+            sug = a['suggestion']
+            # The owner's own suggestion is kept by the screen (the Docs API cannot write one): Dan cannot see it in
+            # the doc and does not decide it.
+            who = '本人が台本を聞く画面の提案モードで書いた提案（ドキュメントには入っていないのでブラウザでは見えない。決めるのは本人）' if M.is_owner(sug.get('id')) else '提案'
+            about.append(f"{cid}: {who}（{_suggestion_words(sug)}）")
     out = []
     if lines:
         out.append('台本を聞く画面から書かれたコメントの場所（Googleでは本文の位置が残らないので、ここで分かる）。'
