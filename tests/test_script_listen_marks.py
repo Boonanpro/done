@@ -26,28 +26,38 @@ def _run(doc, para, new, mode, bm=None, sugs=()):
     return _apply(_body(doc), reqs), fresh, settled
 
 
-def test_typing_over_dans_added_words_takes_his_suggestion_first():
+def test_typing_over_dans_suggestion_keeps_it_a_suggestion():
+    # 11/21 本人「承認や却下せずそのまま書き換えると、勝手に承認されて文字が本文に入ってしまう」
     doc = _ends(_doc(('◎台本\n', 'HEADING_2'),
                      [('一括', {}, {}), ('で', {}, {'suggestedDeletionIds': ['s']}), ('なら', {}, {'suggestedInsertionIds': ['s']}),
                       ('36万円です。\n', {}, {})]))
     toks, _ = _toks(doc, 1)
     assert M.text_of(toks) == '一括でなら36万円です。'
-    with pytest.raises(M.Settle) as e:
-        M.plan(toks, '一括でなXら36万円です。', '0' * 13, 'edit')      # typed inside 「なら」
-    assert e.value.decisions == {'s': True}
-    # once 「なら」 is taken in the doc, the change reads 一括なら36万円 -> 一括なXら36万円
-    o, _, n, _, _ = M.drop_settled(toks, '一括でなXら36万円です。', '0' * 13, {'s': True})
-    assert (o, n) == ('一括なら36万円です。', '一括なXら36万円です。')
-    # typing over the struck 「で」 keeps the old word (reject)
-    with pytest.raises(M.Settle) as e:
-        M.plan(toks, '一括だなら36万円です。', '0' * 11, 'edit')
-    assert e.value.decisions == {'s': False}
-    o, _, n, _, _ = M.drop_settled(toks, '一括だなら36万円です。', '0' * 11, {'s': False})
-    assert (o, n) == ('一括で36万円です。', '一括だ36万円です。')
-    # taking the struck 「で」 out: it goes anyway when taken
-    with pytest.raises(M.Settle) as e:
-        M.plan(toks, '一括なら36万円です。', '0' * 10, 'edit')
-    assert e.value.decisions == {'s': True}
+    for typed in ('一括でなXら36万円です。', '一括だなら36万円です。', '一括なら36万円です。'):
+        with pytest.raises(M.Adopt) as e:
+            M.plan(toks, typed, '0' * len(typed), 'edit')
+        assert e.value.sids == {'s'}
+    # his suggestion as the owner's, with the same words
+    pieces = S.adopt_pieces(doc, {'s'})
+    assert [(x['pre'], x['del'], x['ins'], x['post'], x['from']['suggestion']) for x in pieces] == [('一括', 'で', 'なら', '36万円です。', 's')]
+    # once it is taken back in the doc, the screen reads the same, and typing into it changes the suggestion only
+    back = _ends(_doc(('◎台本\n', 'HEADING_2'), '一括で36万円です。\n'))
+    for mode in ('edit', 'suggest'):
+        body, fresh, settled = _run(back, 1, '一括でなXら36万円です。', mode, sugs=pieces)
+        assert body == '◎台本\n一括で36万円です。\n' and not settled
+        assert [(f['id'], f['del'], f['ins']) for f in fresh] == [(pieces[0]['id'], 'で', 'なXら')]
+    # 承認 / 却下 still decide it
+    view, _ = M.overlay(back, pieces)
+    t2, end = _toks(view, 1)
+    new_toks, _ = M.plan(t2, M.text_of(t2), M.bmask_of(t2), 'edit', force={pieces[0]['id']: True})
+    a_, pos, abm, b_, bbm, _, ops = M.doc_change(t2, new_toks)
+    assert _apply(_body(back), S.replace_requests(pos + [end], a_, b_, abm, bbm, ops)) == '◎台本\n一括なら36万円です。\n'
+
+
+def test_a_suggestion_of_dans_across_paragraphs_is_not_rewritten():
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), [('前の文。', {}, {}), ('足す\n', {}, {'suggestedInsertionIds': ['s']}), ('後の文。\n', {}, {})]))
+    with pytest.raises(S.ListenError):
+        S.adopt_pieces(doc, {'s'})
 
 
 def test_typing_next_to_a_suggestion_does_not_settle_it():
@@ -95,19 +105,18 @@ def test_owner_suggestion_grows_while_typing_and_is_found_after_edits_elsewhere(
     assert M.overlay(changed, s2)[1] == {}
 
 
-def test_editing_the_owners_suggestion_in_edit_mode_takes_it():
+def test_editing_the_owners_suggestion_in_edit_mode_keeps_it_a_suggestion():
     doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '今日は大事な話をします。\n'))
     _, sugs, _ = _run(doc, 1, '今日は重要な話をします。', 'suggest')
     body, fresh, settled = _run(doc, 1, '今日は大事重X要な話をします。', 'edit', sugs=sugs)   # typed inside 「重要」
-    assert settled == {sugs[0]['id']: True}
-    assert body == '◎台本\n今日は重X要な話をします。\n' and not fresh
+    assert not settled and body == _body(doc)
+    assert [(f['id'], f['del'], f['ins']) for f in fresh] == [(sugs[0]['id'], '大事', '重X要')]
     # typing right after it is plain typing next to it (it stays a suggestion)
     body, fresh, settled = _run(doc, 1, '今日は大事重要さな話をします。', 'edit', sugs=sugs)
     assert not settled and body == '◎台本\n今日は大事さな話をします。\n' and [(f['del'], f['ins']) for f in fresh] == [('大事', '重要')]
-    # typing into its struck words keeps the old words (and the change)
-    body, fresh, settled = _run(doc, 1, '今日は大だ事重要な話をします。', 'edit', sugs=sugs)
-    assert settled == {sugs[0]['id']: False}
-    assert body == '◎台本\n今日は大だ事な話をします。\n' and not fresh
+    # taking all its added words out leaves the struck ones (still a suggestion)
+    body, fresh, settled = _run(doc, 1, '今日は大事な話をします。', 'edit', sugs=sugs)
+    assert not settled and body == _body(doc) and [(f['del'], f['ins']) for f in fresh] == [('大事', '')]
 
 
 def test_accepting_the_owners_suggestion_writes_it():

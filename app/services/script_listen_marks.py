@@ -46,6 +46,16 @@ class Settle(Exception):
         self.decisions = decisions
 
 
+class Adopt(Exception):
+    """The owner is typing into Dan's suggestions (``sids``): they become the owner's own suggestions first, with
+    the same words, so the change keeps them suggestions (11/21 本人「提案モードで置き換えや削除や追加されてる文章を承認や
+    却下せずそのまま書き換えると、勝手に承認されて文字が本文に入ってしまう」「提案状態で書き換える意図はそれが良い文章だという
+    データを貯めるため」)."""
+    def __init__(self, sids):
+        super().__init__('adopt')
+        self.sids = set(sids)
+
+
 # ---------------------------------------------------------------- laying the owner's suggestions over the doc
 
 def _raw(paragraph):
@@ -287,13 +297,26 @@ def plan(old_toks, new, new_bmask, mode, force=None):
     settled is {owner sid: accept} decided by this change. Raises Settle when Dan's suggestions must be decided in
     the doc first, Refused when the change cannot be made."""
     ops = ops_for(old_toks, new)
-    sig = {**_signals(old_toks, ops), **(force or {})}
-    dans = {s: a for s, a in sig.items() if not is_owner(s)}
-    if dans: raise Settle(dans)
-    settled = {s: a for s, a in sig.items() if is_owner(s) and (mode == 'edit' or s in (force or {}))}
+    force = force or {}
+    sig = _signals(old_toks, ops)
+    dans = {s for s in sig if not is_owner(s) and s not in force}
+    if dans: raise Adopt(dans)
+    dans_forced = {s: a for s, a in force.items() if not is_owner(s)}
+    if dans_forced: raise Settle(dans_forced)
+    # A suggestion is decided only by 承認 / 却下 (``force``). Typing into one, in either mode, changes the
+    # suggestion: what that change does is written the way suggestion mode writes it (11/21 本人).
+    settled = {s: a for s, a in force.items() if is_owner(s)}
+    touched = {s for s in sig if s not in force}
+    def into_suggestion(i1, i2):
+        if any(t['sid'] in touched for t in old_toks[i1:i2]): return True
+        if 0 < i1 < len(old_toks):
+            a, b = old_toks[i1 - 1], old_toks[i1]
+            return bool(a['sid']) and a['sid'] == b['sid'] and a['sid'] in touched
+        return False
     nb = lambda j: j < len(new_bmask) and new_bmask[j] == '1'
     out = []
     for tag, i1, i2, j1, j2 in ops:
+        op_mode = 'suggest' if tag != 'equal' and into_suggestion(i1, i2) else mode
         if tag == 'equal':
             for k in range(i2 - i1):
                 t = dict(old_toks[i1 + k]); t['b'] = nb(j1 + k); t['src'] = i1 + k
@@ -304,8 +327,10 @@ def plan(old_toks, new, new_bmask, mode, force=None):
                 out.append(t)
             continue
         for k, t in enumerate(old_toks[i1:i2]):
-            if mode == 'edit' or t['k'] == 'i': continue
-            if t['k'] == 'n': raise Refused('提案モードでは、段落をつなげることはできません。編集モードに切り替えてください。')
+            if op_mode == 'edit' or t['k'] == 'i': continue
+            if t['k'] == 'n':
+                raise Refused('提案モードでは、段落をつなげることはできません。編集モードに切り替えてください。' if mode == 'suggest' else
+                              '提案の文字と一緒に段落をつなげることはできません。提案を承認か却下してからつなげてください。')
             if t['k'] == 'x': raise Refused('ダンの提案の文字は、提案モードでは消せません。')
             t = dict(t); t['src'] = i1 + k
             if t['k'] == 'p': t['k'], t['sid'] = 'd', None
@@ -313,9 +338,11 @@ def plan(old_toks, new, new_bmask, mode, force=None):
         for j in range(j1, j2):
             ch = new[j]
             if ch == '\n':
-                if mode == 'suggest': raise Refused('提案モードでは、段落を分けることはできません。編集モードに切り替えてください。')
+                if op_mode == 'suggest':
+                    raise Refused('提案モードでは、段落を分けることはできません。編集モードに切り替えてください。' if mode == 'suggest' else
+                                  '提案の文字の中では段落を分けられません。提案を承認か却下してから分けてください。')
                 out.append({'ch': '\n', 'k': 'n', 'sid': None, 'b': False, 'pos': None}); continue
-            out.append({'ch': ch, 'k': 'new' if mode == 'edit' else 'i', 'sid': None, 'b': nb(j), 'pos': None})
+            out.append({'ch': ch, 'k': 'new' if op_mode == 'edit' else 'i', 'sid': None, 'b': nb(j), 'pos': None})
     return out, settled
 
 

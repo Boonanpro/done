@@ -292,7 +292,8 @@ def evidence(job_id, full=False):
             'owner_actions':owner_actions(job['file_id'],first['created']-60,last['created']+60),
             'owner_screen_suggestions':owner_screen_suggestions(job['file_id']),
             'note':'snapshots は場所だけ。全文は raw_path のDOCX、またはこのコマンドに --full を付けて取得する。'
-                   'owner_actions は本人が「台本を聞く画面」で自分の手でした直し・提案の承認と却下で、作者は確実に本人。'}
+                   'owner_actions は本人が「台本を聞く画面」で自分の手でした直し・提案の承認と却下で、作者は確実に本人。'
+                   'revised_suggestion はダンの提案を本人が提案のまま書き直したもの（dan がダンの言い回し、owner_wording が本人の言い回し）。'}
 
 
 LISTEN_LOG = Path.home()/'.dan'/'script-listen'/'owner_edits.jsonl'
@@ -332,14 +333,25 @@ def owner_actions(file_id, since, until, path=None):
         elif action in ('accept', 'reject'):
             out.append({'action': action, 'at': row['at'], 'added': row.get('added'), 'removed': row.get('removed'),
                         **({'by_edit': True} if row.get('by_edit') else {})})
-        elif action == 'suggest':
+        elif action in ('suggest', 'adopt'):
             # The owner's own suggestion on the screen (suggestion mode): the latest wording of it, while it stands.
+            # 'adopt': the owner began writing over Dan's suggestion; it stays a suggestion with Dan's words first
+            # (revised_from keeps what Dan had suggested, 11/21 本人「良い文章だというデータを貯めるため」).
+            was = next((a for a in out if a.get('suggestion') == row.get('suggestion')), None)
             out = [a for a in out if a.get('suggestion') != row.get('suggestion')]
+            revised = row.get('revised_from') or (was or {}).get('revised_from')
+            if action == 'adopt': revised = {'by': 'dan', 'suggestion': row.get('dan_suggestion'), 'before': row.get('before'), 'after': row.get('after')}
             out.append({'action': 'suggest', 'at': row['at'], 'suggestion': row.get('suggestion'),
-                        'before': row.get('before'), 'after': row.get('after')})
+                        'before': was.get('before') if was and action != 'adopt' else row.get('before'),
+                        'after': row.get('after'), **({'revised_from': revised} if revised else {})})
         elif action == 'settle':
-            # Taken (that is an edit, logged as one) or withdrawn: no longer a suggestion.
+            # Taken (that is an edit, logged as one) or withdrawn: no longer a suggestion. A suggestion of Dan's the
+            # owner rewrote keeps a record: Dan's words, the owner's, and whether it was taken.
+            was = next((a for a in out if a['action'] == 'suggest' and a.get('suggestion') == row.get('suggestion')), None)
             out = [a for a in out if not (a['action'] == 'suggest' and a.get('suggestion') == row.get('suggestion'))]
+            if was and was.get('revised_from'):
+                out.append({'action': 'revised_suggestion', 'at': row['at'], 'dan': was['revised_from'],
+                            'owner_wording': {'before': was.get('before'), 'after': was.get('after')}, 'accepted': row.get('accept')})
     # Typing that was undone (Ctrl+Z on the screen) ends where it began: nothing the owner changed.
     return [a for a in out if not (a['action'] == 'edit' and a['before'] == a['after'])]
 
