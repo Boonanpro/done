@@ -221,7 +221,10 @@ def _results(texts: list[str], events: list[tuple]) -> None:
 
 def _place(p: str) -> str:
     """古い形の slug=x は artifact:x。共通の場所の id（chat など）はそのまま。"""
-    common = {"chat", "artifact-tab", "dev-lead-room", "mobile"}
+    # 決まった4つのほか、docs/places/<id>.md に地図がある場所（script-room・script-listen など）も共通の場所。
+    # 4つだけだと、script-room を撮っても artifact:script-room と数えて、直した後の撮影と地図の確かめが永久に足りなかった（11/20）
+    common = {"chat", "artifact-tab", "dev-lead-room", "mobile"} | set(watches(LIVE)) | {
+        f.stem for f in (Path(LIVE) / "docs/places").glob("*.md")}
     return p if ":" in p or p in common else f"artifact:{p}"
 
 

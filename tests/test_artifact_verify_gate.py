@@ -277,3 +277,13 @@ def test_a_removed_temporary_copy_in_a_worktree_is_not_counted(tmp_path):
     assert run(tmp_path, rm, env_extra=env) is None
     (wt / 'frontend/src/app/artifacts/dev-lead').mkdir()
     assert run(tmp_path, rm, env_extra=env)['decision'] == 'block'   # 写しが残っていれば数える
+
+
+def test_place_with_a_map_in_docs_places_is_a_common_place():
+    """script-room は docs/places/script-room.md の共通の場所。artifact:script-room と数えると撮影が永久に足りない（11/20）。"""
+    import importlib, sys as _s
+    _s.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    G = importlib.import_module("hook_artifact_verify_gate")
+    assert G._place("script-room") == "script-room"
+    assert G._place("chat") == "chat"
+    assert G._place("dev-lead") == "artifact:dev-lead"
