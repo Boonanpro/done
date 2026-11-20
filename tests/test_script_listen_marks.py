@@ -36,13 +36,13 @@ def test_typing_over_dans_added_words_takes_his_suggestion_first():
         M.plan(toks, '一括でなXら36万円です。', '0' * 13, 'edit')      # typed inside 「なら」
     assert e.value.decisions == {'s': True}
     # once 「なら」 is taken in the doc, the change reads 一括なら36万円 -> 一括なXら36万円
-    o, _, n, _ = M.drop_settled(toks, '一括でなXら36万円です。', '0' * 13, {'s': True})
+    o, _, n, _, _ = M.drop_settled(toks, '一括でなXら36万円です。', '0' * 13, {'s': True})
     assert (o, n) == ('一括なら36万円です。', '一括なXら36万円です。')
     # typing over the struck 「で」 keeps the old word (reject)
     with pytest.raises(M.Settle) as e:
         M.plan(toks, '一括だなら36万円です。', '0' * 11, 'edit')
     assert e.value.decisions == {'s': False}
-    o, _, n, _ = M.drop_settled(toks, '一括だなら36万円です。', '0' * 11, {'s': False})
+    o, _, n, _, _ = M.drop_settled(toks, '一括だなら36万円です。', '0' * 11, {'s': False})
     assert (o, n) == ('一括で36万円です。', '一括だ36万円です。')
     # taking the struck 「で」 out: it goes anyway when taken
     with pytest.raises(M.Settle) as e:
@@ -157,3 +157,23 @@ def test_owner_actions_keep_only_standing_screen_suggestions(tmp_path):
     log.write_text('\n'.join(json.dumps(r) for r in rows))
     got = L.owner_actions('d', 0, 2e9, path=log)
     assert [(a['action'], a['after']) for a in got] == [('suggest', 'BB')]
+
+
+def test_words_struck_on_the_screen_become_the_owners_deletion(tmp_path, monkeypatch):
+    # suggestion mode: Backspace strikes the letters on the screen (they stay in its text, marked '1')
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), 'そしてこの動画です。\n'))
+    doc['revisionId'], doc['_account'] = 'r1', 'a'
+    monkeypatch.setattr(S, 'OWNER_SUGS', tmp_path / 'sugs.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: doc)
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    def no_write(*a, **k): raise AssertionError('suggestion mode wrote the doc')
+    monkeypatch.setattr(S, '_docs', no_write)
+    text = 'そしてこの動画です。'
+    r = S.replace('d', 1, 1, text, text, '0' * 10, '0' * 10, 'suggest', '0011000000')
+    sugs = M.load(tmp_path / 'sugs.json', 'd')
+    assert [(s['pre'], s['del'], s['ins']) for s in sugs] == [('そし', 'てこ', '')]
+    # 「てこ」 struck and 「てこ」 typed after it: no suggestion, and the screen (showing both) must read the doc again
+    r = S.replace('d', 1, 1, 'そしてこの動画です。', 'そしてこてこの動画です。', '0' * 10, '0' * 12, 'suggest', '0011' + '0' * 8)
+    # (which 「てこ」 is the struck one cannot be told from the text; the screen is read again to show it as kept)
+    assert r['reload']

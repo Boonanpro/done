@@ -319,19 +319,20 @@ def plan(old_toks, new, new_bmask, mode, force=None):
     return out, settled
 
 
-def drop_settled(old_toks, new, new_bmask, decisions):
+def drop_settled(old_toks, new, new_bmask, decisions, new_dmask=''):
     """The change as it reads once ``decisions`` ({sid: accept}) are made in the doc: the words that go with them are
-    taken out of both sides. Returns (old, old bold, new, new bold)."""
+    taken out of both sides. Returns (old, old bold, new, new bold, new struck)."""
     old = text_of(old_toks)
     kind = lambda t: t['xk'] if t['k'] == 'x' else t['k']
     gone = lambda t: t['sid'] in decisions and (kind(t) == 'i') != decisions[t['sid']]
     o = [t for t in old_toks if not gone(t)]
-    n, nb = [], []
+    n, nb, nd = [], [], []
     for tag, i1, i2, j1, j2 in ops_for(old_toks, new):
         for j in range(j1, j2):
             if tag == 'equal' and gone(old_toks[i1 + j - j1]): continue
             n.append(new[j]); nb.append(new_bmask[j] if j < len(new_bmask) else '0')
-    return text_of(o), bmask_of(o), ''.join(n), ''.join(nb)
+            nd.append(new_dmask[j] if j < len(new_dmask) else '0')
+    return text_of(o), bmask_of(o), ''.join(n), ''.join(nb), ''.join(nd)
 
 
 def doc_change(old_toks, new_toks):

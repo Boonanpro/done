@@ -483,7 +483,7 @@ def _locate(shown, para_from, para_to, old, new, old_bmask, new_bmask):
     raise ListenError(GONE_HERE, 409)
 
 
-def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mode='edit', _depth=0):
+def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mode='edit', new_dmask='', _depth=0):
     """What the owner typed on the screen: paragraphs ``para_from``..``para_to`` read ``old`` on the screen and now
     read ``new`` (with '\n' where a paragraph ends; boldness as '0'/'1' per character). ``mode`` 'edit' writes it
     into the doc; 'suggest' keeps it as the owner's suggestion (the Docs API cannot write suggestions). Changing the
@@ -495,13 +495,21 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
         doc = fetch(doc_id)
         shown, sugs, placed = view(doc_id, doc)
         new_bmask = (new_bmask or '')[:len(new)].ljust(len(new), '0')
+        screen = new
+        if mode == 'suggest' and '1' in (new_dmask or ''):
+            # Letters struck on the screen are still in its text; for the change they are taken out (in suggestion
+            # mode taking out = striking), so which of two same letters is struck does not hang on the comparison.
+            keep = [k for k in range(len(new)) if not (k < len(new_dmask) and new_dmask[k] == '1')]
+            new, new_bmask = ''.join(new[k] for k in keep), ''.join(new_bmask[k] for k in keep)
         para_from, para_to, toks, end, old, new, new_bmask, rebased = _locate(shown, para_from, para_to, old, new,
                                                                               old_bmask, new_bmask)
         # Boldness is compared on the screen's own terms (bold marks, not the heading style), so only what the owner
         # switched with Ctrl+B is written.
         if not rebased and len(old_bmask or '') == len(old):
             for t, b in zip(toks, old_bmask): t['b'] = b == '1'
-        if new == old and new_bmask == M.bmask_of(toks): return {'changed': False}
+        if new == old and new_bmask == M.bmask_of(toks):
+            # Nothing changes; the screen may still show words the doc does not have (struck, typed again).
+            return {'changed': False, 'reload': not rebased and screen != old}
         try:
             new_toks, settled = M.plan(toks, new, new_bmask, mode)
         except M.Refused as exc:
@@ -510,15 +518,15 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
             # Dan's suggestion is being typed over: decide it in the doc the way the owner means it, then the rest.
             if _depth >= 2: raise ListenError(GONE_HERE, 409)
             for sid, accept in need.decisions.items(): decide(doc_id, sid, accept, by_edit=True)
-            o2, ob2, n2, nb2 = M.drop_settled(toks, new, new_bmask, need.decisions)
-            out = replace(doc_id, para_from, para_to, o2, n2, ob2, nb2, mode, _depth + 1)
+            o2, ob2, n2, nb2, _ = M.drop_settled(toks, new, new_bmask, need.decisions)
+            out = replace(doc_id, para_from, para_to, o2, n2, ob2, nb2, mode, '', _depth + 1)
             return {**out, 'changed': True, 'rebased': rebased or out.get('rebased', False),
                     'settled': {**need.decisions, **(out.get('settled') or {})}}
-        out = _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, mode)
+        out = _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, mode, screen=None if rebased else screen)
         return {**out, 'rebased': rebased, 'settled': {**settled, **(out.get('settled') or {})}}
 
 
-def _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, mode, log=True):
+def _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, mode, log=True, screen=None):
     """Write a planned change: the doc's own text, then the owner's suggestions in those paragraphs."""
     a, pos, abm, b, bbm, xlock, ops = M.doc_change(toks, new_toks)
     if any(any(xlock[i1:i2]) for tag, i1, i2, _, _ in ops if tag != 'equal'): raise ListenError(GONE_HERE, 409)
@@ -553,8 +561,14 @@ def _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, m
     # The screen tells its own writes from other people's by this revision. ``reload``: what the screen shows is not
     # what the doc now is (a suggestion was settled), so it reads the doc again.
     gone = [sid for sid in old_here if sid not in {f['id'] for f in fresh}]
+    differs = False
+    if mode == 'suggest' and not reqs and screen is not None:
+        # The words struck and added again come out as no change, so the screen (still showing both) is not what the
+        # doc reads now: compare what the screen shows with the doc and its suggestions as kept.
+        again = M.tokens(M.overlay(doc, after)[0], para_from, para_to, _chars)
+        differs = not again or M.text_of(again[0]) != screen
     return {'changed': bool(reqs) or after != sugs, 'requests': len(reqs), 'revision': revision,
-            'reload': bool(gone) or (mode == 'suggest' and after != sugs)}
+            'reload': bool(gone) or differs or (mode == 'suggest' and after != sugs)}
 
 
 def delete_requests(doc, u):
@@ -654,7 +668,9 @@ def accept_all(doc_id):
     for sid in sorted(placed, key=lambda x: placed[x]):
         try: _decide_owner(doc_id, sid, True); done += 1
         except ListenError: failed += 1
-    for s in suggestions_of(outline(fetch(doc_id))):
+    units = outline(fetch(doc_id))
+    for n, u in enumerate(units): u['n'] = n
+    for s in suggestions_of(units):
         if M.is_owner(s['id']): continue
         try: decide(doc_id, s['id'], True); done += 1
         except ListenError: failed += 1
