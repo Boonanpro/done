@@ -347,3 +347,37 @@ def test_taking_a_picture_out_takes_its_empty_paragraph_too():
     import pytest
     with pytest.raises(S.ListenError): S.image_delete_requests(doc2, 'kix.q')
     with pytest.raises(S.ListenError): S.image_delete_requests(doc, 'kix.none')
+
+
+def test_accept_all_takes_a_suggested_picture(tmp_path, monkeypatch):
+    # 11/20: 「すべて承認」 gave 500 on the YouTube script, which had Dan's four screenshots in as a suggestion
+    doc = _doc(('◎台本\n', 'HEADING_2'), '［コメントを画面に出す］\n', '\n', '次の文です。\n')
+    _with_picture(doc, 2, 'kix.a', suggestedInsertionIds=['s1'])
+    doc['revisionId'], doc['_account'] = 'r1', 'x'
+    monkeypatch.setattr(S, 'OWNER_SUGS', tmp_path / 'sugs.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: doc)
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    monkeypatch.setattr(S, '_log_owner_action', lambda *a, **k: None)
+    sent = []
+    monkeypatch.setattr(S, '_docs', lambda m, path, acc, body=None, params=None: sent.append(body) or {})
+    assert S.accept_all('d') == {'accepted': 1, 'failed': 0}
+    reqs = sent[0]['requests']
+    at = doc['body']['content'][2]['paragraph']['elements'][0]['startIndex']
+    assert reqs[0] == {'deleteContentRange': {'range': {'startIndex': at, 'endIndex': at + 1}}}
+    assert reqs[1]['insertInlineImage']['uri'] == 'https://x/img' and reqs[1]['insertInlineImage']['location'] == {'index': at}
+
+
+def test_accept_all_takes_out_a_picture_suggested_out(tmp_path, monkeypatch):
+    doc = _doc(('◎台本\n', 'HEADING_2'), '［コメントを画面に出す］\n', '\n', '次の文です。\n')
+    _with_picture(doc, 2, 'kix.a', suggestedDeletionIds=['s2'])
+    doc['revisionId'], doc['_account'] = 'r1', 'x'
+    monkeypatch.setattr(S, 'OWNER_SUGS', tmp_path / 'sugs.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: doc)
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    monkeypatch.setattr(S, '_log_owner_action', lambda *a, **k: None)
+    sent = []
+    monkeypatch.setattr(S, '_docs', lambda m, path, acc, body=None, params=None: sent.append(body) or {})
+    assert S.accept_all('d') == {'accepted': 1, 'failed': 0}
+    assert not any('insertInlineImage' in r for r in sent[0]['requests'])
