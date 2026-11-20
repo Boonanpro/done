@@ -14,7 +14,7 @@
 // - コメント: 文字を選ぶと右の余白（スマホは選んだ所の下）にコメントの印が出る。ドキュメントのコメントとして入るので、ダンが
 //   返事と直しをし、学習にも入る。ダンの直しは提案（緑＝足す、赤の線＝消す）で出て、ここで承認・却下できる。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { CheckCheck, Columns2, ExternalLink, Loader2, MessageSquare, MessageSquarePlus, Pause, PenLine, Pencil, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
+import { CheckCheck, Columns2, ExternalLink, ImagePlus, Loader2, MessageSquare, MessageSquarePlus, Pause, PenLine, Pencil, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { get as idbGet, set as idbSet } from 'idb-keyval';
 
@@ -1125,8 +1125,85 @@ export function ListenScreen({ docId }: { docId: string }) {
     void playFrom(i);
   };
 
+  // Pictures (11/20 本人「この読み上げページ（台本エディター）には画像も貼れるようにしたい」): pasted, dropped or picked
+  // with the 画像 button, a picture goes into the doc as a new paragraph under the one the cursor is in.
+  const lastParaRef = useRef<number | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [imageBusy, setImageBusy] = useState(false);
+  const paraOf = useCallback((node: Node | null): number | null => {
+    const root = editorRef.current;
+    if (!root || !node || !root.contains(node)) return null;
+    const el = (node.nodeType === 1 ? node as Element : node.parentElement);
+    const img = el?.closest('[data-img-para]') as HTMLElement | null;
+    if (img) return Number(img.dataset.imgPara);
+    const p = el?.closest('[data-para]') as HTMLElement | null;
+    if (p) return Number(p.dataset.para);
+    // A line typed on the screen and not yet read back: the paragraph before it.
+    for (let b = el?.closest('p,div') as Element | null; b && b !== root; b = b.previousElementSibling) {
+      const at = (b as HTMLElement).dataset?.para ?? (b.querySelector('[data-para]') as HTMLElement | null)?.dataset.para;
+      if (at != null) return Number(at);
+    }
+    return null;
+  }, []);
+  useEffect(() => {
+    const keep = () => {
+      const sel = window.getSelection();
+      const at = sel?.rangeCount ? paraOf(sel.getRangeAt(0).startContainer) : null;
+      if (at != null && !Number.isNaN(at)) lastParaRef.current = at;
+    };
+    document.addEventListener('selectionchange', keep);
+    return () => document.removeEventListener('selectionchange', keep);
+  }, [paraOf]);
+  const putImage = useCallback(async (file: File, near?: Node | null) => {
+    if (!doc || stale) { toast('ドキュメントを読み込んでから貼ってください。'); return; }
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) { toast('貼れるのは PNG・JPEG・GIF・WebP の画像です。'); return; }
+    let para = near ? paraOf(near) : null;
+    if (para == null) para = lastParaRef.current;
+    if (para == null) { toast('画像を入れたい所の文を押してから、もう一度貼ってください。'); return; }
+    setImageBusy(true);
+    const wait = toast.loading('画像をドキュメントに入れています…');
+    try {
+      if (dirtyRef.current) await settleRef.current({ focus: false, play: false });
+      let blob: Blob = file, type = file.type;
+      if (file.size > 4_000_000 && type !== 'image/gif') {
+        // Big photos are made smaller here first (the doc shows them at most the page wide).
+        const bmp = await createImageBitmap(file);
+        const scale = Math.min(1, 2000 / bmp.width);
+        const c = document.createElement('canvas');
+        c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+        c.getContext('2d')?.drawImage(bmp, 0, 0, c.width, c.height);
+        blob = await new Promise<Blob>((ok, no) => c.toBlob(b => (b ? ok(b) : no(new Error('画像を小さくできませんでした。'))), 'image/jpeg', 0.9));
+        type = 'image/jpeg';
+      }
+      const data = await new Promise<string>((ok, no) => {
+        const r = new FileReader();
+        r.onload = () => ok(String(r.result));
+        r.onerror = () => no(r.error || new Error('画像を読めませんでした。'));
+        r.readAsDataURL(blob);
+      });
+      await listenApi.addImage(doc.doc_id, para, type, data);
+      await load();
+      toast.success('画像を入れました', { id: wait });
+    } catch (e) {
+      toast.error(errorText(e), { id: wait });
+    } finally {
+      setImageBusy(false);
+    }
+  }, [doc, stale, paraOf, load]);
+  const dropImage = useCallback(async (objectId: string) => {
+    if (!doc || !window.confirm('この画像をドキュメントから消しますか？')) return;
+    try {
+      if (dirtyRef.current) await settleRef.current({ focus: false, play: false });
+      await listenApi.removeImage(doc.doc_id, objectId);
+      await load();
+      toast('画像を消しました');
+    } catch (e) { toast.error(errorText(e)); }
+  }, [doc, load]);
+
   const onEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const t = e.target as HTMLElement;
+    const del = (t.closest('[data-img-del]') as HTMLElement | null)?.dataset.imgDel;
+    if (del) { e.preventDefault(); void dropImage(del); return; }
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed && e.detail < 2) return;     // selecting words
     // Words of a suggestion: the caret goes there (they can be typed in) and its card comes forward, glowing a
@@ -1562,6 +1639,30 @@ export function ListenScreen({ docId }: { docId: string }) {
             <MessageSquare className="h-3.5 w-3.5" />
             {wide ? (showResolved ? '解決済みを隠す' : `コメント ${openCount}`) : openCount}
           </button>
+          <button
+            type="button"
+            data-testid="image-add"
+            aria-label="画像を入れる"
+            title="押した文の下に画像を入れます（本文に貼り付け・ドラッグでも入ります）"
+            disabled={imageBusy || stale}
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => fileRef.current?.click()}
+            className="flex shrink-0 items-center gap-1 rounded-md border border-stone-300 bg-white px-2 py-1 text-[12px] text-stone-700 disabled:opacity-40"
+          >
+            {imageBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImagePlus className="h-3.5 w-3.5" />}
+            <span className="hidden sm:inline">画像</span>
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp"
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0];
+              e.target.value = '';
+              if (f) void putImage(f);
+            }}
+          />
           <select
             aria-label="声"
             value={voice}
@@ -1617,6 +1718,12 @@ export function ListenScreen({ docId }: { docId: string }) {
               }}
               onPaste={e => {
                 e.preventDefault();
+                const pic = Array.from(e.clipboardData.files || []).find(f => f.type.startsWith('image/'));
+                if (pic) {
+                  const sel = window.getSelection();
+                  void putImage(pic, sel?.rangeCount ? sel.getRangeAt(0).startContainer : null);
+                  return;
+                }
                 const text = e.clipboardData.getData('text/plain');
                 if (!text) return;
                 remember('paste', true);
@@ -1635,6 +1742,14 @@ export function ListenScreen({ docId }: { docId: string }) {
                   return;
                 }
                 document.execCommand('insertText', false, text.replace(/\r\n?/g, '\n'));
+              }}
+              onDragOver={e => { if (Array.from(e.dataTransfer.items || []).some(i => i.kind === 'file')) e.preventDefault(); }}
+              onDrop={e => {
+                const pic = Array.from(e.dataTransfer.files || []).find(f => f.type.startsWith('image/'));
+                if (!pic) return;
+                e.preventDefault();
+                const at = (document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null }).caretRangeFromPoint?.(e.clientX, e.clientY);
+                void putImage(pic, at?.startContainer || (e.target as Node));
               }}
               onBlur={() => {
                 if (touch) setArmed(false);
