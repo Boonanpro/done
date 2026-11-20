@@ -119,8 +119,9 @@ async def run(row):
     if s.get('run_id'):
         if s['state'] == 'completed' and s.get('result'):
             try:
-                await execute({'action':'report','project_id':spec['origin_project_id'],'task':s['result'][:2800]},
-                    row['room_id'],row['user_id'],report_message_id=report_id(job_id))
+                if not s.get('internal_check'):
+                    await execute({'action':'report','project_id':spec['origin_project_id'],'task':s['result'][:2800]},
+                        row['room_id'],row['user_id'],report_message_id=report_id(job_id))
                 await asyncio.to_thread(mark_status,job_id,'done')
             except Exception:
                 await asyncio.to_thread(mark_status,job_id,'pending')
@@ -281,8 +282,9 @@ async def run(row):
                         await asyncio.to_thread(mark_status, job_id, 'done')
                         return
                     await runs.update_run(run_row['id'], state='completed')
-                    await execute({'action':'report','project_id':spec['origin_project_id'],'task':result[:2800]},
-                        row['room_id'], row['user_id'], report_message_id=report_id(job_id))
+                    if not s.get('internal_check'):
+                        await execute({'action':'report','project_id':spec['origin_project_id'],'task':result[:2800]},
+                            row['room_id'], row['user_id'], report_message_id=report_id(job_id))
                     await asyncio.to_thread(mark_status, job_id, 'done')
                     return
                 elif method == 'process/closed':

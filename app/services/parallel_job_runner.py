@@ -176,6 +176,9 @@ async def deliver(job_id, text):
     from app.services import voice_calls
     s = state.read(job_id)
     revision = s.get('delivered_revision', -1) + 1
+    if s.get('internal_check'):
+        state.change(job_id, lambda x: x.update(delivered_revision=revision, report_message_id=None))
+        return None
     if s.get('quiet'):
         # Work asked from a site (X運用室) answers there. The room keeps the result in the job's state, and the room's
         # Dan reads it on his next turn (chat_routes._fetch_unseen_voice_digest); nothing is posted in the chat.
@@ -516,7 +519,7 @@ def room_jobs(user_id, room_id, hours=24, include_quiet=True):
     for p in state.ROOT.glob('*.json'):
         s = state.read(p.stem)
         if (s and s.get('user_id') == user_id and s.get('room_id') == room_id and s.get('engine') in ('parallel', 'make')
-                and (include_quiet or not s.get('quiet'))
+                and not s.get('internal_check') and (include_quiet or not s.get('quiet'))
                 and (s['state'] not in state.TERMINAL or (s.get('updated_at') or '') >= since)):
             rows.append(s)
     rows.sort(key=lambda s: (s['state'] in state.TERMINAL, s.get('created_at') or ''), reverse=False)

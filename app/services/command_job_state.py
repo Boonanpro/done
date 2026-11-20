@@ -148,5 +148,6 @@ def list_owned(user_id, origin_room_id):
     rows = []
     for p in ROOT.glob('*.json'):
         s = read(p.stem)
-        if s and s.get('user_id') == user_id and s.get('origin_room_id') == origin_room_id: rows.append(s)
+        if s and not s.get('internal_check') and s.get('user_id') == user_id and s.get('origin_room_id') == origin_room_id:
+            rows.append(s)
     return sorted(rows, key=lambda s:s['created_at'], reverse=True)[:20]

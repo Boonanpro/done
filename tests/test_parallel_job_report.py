@@ -64,3 +64,15 @@ def test_deliver_of_a_silent_report_does_nothing(monkeypatch) -> None:
         rows, woke, deliver = _deliver_env(monkeypatch, {'id': 'j1', 'room_id': 'r1', 'user_id': 'u1', 'title': '点検', 'state': 'completed'})
         deliver(text)
         assert woke == []
+
+
+def test_restart_check_keeps_result_without_waking_room(monkeypatch) -> None:
+    result = '今日は金曜日です。'
+    rows, woke, deliver = _deliver_env(monkeypatch, {
+        'id': 'j1', 'room_id': 'r1', 'user_id': 'u1', 'title': '動作確認',
+        'state': 'completed', 'result': result, 'internal_check': True,
+    })
+    deliver(result)
+    assert woke == []
+    assert rows['j1']['result'] == result
+    assert rows['j1']['report_message_id'] is None

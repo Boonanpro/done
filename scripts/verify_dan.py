@@ -3,7 +3,7 @@
 On 2026-09-27 a one-line import slip made every job started from a call fail the instant it began; nothing checked a
 real job after the restart, and the owner found out on 9/28 when paying an invoice by voice failed twice. Health
 endpoints answered 200 the whole time. This asks for one small, harmless piece of work the way a call does, in the
-test room, and waits for its result.
+test room, and reads the result from the job state without posting it in the room.
 
 Usage: python scripts/verify_dan.py        exit 0 = passed, 1 = failed (the reason is printed)
 """
@@ -37,7 +37,7 @@ def health():
 async def voice_work():
     from app.services import voice_responses, command_job_state as state
     started = time.monotonic()
-    out = await voice_responses.run_function('start_work', {'task': TASK}, USER, TEST_ROOM, [])
+    out = await voice_responses.run_function('start_work', {'task': TASK}, USER, TEST_ROOM, [], internal_check=True)
     job_id = out.get('job_id')
     if not out.get('accepted') or not job_id:
         return f'not accepted: {out}'
