@@ -251,6 +251,10 @@ export function Sidebar({
     }
   }, [projectsData, queryClient]);
 
+  const hubProject = projectsData?.projects?.find((p) => p.metadata?.role === 'command_center');
+  const hubRunning = !!hubProject?.has_active_run;
+  const hubUnread = pathname === '/command-center' ? 0 : (hubProject?.unread_count || 0);
+
   const filteredProjects = projectsData?.projects?.filter((p) =>
     p.metadata?.role !== 'command_center' && p.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];
@@ -341,11 +345,36 @@ export function Sidebar({
         </div>
 
         {isOwner && (
-          <button title="Done" onClick={() => { router.push('/command-center'); if (isMobile) onToggleCollapse(); }}
+          // Done（command_center の部屋）も他の部屋と同じく、作業中の印と未読の数を出す
+          // （2026-11-20 本人「Done だけ未読が付かない・動いているのが分からない」）。
+          // 開いている間は、開いた画面が既読にするので数を出さない。
+          <button title={hubRunning ? 'Done（ダンが作業中）' : 'Done'} onClick={() => { router.push('/command-center'); if (isMobile) onToggleCollapse(); }}
             className={cn('mx-3 my-3 flex min-h-12 items-center gap-3 rounded-xl px-3 text-left font-medium',
               pathname === '/command-center' ? 'bg-primary/10 text-primary' : 'hover:bg-sidebar-accent')}>
-            <span aria-hidden="true" className="text-xl">◎</span>
-            {!isCollapsed && <span>Done<span className="block text-xs font-normal text-muted-foreground">全体の確認・相談</span></span>}
+            <span className="relative shrink-0">
+              <span aria-hidden="true" className="text-xl">◎</span>
+              {hubRunning && (
+                <span className="absolute -top-0.5 -right-1 flex h-2.5 w-2.5 pointer-events-none" aria-hidden="true">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                </span>
+              )}
+              {isCollapsed && hubUnread > 0 && (
+                <span className="absolute -bottom-0.5 -right-1.5 h-2.5 w-2.5 rounded-full bg-red-500 pointer-events-none" aria-label={`未読${hubUnread}件`} />
+              )}
+            </span>
+            {!isCollapsed && (
+              <>
+                <span className="min-w-0 flex-1">Done<span className="block text-xs font-normal text-muted-foreground">
+                  {hubRunning ? <span className="animate-pulse font-medium text-emerald-500">ダンが作業中…</span> : '全体の確認・相談'}
+                </span></span>
+                {hubUnread > 0 && (
+                  <span className="shrink-0 min-w-5 h-5 px-1.5 rounded-full bg-red-500 text-[10px] font-bold leading-5 text-white text-center">
+                    {hubUnread > 99 ? '99+' : hubUnread}
+                  </span>
+                )}
+              </>
+            )}
           </button>
         )}
         {/* Search */}
