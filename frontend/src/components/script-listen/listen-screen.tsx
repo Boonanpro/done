@@ -73,6 +73,8 @@ type Sheet = { kind: 'threads'; ids: string[] } | { kind: 'suggestion'; id: stri
 type Draft = { quote: string; n: number; start: number | null; from?: Pos | null; to?: Pos | null };
 // Taps on a phone: one tap types there, two taps in a row play from there.
 const DOUBLE_TAP = 300;
+/** How long a suggestion of Dan's stays lit after it comes in; then it looks like any suggestion. */
+const FRESH_MS = 2500;
 type Snap = { html: string; pos: Pos | null };
 type AfterBuild = { pos: Pos | null; focus: boolean; play: boolean; line?: string };
 
@@ -368,7 +370,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   const [mode, setMode] = useState<EditMode>(() => (typeof window !== 'undefined' && localStorage.getItem(MODE_KEY) === 'suggest' ? 'suggest' : 'edit'));
   const modeRef = useRef<EditMode>(mode);
   const compStart = useRef<Pos | null>(null);
-  const [acceptingAll, setAcceptingAll] = useState(false);
+  const [allBusy, setAllBusy] = useState<'accept' | 'reject' | null>(null);
   // 右の「ダンと台本」（PC は横の欄、スマホは下から開く欄）と、上のサムネの編集（11/20 本人）
   const [chatOpen, setChatOpen] = useState(() => typeof window === 'undefined' || localStorage.getItem(CHAT_KEY) !== '0');
   const [phoneChat, setPhoneChat] = useState(false);
@@ -701,9 +703,12 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
     return { sugTalk: talk, talkOf: new Map(pairs.map(x => [x[1].id, x[0]] as const)) };
   }, [suggestions, visibleThreads, place]);
-  // Suggestions that come into the doc while Dan works on a comment are his edits for it (not the owner's own).
+  // Where Dan is lit (11/20 本人「今その瞬間実際に操作したり編集したりしている場所が光るべき。考えているだけで操作して
+  // いない時は光るべきじゃない」): only the sentences his browser step is selecting or typing in right now (the words the
+  // step carries, job.touch), and a suggestion of his for a moment when it comes in. Not the commented words, not the
+  // turn's suggestions for the whole turn: those look like any suggestion (green / red).
   const seenSugs = useRef<Set<string> | null>(null);
-  const [danSugs, setDanSugs] = useState<Map<string, string>>(() => new Map());   // suggestion id -> job id
+  const [danFresh, setDanFresh] = useState<Map<string, { job: string; until: number }>>(() => new Map());   // briefly
   useEffect(() => {
     if (!doc) return;
     const ids = suggestions.filter(x => x.by !== 'owner').map(x => x.id);
@@ -711,26 +716,37 @@ export function ListenScreen({ docId }: { docId: string }) {
     const fresh = ids.filter(id => !seenSugs.current!.has(id));
     fresh.forEach(id => seenSugs.current!.add(id));
     const working = jobs.find(j => j.status === 'running');
-    if (working && fresh.length) setDanSugs(m => { const n = new Map(m); fresh.forEach(id => n.set(id, working.id)); return n; });
+    if (!working || !fresh.length) return;
+    const until = Date.now() + FRESH_MS;
+    setDanFresh(m => { const n = new Map(m); fresh.forEach(id => n.set(id, { job: working.id, until })); return n; });
   }, [suggestions, jobs, doc]);
-  /** The units Dan is on now: the words of the comments he is answering, and the suggestions he has put in for them. */
+  useEffect(() => {
+    if (!danFresh.size) return;
+    const next = Math.min(...Array.from(danFresh.values()).map(v => v.until));
+    const t = window.setTimeout(() => setDanFresh(m => {
+      const now = Date.now(), n = new Map(m);
+      n.forEach((v, k) => { if (v.until <= now) n.delete(k); });
+      return n;
+    }), Math.max(50, next - Date.now()));
+    return () => window.clearTimeout(t);
+  }, [danFresh]);
   const danUnits = useMemo(() => {
     const m = new Map<number, string>();
-    const sugN = new Map(suggestions.map(x => [x.id, x.n]));
+    const squash = (t: string) => t.replace(/\s+/g, '');
+    const textOf = (u: ListenUnit) => squash(('segs' in u && u.segs?.length) ? u.segs.map(g => g.t).join('') : ('text' in u ? u.text : ''));
     for (const j of jobs) {
-      if (!isLive(j)) continue;
-      for (const id of j.comment_ids) {
-        const sid = talkOf.get(id);
-        const n = place.get(id) ?? (sid ? sugN.get(sid) : undefined);
-        if (n != null && !m.has(n)) m.set(n, j.id);
+      const words = (j.status === 'running' && j.touch?.words || []).map(squash).filter(w => w.length >= 4);
+      if (!words.length) continue;
+      for (const u of units) {
+        if (m.has(u.n) || u.kind === 'image' || u.kind === 'title') continue;
+        const t = textOf(u);
+        if (t.length >= 4 && words.some(w => t.includes(w) || (t.length >= 8 && w.includes(t)))) m.set(u.n, j.id);
       }
     }
-    danSugs.forEach((job, sid) => {
-      const n = sugN.get(sid);
-      if (n != null && !m.has(n) && jobs.some(j => j.id === job && isLive(j))) m.set(n, job);
-    });
+    const sugN = new Map(suggestions.map(x => [x.id, x.n]));
+    danFresh.forEach((v, sid) => { const n = sugN.get(sid); if (n != null && !m.has(n)) m.set(n, v.job); });
     return m;
-  }, [jobs, place, talkOf, suggestions, danSugs]);
+  }, [jobs, units, suggestions, danFresh]);
   const unplaced = visibleThreads.filter(t => !place.has(t.id) && !talkOf.has(t.id));
   const openCount = threads.filter(t => !t.resolved).length;
 
@@ -1387,23 +1403,25 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
   }, [docId, load, settle]);
 
-  /** Every suggestion at once (11/20 本人「全部眺めてまとめて承認できる選択肢があった方が楽」). */
-  const acceptAll = useCallback(async () => {
-    setAcceptingAll(true);
+  /** Every suggestion at once (11/20 本人「全部眺めてまとめて承認できる選択肢があった方が楽」「全却下ボタンも作って」). */
+  const decideAll = useCallback(async (accept: boolean) => {
+    setAllBusy(accept ? 'accept' : 'reject');
     try {
       await settle({ focus: false, play: false });
-      const r = await listenApi.acceptAll(docId);
+      const r = accept ? await listenApi.acceptAll(docId) : await listenApi.rejectAll(docId);
+      const n = 'accepted' in r ? r.accepted : r.rejected;
+      const verb = accept ? '承認' : '却下';
       undoRef.current = []; redoRef.current = [];
       const here = saysRef.current[curRef.current];
       await load(here ? { start: here.start, text: here.text } : undefined);
       setSheet(null);
       setActive(null);
-      toast(r.failed ? `${r.accepted}件を承認しました。${r.failed}件は別の提案と重なっていたので残しました。` : `${r.accepted}件の提案をすべて承認しました`);
+      toast(r.failed ? `${n}件を${verb}しました。${r.failed}件は別の提案と重なっていたので残しました。` : `${n}件の提案をすべて${verb}しました`);
     } catch (e) {
       toast.error(errorText(e));
       await load();
     } finally {
-      setAcceptingAll(false);
+      setAllBusy(null);
     }
   }, [docId, load, settle]);
 
@@ -1936,17 +1954,31 @@ export function ListenScreen({ docId }: { docId: string }) {
               </button>
             </div>
             <div className="flex justify-end">
-              {suggestions.length >= 2 && (
-                <button
-                  type="button"
-                  disabled={acceptingAll}
-                  onClick={() => void acceptAll()}
-                  aria-label={`提案をすべて承認（${suggestions.length}）`}
-                  className="flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-[12px] font-semibold text-white shadow-sm active:bg-emerald-700 disabled:opacity-50"
-                >
-                  {acceptingAll ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5 shrink-0" />}
-                  <span className="whitespace-nowrap"><span className="hidden sm:inline">提案を</span>すべて承認（{suggestions.length}）</span>
-                </button>
+              {/* Both only while there is something to decide (11/20 本人「無ければボタン自体見ないように」). On a phone the two
+                  sit one above the other in the player's height; wider, side by side. */}
+              {suggestions.length > 0 && (
+                <div className="flex flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-1.5">
+                  <button
+                    type="button"
+                    disabled={!!allBusy}
+                    onClick={() => void decideAll(true)}
+                    aria-label={`提案をすべて承認（${suggestions.length}）`}
+                    className="flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-[12px] font-semibold text-white shadow-sm active:bg-emerald-700 disabled:opacity-50"
+                  >
+                    {allBusy === 'accept' ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5 shrink-0" />}
+                    <span className="whitespace-nowrap">すべて承認（{suggestions.length}）</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!!allBusy}
+                    onClick={() => void decideAll(false)}
+                    aria-label={`提案をすべて却下（${suggestions.length}）`}
+                    className="flex items-center gap-1 rounded-full border border-stone-300 bg-white px-2.5 py-1 text-[12px] font-semibold text-stone-700 shadow-sm active:bg-stone-100 disabled:opacity-50"
+                  >
+                    {allBusy === 'reject' ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <X className="h-3.5 w-3.5 shrink-0" />}
+                    <span className="whitespace-nowrap">すべて却下</span>
+                  </button>
+                </div>
               )}
             </div>
           </div>

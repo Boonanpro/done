@@ -64,6 +64,37 @@ app = Server("dan-tools")
 _CLI_BUILTIN_TOOLS = {"read_file", "write_file", "edit_file", "bash"}
 
 
+_TOUCH_RUN = None
+
+
+def _touch_words(name, arguments):
+    """The Japanese words a browser step writes or looks for (the text it types, the words its script finds and puts in).
+    The script-listen screen lights the sentences holding them while the step runs: where Dan is working in the doc at
+    that moment (11/20 本人「今その瞬間実際に操作したり編集したりしている場所が光るべき」). Reading steps carry no such words."""
+    global _TOUCH_RUN
+    if name not in ('browser', 'browser_plan') or not isinstance(arguments, dict): return []
+    parts = []
+    if name == 'browser':
+        if arguments.get('action') not in ('evaluate', 'type', 'fill_form'): return []
+        parts += [str(arguments.get('expression') or ''), str(arguments.get('text') or '')]
+        parts += [str(f.get('value') or '') for f in arguments.get('fields') or [] if isinstance(f, dict)]
+    else:
+        for st in arguments.get('steps') or []:
+            for f in (st.get('fields') or []) if isinstance(st, dict) else []:
+                if isinstance(f, dict): parts.append(str(f.get('value') or ''))
+    if _TOUCH_RUN is None:
+        import re
+        _TOUCH_RUN = re.compile(r'[\u3040-\u30ff\u3400-\u9fff\uff01-\uff9f\u3000-\u303f0-9,.%ー〜…・]+')
+    out = []
+    for part in parts:
+        for w in _TOUCH_RUN.findall(part[:40000]):
+            w = w.strip(' ,.')
+            # at least four kana/kanji: a sentence's words, not a stray mark or number
+            if sum(1 for ch in w if '\u3040' <= ch <= '\u9fff') >= 4 and w not in out: out.append(w[:120])
+            if len(out) >= 80: return out
+    return out
+
+
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
     """既存のツール定義を MCP 形式に変換して返す（CLI重複分は除外）"""
@@ -183,8 +214,10 @@ async def _call_tool(name: str, arguments: dict):
         from app.services import command_job_state as job_state
         import time
         tool_started = time.perf_counter()
+        touch = _touch_words(name, arguments)
         job_state.change(job_id, lambda s:s.update(current_tool={'name':name,
-            'action':arguments.get('action') if name=='browser' else None,'started_at':job_state.now()}))
+            'action':arguments.get('action') if name=='browser' else None,'started_at':job_state.now(),
+            **({'touch':touch} if touch else {})}))
     limit = tool_time_limit(name)
     try:
         try:
@@ -213,7 +246,8 @@ async def _call_tool(name: str, arguments: dict):
             def observed(s):
                 s['current_tool'] = None
                 s['last_tool'] = {'name':name,'action':arguments.get('action') if name=='browser' else None,
-                    'elapsed_ms':round((time.perf_counter()-tool_started)*1000),'at':job_state.now()}
+                    'elapsed_ms':round((time.perf_counter()-tool_started)*1000),'at':job_state.now(),
+                    **({'touch':touch} if touch else {})}
                 job_state.event(s,'tool',name + (':'+str(arguments.get('action','')) if name=='browser' else ''))
             job_state.change(job_id, observed)
 

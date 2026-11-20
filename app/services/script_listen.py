@@ -801,15 +801,26 @@ def _decide_owner(doc_id, sid, accept):
 
 
 def accept_all(doc_id):
-    """Every suggestion in the doc accepted, the owner's own first (they are found by the words around them), then
-    the doc's. Ones that cannot be (overlapping another) are left and counted."""
+    return decide_all(doc_id, True)
+
+
+def reject_all(doc_id):
+    """Every suggestion in the doc taken back (11/20 本人「全却下ボタンも作って」)."""
+    r = decide_all(doc_id, False)
+    return {'rejected': r['accepted'], 'failed': r['failed']}
+
+
+def decide_all(doc_id, accept):
+    """Every suggestion in the doc accepted (or rejected), the owner's own first (they are found by the words around
+    them), then the doc's. Ones that cannot be (overlapping another) are left and counted."""
     done = failed = 0
     _, sugs, placed = view(doc_id)
     for sid in sorted(placed, key=lambda x: placed[x]):
-        try: _decide_owner(doc_id, sid, True); done += 1
+        try: _decide_owner(doc_id, sid, accept); done += 1
         except ListenError: failed += 1
     # The doc's: all in one write. Taking every suggestion is clear even where they overlap (words one suggestion adds
-    # and another takes out): a letter any of them takes out goes, the rest stays as plain text.
+    # and another takes out): a letter any of them takes out goes, the rest stays as plain text. Taking every one back
+    # likewise: a letter any of them adds goes, the rest stays.
     doc = fetch(doc_id)
     content = doc.get('body', {}).get('content', [])
     body_end = content[-1].get('endIndex') if content else None
@@ -829,7 +840,7 @@ def accept_all(doc_id):
                 kind = 'del' if ioe.get('suggestedDeletionIds') else 'ins'
                 emb = ((doc.get('inlineObjects') or {}).get(ioe.get('inlineObjectId'), {}).get('inlineObjectProperties') or {}).get('embeddedObject') or {}
                 image = {'uri': (emb.get('imageProperties') or {}).get('contentUri'), 'size': emb.get('size')}
-                if kind == 'ins' and not image['uri']:
+                if (kind == 'ins') == accept and not image['uri']:
                     raise ListenError('提案の画像を読めませんでした。画像の提案はドキュメントで決めてください。', 409)
                 runs.append((e['startIndex'], e.get('endIndex', e['startIndex'] + 1), kind, '', {}, pstyle, nxt, image))
                 for sid in ioe.get('suggestedDeletionIds' if kind == 'del' else 'suggestedInsertionIds') or []:
@@ -839,17 +850,18 @@ def accept_all(doc_id):
             ins, dele = r.get('suggestedInsertionIds') or [], r.get('suggestedDeletionIds') or []
             if not ins and not dele: continue
             end = e.get('endIndex', e['startIndex'] + sum(_units16(c) for c in r['content']))
-            runs.append((e['startIndex'], end, 'del' if dele else 'ins', r['content'], r.get('textStyle') or {}, pstyle, nxt))
+            kind = ('del' if dele else 'ins') if accept else ('ins' if ins else 'del')
+            runs.append((e['startIndex'], end, kind, r['content'], r.get('textStyle') or {}, pstyle, nxt))
             for sid in ins: ids.setdefault(sid, {'added': '', 'removed': ''})['added'] += r['content']
             for sid in dele: ids.setdefault(sid, {'added': '', 'removed': ''})['removed'] += r['content']
     if runs:
-        text_reqs, style_reqs = decide_requests(runs, True, body_end)
+        text_reqs, style_reqs = decide_requests(runs, accept, body_end)
         _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
               body={'requests': text_reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
         if style_reqs:
             _docs('POST', f'{doc_id}:batchUpdate', doc['_account'], body={'requests': style_reqs})
         for sid, w in ids.items():
-            _log_owner_action(doc_id, doc.get('title', ''), action='accept', suggestion=sid, added=w['added'].strip(),
+            _log_owner_action(doc_id, doc.get('title', ''), action='accept' if accept else 'reject', suggestion=sid, added=w['added'].strip(),
                               removed=w['removed'].strip(), all_at_once=True)
             done += 1
     return {'accepted': done, 'failed': failed}
@@ -1100,6 +1112,20 @@ def _tool_says(label):
     return '調べています'
 
 
+TOUCH_AFTER = 3   # seconds a sentence stays lit after the step that touched it ended (the screen reads every 2.5 s)
+
+
+def _touching(state, now):
+    """The words Dan's browser is selecting or typing in the doc right now (mcp_server._touch_words), or did in the
+    last few seconds. None while he reads, thinks or writes his answer: nothing is lit then (11/20 本人「考えているだけで
+    操作していない時は光るべきじゃない」)."""
+    cur = state.get('current_tool') or {}
+    if cur.get('touch'): return {'words': cur['touch'], 'live': True}
+    last = state.get('last_tool') or {}
+    if last.get('touch') and now - _ts(last.get('at')) <= TOUCH_AFTER: return {'words': last['touch'], 'live': False}
+    return None
+
+
 def activity(doc_id):
     """What Dan is doing on the doc's comments now: one entry per answer (batch) that is waiting, working or ended
     in the last DONE_SHOWN seconds, with the comments it is about and its work log (the same lines as the chat's)."""
@@ -1137,7 +1163,8 @@ def activity(doc_id):
             'completed' if r['status'] == 'completed' else 'failed' if r['status'] in ('failed', 'cancelled') else 'attention')
         if status == 'running' and state.get('state') in ('queued', 'pending', None) and not events: status = 'pending'
         jobs.append({'id': r['id'], 'status': status, 'comment_ids': ids, 'started': state.get('created_at') or r['created'],
-                     'updated': state.get('updated_at'), 'events': events[-200:]})
+                     'updated': state.get('updated_at'), 'events': events[-200:],
+                     'touch': _touching(state, now) if status == 'running' else None})
     # The one working now first, then the ones waiting their turn (oldest first), then the ended ones (newest first).
     rank = {'running': 0, 'needs_room': 1, 'pending': 2}
     jobs.sort(key=lambda j: (rank.get(j['status'], 3), _ts(j['started']) if j['status'] in rank else -_ts(j['started'])))

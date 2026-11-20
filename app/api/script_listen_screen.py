@@ -107,6 +107,12 @@ async def accept_all(doc_id: str, user: TokenData = Depends(get_current_user)):
     except Exception as exc: _fail(exc)
 
 
+@router.post('/doc/{doc_id}/suggestions/reject-all')
+async def reject_all(doc_id: str, user: TokenData = Depends(get_current_user)):
+    try: return await run_in_threadpool(S.reject_all, S.doc_id_from(doc_id))
+    except Exception as exc: _fail(exc)
+
+
 @router.get('/doc/{doc_id}/comments')
 async def get_comments(doc_id: str, user: TokenData = Depends(get_current_user)):
     try: return await run_in_threadpool(S.comments, S.doc_id_from(doc_id))

@@ -78,6 +78,8 @@ export interface DanJob {
   started: string;
   updated: string | null;
   events: WorkEvent[];
+  /** The words Dan's browser step is selecting / typing in the doc now (live), or did a few seconds ago. */
+  touch?: { words: string[]; live: boolean } | null;
 }
 
 export interface Thread {
@@ -153,6 +155,7 @@ export const listenApi = {
     para_from: number; para_to: number; old: string; new: string; old_bmask: string; new_bmask: string; new_dmask?: string; mode?: EditMode;
   }) => json<ReplaceResult>(`/doc/${encodeURIComponent(id)}/replace`, body),
   acceptAll: (id: string) => json<{ accepted: number; failed: number }>(`/doc/${encodeURIComponent(id)}/suggestions/accept-all`, {}),
+  rejectAll: (id: string) => json<{ rejected: number; failed: number }>(`/doc/${encodeURIComponent(id)}/suggestions/reject-all`, {}),
   activity: (id: string) => json<{ jobs: DanJob[] }>(`/doc/${encodeURIComponent(id)}/activity`),
   comments: (id: string) => json<{ threads: Thread[]; can_comment: boolean }>(`/doc/${encodeURIComponent(id)}/comments`),
   addComment: (id: string, body: { text: string; quote: string; start?: number | null; sentence?: string; suggestion?: Suggestion }) =>
