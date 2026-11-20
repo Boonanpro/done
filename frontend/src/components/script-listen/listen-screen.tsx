@@ -1351,11 +1351,11 @@ export function ListenScreen({ docId }: { docId: string }) {
                 aria-checked={mode === m}
                 title={m === 'edit' ? '打った直しがそのままドキュメントに入ります' : '打った直しが自分の提案になります（消した所は線で残ります）'}
                 onClick={() => void switchMode(m)}
-                className={cn('flex items-center gap-1 px-2 py-1', mode === m
+                className={cn('flex items-center gap-1 px-1.5 py-1 sm:px-2', mode === m
                   ? (m === 'suggest' ? 'bg-violet-600 text-white' : 'bg-stone-800 text-white')
                   : 'bg-white text-stone-700')}
               >
-                <Icon className="h-3.5 w-3.5" /><span>{label}</span>
+                <Icon className="hidden h-3.5 w-3.5 sm:block" /><span>{label}</span>
               </button>
             ))}
           </div>
@@ -1365,13 +1365,13 @@ export function ListenScreen({ docId }: { docId: string }) {
             className="flex shrink-0 items-center gap-1 rounded-md border border-stone-300 px-2 py-1 text-[12px] text-stone-700"
           >
             <MessageSquare className="h-3.5 w-3.5" />
-            {wide ? (showResolved ? '解決済みを隠す' : `コメント ${openCount}`) : `コメント ${openCount}`}
+            {wide ? (showResolved ? '解決済みを隠す' : `コメント ${openCount}`) : openCount}
           </button>
           <select
             aria-label="声"
             value={voice}
             onChange={e => changeVoice(e.target.value)}
-            className="max-w-[8rem] rounded-md border border-stone-300 bg-white px-1.5 py-1 text-[12px]"
+            className="max-w-[4.5rem] shrink rounded-md border border-stone-300 bg-white px-1 py-1 text-[12px] sm:max-w-[8rem] sm:px-1.5"
           >
             {doc.voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
           </select>

@@ -177,3 +177,44 @@ def test_words_struck_on_the_screen_become_the_owners_deletion(tmp_path, monkeyp
     r = S.replace('d', 1, 1, 'そしてこの動画です。', 'そしてこてこの動画です。', '0' * 10, '0' * 12, 'suggest', '0011' + '0' * 8)
     # (which 「てこ」 is the struck one cannot be told from the text; the screen is read again to show it as kept)
     assert r['reload']
+
+
+def test_accept_all_takes_overlapping_suggestions_in_one_write(tmp_path, monkeypatch):
+    # 「足す」 suggested with 「5」 inside it suggested out by another one (the doc of 11/20 had five of these)
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'),
+                     [('前。', {}, {}), ('足す', {}, {'suggestedInsertionIds': ['a']}),
+                      ('5', {}, {'suggestedInsertionIds': ['a'], 'suggestedDeletionIds': ['b']}),
+                      ('文', {}, {'suggestedInsertionIds': ['a']}), ('古い', {}, {'suggestedDeletionIds': ['c']}), ('後。\n', {}, {})]))
+    doc['revisionId'], doc['_account'] = 'r1', 'x'
+    monkeypatch.setattr(S, 'OWNER_SUGS', tmp_path / 'sugs.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: doc)
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    sent = []
+    monkeypatch.setattr(S, '_docs', lambda m, path, acc, body=None, params=None: sent.append(body) or {})
+    r = S.accept_all('d')
+    assert r == {'accepted': 3, 'failed': 0}
+    assert _apply(_body(doc), sent[0]['requests']) == '◎台本\n前。足す文後。\n'
+
+
+@pytest.mark.parametrize('sid,accept,want', [
+    ('a', False, '前。後。'),           # rejecting the added words takes all of them out (the inner one with them)
+    ('a', True, '前。足す文後。'),      # taking them takes the inner taking-out too
+    ('b', True, '前。足す文後。'),      # taking out words another one adds
+])
+def test_deciding_an_overlapping_suggestion(tmp_path, monkeypatch, sid, accept, want):
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'),
+                     [('前。', {}, {}), ('足す', {}, {'suggestedInsertionIds': ['a']}),
+                      ('5', {}, {'suggestedInsertionIds': ['a'], 'suggestedDeletionIds': ['b']}),
+                      ('文', {}, {'suggestedInsertionIds': ['a']}), ('後。\n', {}, {})]))
+    doc['revisionId'], doc['_account'] = 'r1', 'x'
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: doc)
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    sent = []
+    monkeypatch.setattr(S, '_docs', lambda m, path, acc, body=None, params=None: sent.append(body) or {})
+    S.decide('d', sid, accept)
+    assert _apply(_body(doc), sent[0]['requests']) == '◎台本\n' + want + '\n'
+    if sid == 'b':
+        with pytest.raises(S.ListenError):     # keeping words someone adds as plain cannot be written
+            S.decide('d', 'b', False)

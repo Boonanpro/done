@@ -620,10 +620,18 @@ def decide(doc_id, sid, accept, by_edit=False):
             if not r: continue
             ins, dele = r.get('suggestedInsertionIds') or [], r.get('suggestedDeletionIds') or []
             if sid not in ins and sid not in dele: continue
-            if set(ins) | set(dele) != {sid}:
-                raise ListenError('この提案は別の提案と重なっているので、ドキュメントで決めてください。', 409)
+            kind = 'ins' if sid in ins else 'del'
+            others = (set(ins) | set(dele)) - {sid}
+            if others:
+                # Overlapping suggestions (words one adds, another takes out). Rejecting the adding one takes all its
+                # words out, inner suggestions with them; taking it takes the inner taking-out too; taking out words
+                # that another adds just takes them out. Anything else cannot be written as Docs would keep it.
+                if kind == 'ins' and not accept: pass
+                elif kind == 'ins' and not (set(ins) - {sid}) and dele: kind = 'del'
+                elif kind == 'del' and accept: pass
+                else: raise ListenError('この提案は別の提案と重なっているので、ドキュメントで決めてください。', 409)
             end = e.get('endIndex', e['startIndex'] + sum(_units16(c) for c in r['content']))
-            runs.append((e['startIndex'], end, 'ins' if sid in ins else 'del', r['content'], r.get('textStyle') or {}, pstyle, nxt))
+            runs.append((e['startIndex'], end, kind, r['content'], r.get('textStyle') or {}, pstyle, nxt))
     if not runs:
         raise ListenError('この提案はもうありません。ドキュメントの方で決められたかもしれません。', 409)
     text_reqs, style_reqs = decide_requests(runs, accept, body_end)
@@ -668,12 +676,36 @@ def accept_all(doc_id):
     for sid in sorted(placed, key=lambda x: placed[x]):
         try: _decide_owner(doc_id, sid, True); done += 1
         except ListenError: failed += 1
-    units = outline(fetch(doc_id))
-    for n, u in enumerate(units): u['n'] = n
-    for s in suggestions_of(units):
-        if M.is_owner(s['id']): continue
-        try: decide(doc_id, s['id'], True); done += 1
-        except ListenError: failed += 1
+    # The doc's: all in one write. Taking every suggestion is clear even where they overlap (words one suggestion adds
+    # and another takes out): a letter any of them takes out goes, the rest stays as plain text.
+    doc = fetch(doc_id)
+    content = doc.get('body', {}).get('content', [])
+    body_end = content[-1].get('endIndex') if content else None
+    runs, ids = [], {}
+    paras = [el for el in content if el.get('paragraph')]
+    for k, el in enumerate(paras):
+        p = el['paragraph']
+        pstyle = (p.get('paragraphStyle') or {}).get('namedStyleType', 'NORMAL_TEXT')
+        nxt = (paras[k + 1]['paragraph'].get('paragraphStyle') or {}).get('namedStyleType', 'NORMAL_TEXT') if k + 1 < len(paras) else None
+        for e in p.get('elements', []):
+            r = e.get('textRun')
+            if not r: continue
+            ins, dele = r.get('suggestedInsertionIds') or [], r.get('suggestedDeletionIds') or []
+            if not ins and not dele: continue
+            end = e.get('endIndex', e['startIndex'] + sum(_units16(c) for c in r['content']))
+            runs.append((e['startIndex'], end, 'del' if dele else 'ins', r['content'], r.get('textStyle') or {}, pstyle, nxt))
+            for sid in ins: ids.setdefault(sid, {'added': '', 'removed': ''})['added'] += r['content']
+            for sid in dele: ids.setdefault(sid, {'added': '', 'removed': ''})['removed'] += r['content']
+    if runs:
+        text_reqs, style_reqs = decide_requests(runs, True, body_end)
+        _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
+              body={'requests': text_reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+        if style_reqs:
+            _docs('POST', f'{doc_id}:batchUpdate', doc['_account'], body={'requests': style_reqs})
+        for sid, w in ids.items():
+            _log_owner_action(doc_id, doc.get('title', ''), action='accept', suggestion=sid, added=w['added'].strip(),
+                              removed=w['removed'].strip(), all_at_once=True)
+            done += 1
     return {'accepted': done, 'failed': failed}
 
 
