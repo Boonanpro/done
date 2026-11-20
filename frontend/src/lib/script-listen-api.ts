@@ -50,6 +50,10 @@ export interface ListenDoc {
   suggestions: Suggestion[];
 }
 
+/** The script of a video this script was modelled on, cut into the same sections (app/services/script_listen_refs.py). */
+export interface RefSection { match: string; start: number | null; text: string }
+export interface Reference { id: string; who: string; title: string; url: string; length: string; note: string; sections: RefSection[] }
+
 export interface ThreadMessage {
   id: string;
   who: 'owner' | 'dan' | 'other';
@@ -111,6 +115,7 @@ export function errorText(e: unknown): string {
 
 export const listenApi = {
   doc: (id: string, voice: string) => json<ListenDoc>(`/doc/${encodeURIComponent(id)}?voice=${encodeURIComponent(voice)}`),
+  references: (id: string) => json<{ refs: Reference[] }>(`/doc/${encodeURIComponent(id)}/references`),
   version: (id: string) => json<{ version: string | null }>(`/doc/${encodeURIComponent(id)}/version`),
   ahead: (voice: string, items: { speak: string; gap: string }[]) => json<{ queued: number }>('/ahead', { voice, items }),
   edit: (id: string, old: string, next: string, start: number) =>
