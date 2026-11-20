@@ -58,6 +58,28 @@ class ListenError(Exception):
         self.status = status
 
 
+class Stale(ListenError):
+    """Someone wrote to the doc between reading it and writing (Dan putting in a suggestion while the owner typed)."""
+    def __init__(self):
+        super().__init__('ドキュメントがちょうど直されたので、読み直しました。', 409)
+
+
+def _retry_stale(fn):
+    """Read the doc again and write again when it moved meanwhile: the owner's change goes onto the new text (_locate).
+    Before 11/21 the Docs API's「does not match the latest revision」was not recognised, came out as 500, and the
+    screen threw away what the owner had just typed (本人「ダンが作業してる時に俺が手動編集した内容が巻き戻された」)."""
+    import functools
+
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        for attempt in range(5):
+            try: return fn(*args, **kwargs)
+            except Stale:
+                if attempt == 4: raise
+                time.sleep(0.2 * (attempt + 1))
+    return run
+
+
 # ---------------------------------------------------------------- Google Docs
 
 def _token(account):
@@ -71,8 +93,8 @@ def _docs(method, path, account, body=None, params=None):
                           headers={'Authorization': 'Bearer ' + _token(account)}, json=body, params=params)
     if r.status_code == 404 or r.status_code == 403:
         raise ListenError('このドキュメントを開けませんでした。ダンのGoogleアカウントに共有されているか確かめてください。', 404)
-    if r.status_code == 400 and 'requiredRevisionId' in r.text:
-        raise ListenError('ドキュメントがちょうど直されたので、読み直しました。', 409)
+    if r.status_code == 400 and ('requiredRevisionId' in r.text or 'does not match the latest revision' in r.text):
+        raise Stale()
     r.raise_for_status()
     return r.json()
 
@@ -320,9 +342,11 @@ def _inline_images(units, most=40):
         u['src'] = _image_cache[key]
 
 
-def suggestions_of(units):
+def suggestions_of(units, kept=()):
     """Each suggestion once, with the text it adds and removes and the first unit it shows in. ``by`` owner: written
-    in suggestion mode on this screen (kept here, not in the doc)."""
+    in suggestion mode on this screen (kept here, not in the doc); client: what the other side changed in the copy
+    they were sent (script_share), kept the same way. ``kept``: the screen's suggestions (for whose each is)."""
+    whose = {k.get('id'): k.get('by') for k in kept or ()}
     out = {}
     for u in units:
         if u['kind'] == 'image':
@@ -336,7 +360,8 @@ def suggestions_of(units):
             for kind in ('ins', 'del'):
                 sid = seg.get(kind)
                 if not sid: continue
-                s = out.setdefault(sid, {'id': sid, 'ins': '', 'del': '', 'n': u['n'], 'by': 'owner' if M.is_owner(sid) else 'doc'})
+                by = ('client' if whose.get(sid) == 'client' else 'owner') if M.is_owner(sid) else 'doc'
+                s = out.setdefault(sid, {'id': sid, 'ins': '', 'del': '', 'n': u['n'], 'by': by})
                 s[kind] += seg['t']
     return list(out.values())
 
@@ -350,7 +375,7 @@ def view(doc_id, doc=None):
 
 
 def read(doc_id, voice=DEFAULT_VOICE):
-    doc, _, _ = view(doc_id)
+    doc, kept, _ = view(doc_id)
     units = outline(doc)
     for n, u in enumerate(units):
         u['n'] = n
@@ -368,7 +393,7 @@ def read(doc_id, voice=DEFAULT_VOICE):
     watch_soon(doc_id)
     return {'doc_id': doc_id, 'title': title, 'revision': doc.get('revisionId'), 'version': doc.get('revisionId'),
             'voice': voice, 'voices': [{'id': v['id'], 'name': v['name']} for v in VOICES], 'units': units,
-            'suggestions': suggestions_of(units)}
+            'suggestions': suggestions_of(units, kept)}
 
 
 def version(doc_id):
@@ -405,6 +430,7 @@ def edit_requests(start, old, new, bmask=''):
     return reqs
 
 
+@_retry_stale
 def edit(doc_id, old, new, para=None, start=None):
     """Replace one sentence in the doc. ``old`` is the sentence as the screen showed it; the doc is read again first
     and, when it no longer has that sentence where it was (or anywhere, uniquely), nothing is written."""
@@ -525,6 +551,7 @@ def _locate(shown, para_from, para_to, old, new, old_bmask, new_bmask):
     raise ListenError(GONE_HERE, 409)
 
 
+@_retry_stale
 def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mode='edit', new_dmask='', _depth=0):
     """What the owner typed on the screen: paragraphs ``para_from``..``para_to`` read ``old`` on the screen and now
     read ``new`` (with '\n' where a paragraph ends; boldness as '0'/'1' per character). ``mode`` 'edit' writes it
@@ -556,6 +583,13 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
             new_toks, settled = M.plan(toks, new, new_bmask, mode)
         except M.Refused as exc:
             raise ListenError(str(exc), 409)
+        except M.Adopt as need:
+            # Typing into Dan's suggestion: it becomes the owner's suggestion with the same words first, then the
+            # change is made to it like to any owner suggestion (it stays a suggestion until 承認 / 却下).
+            if _depth >= 2: raise ListenError(GONE_HERE, 409)
+            _adopt(doc_id, doc, shown, sugs, need.sids)
+            out = replace(doc_id, para_from, para_to, old, new, old_bmask, new_bmask, mode, new_dmask, _depth + 1)
+            return {**out, 'changed': True, 'reload': True}
         except M.Settle as need:
             # Dan's suggestion is being typed over: decide it in the doc the way the owner means it, then the rest.
             if _depth >= 2: raise ListenError(GONE_HERE, 409)
@@ -584,8 +618,11 @@ def _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, m
     now = time.strftime('%Y-%m-%dT%H:%M:%S%z')
     fresh = M.regroup(new_toks, para_from, now=now)
     old_here = {s['id']: s for s in sugs if para_from <= placed.get(s['id'], -1) <= para_to}
-    for f in fresh:                        # an owner suggestion keeps when it was first written
-        if f['id'] in old_here: f['at'] = old_here[f['id']].get('at') or now
+    for f in fresh:                        # an owner suggestion keeps when it was first written, and whose it was first
+        if f['id'] in old_here:
+            f['at'] = old_here[f['id']].get('at') or now
+            for key in ('from', 'by'):
+                if old_here[f['id']].get(key): f[key] = old_here[f['id']][key]
     after = M.store_after(sugs, placed, para_from, para_to, b.count('\n') - a.count('\n'), fresh)
     if after != sugs: M.save(OWNER_SUGS, doc_id, after)
     title = doc.get('title', '')
@@ -597,7 +634,8 @@ def _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, m
             was = old_here.get(f['id'])
             if not was or (was.get('del'), was.get('ins')) != (f['del'], f['ins']):
                 _log_owner_action(doc_id, title, action='suggest', suggestion=f['id'],
-                                  before=f['pre'] + f['del'] + f['post'], after=f['pre'] + f['ins'] + f['post'])
+                                  before=f['pre'] + f['del'] + f['post'], after=f['pre'] + f['ins'] + f['post'],
+                                  **({'revised_from': f['from']} if f.get('from') else {}))
         for sid in old_here:
             if sid not in kept: _log_owner_action(doc_id, title, action='settle', suggestion=sid)
     # The screen tells its own writes from other people's by this revision. ``reload``: what the screen shows is not
@@ -720,7 +758,8 @@ def _log_owner_action(doc_id, title, **fields):
 
 # ---------------------------------------------------------------- suggestions (accept / reject on the screen)
 
-def decide(doc_id, sid, accept, by_edit=False):
+@_retry_stale
+def decide(doc_id, sid, accept, by_edit=False, log=True):
     """Accept or reject one suggestion the way Docs does. The Docs API has no accept/reject, so the same result is
     written: text that stays is deleted and written again as plain text with its style, text that goes is deleted.
     Tried on a copy 11/19: Docs then shows the suggestion as settled. The owner's own suggestions (kept by the
@@ -773,11 +812,13 @@ def decide(doc_id, sid, accept, by_edit=False):
         _docs('POST', f'{doc_id}:batchUpdate', doc['_account'], body={'requests': style_reqs})
     added = ''.join(r[3] or '' for r in runs if r[2] == 'ins').strip()
     removed = ''.join(r[3] for r in runs if r[2] == 'del').strip()
-    _log_owner_action(doc_id, doc.get('title', ''), action='accept' if accept else 'reject', suggestion=sid,
-                      added=added, removed=removed, **({'by_edit': True} if by_edit else {}))
-    return {'done': True}
+    if log:
+        _log_owner_action(doc_id, doc.get('title', ''), action='accept' if accept else 'reject', suggestion=sid,
+                          added=added, removed=removed, **({'by_edit': True} if by_edit else {}))
+    return {'done': True, 'added': added, 'removed': removed}
 
 
+@_retry_stale
 def _decide_owner(doc_id, sid, accept):
     _follow(doc_id)
     with _owner_lock:
@@ -796,8 +837,74 @@ def _decide_owner(doc_id, sid, accept):
         if accept:
             # The owner's own words: an edit for the learning, with the words around it.
             _log_owner_edit(doc_id, title, mine['pre'] + mine['del'] + mine['post'], mine['pre'] + mine['ins'] + mine['post'])
-        _log_owner_action(doc_id, title, action='settle', suggestion=sid)
+        extra = {}
+        if mine.get('from'): extra['revised_from'] = mine['from']
+        if mine.get('by'): extra['by_whom'] = mine['by']
+        _log_owner_action(doc_id, title, action='settle', suggestion=sid, accept=accept, **extra)
     return {'done': True}
+
+
+def adopt_pieces(shown, sids, now=''):
+    """Dan's suggestions ``sids`` as the owner's suggestions, read from the doc laid over with the owner's (``shown``):
+    one per stretch of their words (its struck words then its added words), with the words around it as they read once
+    his suggestion is taken back in the doc. Raises ListenError when one cannot be (it crosses a paragraph end)."""
+    import uuid
+    content = shown.get('body', {}).get('content', [])
+    out = []
+    for pi, el in enumerate(content):
+        p = el.get('paragraph')
+        if p is None: continue
+        for e in p.get('elements', []):
+            r = e.get('textRun')
+            if r and '\n' in r.get('content', '') and set((r.get('suggestedInsertionIds') or []) + (r.get('suggestedDeletionIds') or [])) & sids:
+                raise ListenError('この提案は段落をまたいでいるので、ここでは書き換えられません。承認か却下を決めてから直してください。', 409)
+        got = M.tokens(shown, pi, pi, _chars)
+        if not got: continue
+        toks = got[0]
+        # The paragraph as it reads once those suggestions are taken back: their added words go, struck words stay.
+        mine = lambda t: t['k'] == 'x' and t['sid'] in sids
+        raw = lambda t: t['k'] in ('p', 'd') or (t['k'] == 'x' and not (mine(t) and t['xk'] == 'i'))
+        # What Dan suggested here, whole (Docs puts the added words before the struck ones, so one suggestion can be
+        # two stretches): kept on every piece for the learning.
+        whole = {}
+        for t in toks:
+            if mine(t):
+                w = whole.setdefault(t['sid'], {'by': 'dan', 'suggestion': t['sid'], 'del': '', 'ins': ''})
+                w['del' if t['xk'] == 'd' else 'ins'] += t['ch']
+        i = 0
+        while i < len(toks):
+            if not mine(toks[i]): i += 1; continue
+            j, seen_ins = i, False
+            while j < len(toks) and mine(toks[j]) and toks[j]['sid'] == toks[i]['sid']:
+                if toks[j]['xk'] == 'i': seen_ins = True
+                elif seen_ins: break           # struck words after added ones: the next stretch
+                j += 1
+            run = toks[i:j]
+            pre = ''.join(t['ch'] for t in toks[:i] if raw(t))
+            post = ''.join(t['ch'] for t in toks[j:] if raw(t))
+            dele = ''.join(t['ch'] for t in run if t['xk'] == 'd')
+            ins = [t for t in run if t['xk'] == 'i']
+            out.append({'id': M.OWNER + uuid.uuid4().hex[:12], 'para': pi, 'pre': pre[-M.CONTEXT:], 'del': dele,
+                        'ins': ''.join(t['ch'] for t in ins), 'bm': ''.join('1' if t['b'] else '0' for t in ins),
+                        'post': post[:M.CONTEXT], 'at': now,
+                        'from': dict(whole[toks[i]['sid']])})
+            i = j
+    return out
+
+
+def _adopt(doc_id, doc, shown, sugs, sids):
+    """Take Dan's suggestions ``sids`` back in the doc and keep the same words as the owner's suggestions, so the
+    owner can go on writing them as suggestions (11/21). The doc then no longer shows them in Google Docs; the screen
+    does, and 承認 writes them like the owner's own."""
+    now = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    pieces = adopt_pieces(shown, set(sids), now)
+    if not pieces: raise ListenError(GONE_HERE, 409)
+    for sid in sids: decide(doc_id, sid, False, by_edit=True, log=False)
+    M.save(OWNER_SUGS, doc_id, list(sugs) + pieces)
+    for piece in pieces:
+        _log_owner_action(doc_id, doc.get('title', ''), action='adopt', suggestion=piece['id'], dan_suggestion=piece['from']['suggestion'],
+                          before=piece['pre'] + piece['del'] + piece['post'], after=piece['pre'] + piece['ins'] + piece['post'],
+                          revised_from=piece['from'])
 
 
 def accept_all(doc_id):

@@ -200,7 +200,7 @@ export function SuggestionCard({
     try { await onDecide(accept); } finally { setBusy(''); }
   };
   const kind = s.ins && s.del ? '置き換え' : s.ins ? '足す' : '消す';
-  const own = s.by === 'owner';
+  const own = s.by === 'owner' || s.by === 'client';   // kept by the screen (the owner's, or the other side's from their copy)
   const talking = threads.length > 0;
   const showBox = canComment && !!onComment && (writing || (active && talking));
   return (
@@ -209,7 +209,7 @@ export function SuggestionCard({
       className={cn('rounded-lg border bg-white p-2.5 text-[13px] shadow-sm',
         active ? (own ? 'border-violet-400 shadow-md' : 'border-emerald-400 shadow-md') : 'border-stone-200')}
     >
-      <div className={cn('mb-1 text-[11px] font-semibold', own ? 'text-violet-800' : 'text-emerald-800')}>{own ? 'みきさんの提案' : '提案'}（{kind}）</div>
+      <div className={cn('mb-1 text-[11px] font-semibold', own ? 'text-violet-800' : 'text-emerald-800')}>{s.by === 'client' ? '相手の直し' : own ? 'みきさんの提案' : '提案'}（{kind}）</div>
       {s.del && <div className={cn('line-clamp-3 line-through', own ? 'text-violet-700/80 decoration-violet-500' : 'text-red-700/80 decoration-red-500')}>{s.del.trim()}</div>}
       {s.ins && <div className={cn('mt-0.5 line-clamp-4', own ? 'text-violet-800' : 'text-emerald-800')}>{s.ins.trim()}</div>}
       {talking && (

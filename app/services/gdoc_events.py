@@ -746,6 +746,13 @@ async def serve():
                         deadlines.append(feed['renew_at'])
                         if feed['dirty'] > feed['consumed']:
                             found = await asyncio.to_thread(drain_feed, feed)
+                            try:
+                                # A working doc with a customer's copy, or the copy itself, changed: the copy follows.
+                                from app.services import script_share
+                                script_share.changed(found)
+                            except Exception:
+                                import logging
+                                logging.exception('customer copy follow failed')
                             if [f for f in found if await asyncio.to_thread(adopt, account, f)]: wake.set()
                     except Exception as exc:
                         import logging

@@ -12,6 +12,17 @@ from app.services import script_listen_refs as R
 router = APIRouter(prefix='/script-listen', tags=['script-listen'])
 
 
+def _followed(doc_id, result):
+    """The working doc changed from the screen: its customer's copy follows a few seconds later (script_share)."""
+    try:
+        from app.services import script_share
+        script_share.poke(S.doc_id_from(doc_id))
+    except Exception:
+        import logging
+        logging.exception('customer copy follow failed')
+    return result
+
+
 def _fail(exc):
     if isinstance(exc, S.ListenError):
         raise HTTPException(status_code=exc.status, detail=str(exc))
@@ -33,6 +44,11 @@ async def get_references(doc_id: str, user: TokenData = Depends(get_current_user
 
 @router.get('/doc/{doc_id}/version')
 async def get_version(doc_id: str, user: TokenData = Depends(get_current_user)):
+    try:
+        from app.services import script_share
+        script_share.maybe_check(S.doc_id_from(doc_id))   # what the other side did in their copy comes in too
+    except Exception:
+        pass
     return {'version': await run_in_threadpool(S.version, S.doc_id_from(doc_id))}
 
 
@@ -67,7 +83,7 @@ class Edit(BaseModel):
 
 @router.post('/doc/{doc_id}/edit')
 async def edit(doc_id: str, body: Edit, user: TokenData = Depends(get_current_user)):
-    try: return await run_in_threadpool(S.edit, S.doc_id_from(doc_id), body.old, body.new, None, body.start)
+    try: return _followed(doc_id, await run_in_threadpool(S.edit, S.doc_id_from(doc_id), body.old, body.new, None, body.start))
     except Exception as exc: _fail(exc)
 
 
@@ -85,8 +101,8 @@ class Replace(BaseModel):
 @router.post('/doc/{doc_id}/replace')
 async def replace(doc_id: str, body: Replace, user: TokenData = Depends(get_current_user)):
     try:
-        return await run_in_threadpool(S.replace, S.doc_id_from(doc_id), body.para_from, body.para_to, body.old, body.new,
-                                       body.old_bmask, body.new_bmask, body.mode, body.new_dmask)
+        return _followed(doc_id, await run_in_threadpool(S.replace, S.doc_id_from(doc_id), body.para_from, body.para_to, body.old, body.new,
+                                       body.old_bmask, body.new_bmask, body.mode, body.new_dmask))
     except Exception as exc: _fail(exc)
 
 
@@ -97,19 +113,19 @@ class Decide(BaseModel):
 
 @router.post('/doc/{doc_id}/suggestion')
 async def decide(doc_id: str, body: Decide, user: TokenData = Depends(get_current_user)):
-    try: return await run_in_threadpool(S.decide, S.doc_id_from(doc_id), body.id, body.accept)
+    try: return _followed(doc_id, await run_in_threadpool(S.decide, S.doc_id_from(doc_id), body.id, body.accept))
     except Exception as exc: _fail(exc)
 
 
 @router.post('/doc/{doc_id}/suggestions/accept-all')
 async def accept_all(doc_id: str, user: TokenData = Depends(get_current_user)):
-    try: return await run_in_threadpool(S.accept_all, S.doc_id_from(doc_id))
+    try: return _followed(doc_id, await run_in_threadpool(S.accept_all, S.doc_id_from(doc_id)))
     except Exception as exc: _fail(exc)
 
 
 @router.post('/doc/{doc_id}/suggestions/reject-all')
 async def reject_all(doc_id: str, user: TokenData = Depends(get_current_user)):
-    try: return await run_in_threadpool(S.reject_all, S.doc_id_from(doc_id))
+    try: return _followed(doc_id, await run_in_threadpool(S.reject_all, S.doc_id_from(doc_id)))
     except Exception as exc: _fail(exc)
 
 

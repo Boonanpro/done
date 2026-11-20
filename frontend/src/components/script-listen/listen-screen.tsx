@@ -712,7 +712,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   const [danFresh, setDanFresh] = useState<Map<string, { job: string; until: number }>>(() => new Map());   // briefly
   useEffect(() => {
     if (!doc) return;
-    const ids = suggestions.filter(x => x.by !== 'owner').map(x => x.id);
+    const ids = suggestions.filter(x => !x.by || x.by === 'doc').map(x => x.id);
     if (!seenSugs.current) { seenSugs.current = new Set(ids); return; }
     const fresh = ids.filter(id => !seenSugs.current!.has(id));
     fresh.forEach(id => seenSugs.current!.add(id));
