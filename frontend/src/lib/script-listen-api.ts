@@ -23,7 +23,21 @@ export type ListenUnit =
 
 export type SayUnit = Extract<ListenUnit, { kind: 'say' }>;
 
-export interface Suggestion { id: string; ins: string; del: string; n: number }
+/** by owner: written in suggestion mode on this screen (kept by the screen; the Docs API cannot write suggestions). */
+export interface Suggestion { id: string; ins: string; del: string; n: number; by?: 'owner' | 'doc' }
+
+export type EditMode = 'edit' | 'suggest';
+
+export interface ReplaceResult {
+  changed: boolean;
+  revision?: string | null;
+  /** The doc had changed meanwhile and the owner's change was put onto it. */
+  rebased?: boolean;
+  /** What the screen shows is no longer what the doc is (a suggestion was settled): read it again. */
+  reload?: boolean;
+  /** Suggestions settled because their words were typed over: {id: accepted}. */
+  settled?: Record<string, boolean>;
+}
 
 export interface ListenDoc {
   doc_id: string;
@@ -102,8 +116,10 @@ export const listenApi = {
   edit: (id: string, old: string, next: string, start: number) =>
     json<{ changed: boolean }>(`/doc/${encodeURIComponent(id)}/edit`, { old, new: next, start }),
   /** 段落 para_from..para_to（'\n' でつないだ文）を old から new へ。new_bmask は1文字ずつの太字（'0'/'1'）。 */
-  replace: (id: string, body: { para_from: number; para_to: number; old: string; new: string; old_bmask: string; new_bmask: string }) =>
-    json<{ changed: boolean; revision?: string | null }>(`/doc/${encodeURIComponent(id)}/replace`, body),
+  replace: (id: string, body: {
+    para_from: number; para_to: number; old: string; new: string; old_bmask: string; new_bmask: string; new_dmask?: string; mode?: EditMode;
+  }) => json<ReplaceResult>(`/doc/${encodeURIComponent(id)}/replace`, body),
+  acceptAll: (id: string) => json<{ accepted: number; failed: number }>(`/doc/${encodeURIComponent(id)}/suggestions/accept-all`, {}),
   comments: (id: string) => json<{ threads: Thread[]; can_comment: boolean }>(`/doc/${encodeURIComponent(id)}/comments`),
   addComment: (id: string, body: { text: string; quote: string; start?: number | null; sentence?: string; suggestion?: Suggestion }) =>
     json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments`, body),

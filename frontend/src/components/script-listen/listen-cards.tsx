@@ -176,16 +176,18 @@ export function SuggestionCard({
     try { await onDecide(accept); } finally { setBusy(''); }
   };
   const kind = s.ins && s.del ? '置き換え' : s.ins ? '足す' : '消す';
+  const own = s.by === 'owner';
   const talking = threads.length > 0;
   const showBox = canComment && !!onComment && (writing || (active && talking));
   return (
     <div
       onClick={onFocus}
-      className={cn('rounded-lg border bg-white p-2.5 text-[13px] shadow-sm', active ? 'border-emerald-400 shadow-md' : 'border-stone-200')}
+      className={cn('rounded-lg border bg-white p-2.5 text-[13px] shadow-sm',
+        active ? (own ? 'border-violet-400 shadow-md' : 'border-emerald-400 shadow-md') : 'border-stone-200')}
     >
-      <div className="mb-1 text-[11px] font-semibold text-emerald-800">提案（{kind}）</div>
-      {s.del && <div className="line-clamp-3 text-red-700/80 line-through decoration-red-500">{s.del.trim()}</div>}
-      {s.ins && <div className="mt-0.5 line-clamp-4 text-emerald-800">{s.ins.trim()}</div>}
+      <div className={cn('mb-1 text-[11px] font-semibold', own ? 'text-violet-800' : 'text-emerald-800')}>{own ? 'みきさんの提案' : '提案'}（{kind}）</div>
+      {s.del && <div className={cn('line-clamp-3 line-through', own ? 'text-violet-700/80 decoration-violet-500' : 'text-red-700/80 decoration-red-500')}>{s.del.trim()}</div>}
+      {s.ins && <div className={cn('mt-0.5 line-clamp-4', own ? 'text-violet-800' : 'text-emerald-800')}>{s.ins.trim()}</div>}
       {talking && (
         <div className="mt-2 space-y-2 border-t border-stone-100 pt-2">
           {earlier && <div className="text-[11px] text-stone-400">前の提案からの続き</div>}

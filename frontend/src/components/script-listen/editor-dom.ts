@@ -4,14 +4,19 @@
 // 文や段落ごとの枠は付けない（11/19 本人「黄色い枠…広範囲に選択できない。余計なものを付けるな」）。
 import type { ListenUnit, Seg } from '@/lib/script-listen-api';
 
-/** One paragraph as the screen shows it: its text, boldness per character ('0'/'1') and its paragraph in the doc. */
-export type Line = { t: string; b: string; para?: number };
+/** One paragraph as the screen shows it: its text, boldness per character ('0'/'1'), which characters were struck
+ * here in suggestion mode and not yet sent ('1', the doc still has them plain) and its paragraph in the doc. */
+export type Line = { t: string; b: string; d: string; para?: number };
 export type Pos = { line: number; off: number };
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-const SUG_INS = 'cursor-pointer bg-emerald-50 text-emerald-800 underline decoration-emerald-500 decoration-2 underline-offset-2';
-const SUG_DEL = 'cursor-pointer text-red-700/70 line-through decoration-red-500';
+const SUG_INS = 'bg-emerald-50 text-emerald-800 underline decoration-emerald-500 decoration-2 underline-offset-2';
+const SUG_DEL = 'text-red-700/70 line-through decoration-red-500';
+// The owner's own suggestions (suggestion mode on this screen) in their own colour, the way Docs colours each writer.
+export const OWN_INS = 'bg-violet-50 text-violet-800 underline decoration-violet-500 decoration-2 underline-offset-2';
+export const OWN_DEL = 'text-violet-700/70 line-through decoration-violet-500';
+export const isOwnSuggestion = (id?: string | null) => !!id && id.startsWith('o-');
 
 function segsHtml(segs: Seg[] | undefined, text: string) {
   if (!segs?.length) return esc(text);
@@ -19,9 +24,10 @@ function segsHtml(segs: Seg[] | undefined, text: string) {
     let h = esc(s.t);
     if (s.b) h = `<b>${h}</b>`;
     if (s.blue) h = `<span class="text-sky-700/80">${h}</span>`;
-    // Suggestions are decided with 承認 / 却下, not typed over (the doc does not let them be edited either).
-    if (s.ins) h = `<span contenteditable="false" data-sug="${esc(s.ins)}" class="${SUG_INS}">${h}</span>`;
-    else if (s.del) h = `<span contenteditable="false" data-sug="${esc(s.del)}" class="${SUG_DEL}">${h}</span>`;
+    // Suggestions can be typed in like any text (11/20 本人「提案モードの文字…普通に編集できるようにしてほしい」): the
+    // server settles a suggestion whose words are changed (script_listen_marks).
+    if (s.ins) h = `<span data-sug="${esc(s.ins)}" data-kind="ins" class="${isOwnSuggestion(s.ins) ? OWN_INS : SUG_INS}">${h}</span>`;
+    else if (s.del) h = `<span data-sug="${esc(s.del)}" data-kind="del" class="${isOwnSuggestion(s.del) ? OWN_DEL : SUG_DEL}">${h}</span>`;
     return h;
   }).join('');
 }
@@ -101,14 +107,15 @@ function markBold(el: Element | null, root: Element) {
 /** The surface read back as paragraphs (a <p> or <div> per paragraph, a <br> in the middle of one splits it). */
 export function extract(root: HTMLElement): Line[] {
   const lines: Line[] = [];
-  let line: (Line & { tt: string[]; bb: string[] }) | null = null;
-  const open = (para?: number) => { line = { t: '', b: '', tt: [], bb: [], para }; lines.push(line); return line; };
+  let line: (Line & { tt: string[]; bb: string[]; dd: string[] }) | null = null;
+  const open = (para?: number) => { line = { t: '', b: '', d: '', tt: [], bb: [], dd: [], para }; lines.push(line); return line; };
   const walk = (node: Node, para?: number) => {
     for (const ch of Array.from(node.childNodes)) {
       if (ch.nodeType === 3) {
         const l = line || open(para);
         const bold = markBold(ch.parentElement, root) ? '1' : '0';
-        for (const c of (ch as Text).data) { l.tt.push(c === ' ' ? ' ' : c); l.bb.push(bold); }
+        const struck = ch.parentElement?.closest('[data-od]') ? '1' : '0';
+        for (const c of (ch as Text).data) { l.tt.push(c === ' ' ? ' ' : c); l.bb.push(bold); l.dd.push(struck); }
       } else if (ch.nodeType === 1) {
         const el = ch as HTMLElement;
         if (skipped(el)) continue;
@@ -131,8 +138,8 @@ export function extract(root: HTMLElement): Line[] {
   };
   walk(root);
   return lines.map(l => {
-    const x = l as Line & { tt: string[]; bb: string[] };
-    return { t: x.tt.join(''), b: x.bb.join(''), para: x.para };
+    const x = l as Line & { tt: string[]; bb: string[]; dd: string[] };
+    return { t: x.tt.join(''), b: x.bb.join(''), d: x.dd.join(''), para: x.para };
   });
 }
 
@@ -166,10 +173,6 @@ export function nodeAt(root: HTMLElement, pos: Pos): { node: Node; off: number }
   let left = pos.off;
   let last: Text | null = null;
   for (let t = w.nextNode() as Text | null; t; t = w.nextNode() as Text | null) {
-    // Suggestions inside the paragraph are not typed in. The whole text being read-only (a phone before the second
-    // tap, last time's copy while the doc is read again) does not count: a position there is still a position.
-    const fixed = t.parentElement?.closest('[contenteditable="false"]');
-    if (fixed && leaf.contains(fixed)) { left -= t.data.length; last = null; continue; }
     if (left <= t.data.length) return { node: t, off: Math.max(0, left) };
     left -= t.data.length;
     last = t;
@@ -188,7 +191,9 @@ export function setPos(root: HTMLElement, pos: Pos) {
   sel?.addRange(r);
 }
 
-export type Change = { para_from: number; para_to: number; old: string; new: string; old_bmask: string; new_bmask: string; next: Line[] };
+export type Change = {
+  para_from: number; para_to: number; old: string; new: string; old_bmask: string; new_bmask: string; new_dmask: string; next: Line[];
+};
 
 /**
  * What changed between ``base`` (the doc as last written, with its paragraph numbers) and ``now`` (the screen), as
@@ -197,13 +202,15 @@ export type Change = { para_from: number; para_to: number; old: string; new: str
  * spans something that is not a paragraph (a table) and cannot be written as one piece.
  */
 export function diffLines(base: Line[], now: Line[]): Change | null | 'gap' {
-  const O = base.map(l => l.t).join('\n'); const OB = base.map(l => l.b).join('0');
-  const N = now.map(l => l.t).join('\n'); const NB = now.map(l => l.b).join('0');
+  const dm = (l: Line) => l.d || '0'.repeat(l.t.length);
+  const O = base.map(l => l.t).join('\n'); const OB = base.map(l => l.b).join('0'); const OD = base.map(dm).join('0');
+  const N = now.map(l => l.t).join('\n'); const NB = now.map(l => l.b).join('0'); const ND = now.map(dm).join('0');
+  const same = (i: number, j: number) => O[i] === N[j] && OB[i] === NB[j] && OD[i] === ND[j];
   let p = 0;
-  while (p < O.length && p < N.length && O[p] === N[p] && OB[p] === NB[p]) p++;
+  while (p < O.length && p < N.length && same(p, p)) p++;
   if (p === O.length && p === N.length) return null;
   let s = 0;
-  while (s < O.length - p && s < N.length - p && O[O.length - 1 - s] === N[N.length - 1 - s] && OB[O.length - 1 - s] === NB[N.length - 1 - s]) s++;
+  while (s < O.length - p && s < N.length - p && same(O.length - 1 - s, N.length - 1 - s)) s++;
   const oldEnd = O.length - s;
   const count = (str: string, upto: number) => { let c = 0; for (let k = 0; k < upto; k++) if (str[k] === '\n') c++; return c; };
   const lineFrom = count(O, p);
@@ -216,17 +223,22 @@ export function diffLines(base: Line[], now: Line[]): Change | null | 'gap' {
   const tail = O.length - b;
   const nt = N.slice(a, N.length - tail);
   const nb = NB.slice(a, NB.length - tail);
+  const nd = ND.slice(a, ND.length - tail);
   const pf = base[lineFrom].para, pt = base[lineTo].para;
   if (pf == null || pt == null || pt - pf !== lineTo - lineFrom) return 'gap';
   for (let k = lineFrom; k <= lineTo; k++) if (base[k].para !== pf + (k - lineFrom)) return 'gap';
   const parts = nt.split('\n');
   let off = 0;
-  const made: Line[] = parts.map((t, k) => { const l = { t, b: nb.slice(off, off + t.length), para: pf + k }; off += t.length + 1; return l; });
+  const made: Line[] = parts.map((t, k) => {
+    const l = { t, b: nb.slice(off, off + t.length), d: nd.slice(off, off + t.length), para: pf + k };
+    off += t.length + 1;
+    return l;
+  });
   const delta = parts.length - (lineTo - lineFrom + 1);
   const next = [
     ...base.slice(0, lineFrom),
     ...made,
     ...base.slice(lineTo + 1).map(l => ({ ...l, para: l.para == null ? l.para : l.para + delta })),
   ];
-  return { para_from: pf, para_to: pt, old: O.slice(a, b), new: nt, old_bmask: OB.slice(a, b), new_bmask: nb, next };
+  return { para_from: pf, para_to: pt, old: O.slice(a, b), new: nt, old_bmask: OB.slice(a, b), new_bmask: nb, new_dmask: nd, next };
 }

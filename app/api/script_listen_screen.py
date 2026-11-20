@@ -70,13 +70,15 @@ class Replace(BaseModel):
     new: str = Field(max_length=200_000)
     old_bmask: str = Field('', max_length=200_000)
     new_bmask: str = Field('', max_length=200_000)
+    mode: str = 'edit'          # edit: into the doc / suggest: the owner's suggestion (kept by the screen)
+    new_dmask: str = Field('', max_length=200_000)   # suggest: letters struck on the screen (still in new)
 
 
 @router.post('/doc/{doc_id}/replace')
 async def replace(doc_id: str, body: Replace, user: TokenData = Depends(get_current_user)):
     try:
         return await run_in_threadpool(S.replace, S.doc_id_from(doc_id), body.para_from, body.para_to, body.old, body.new,
-                                       body.old_bmask, body.new_bmask)
+                                       body.old_bmask, body.new_bmask, body.mode, body.new_dmask)
     except Exception as exc: _fail(exc)
 
 
@@ -88,6 +90,12 @@ class Decide(BaseModel):
 @router.post('/doc/{doc_id}/suggestion')
 async def decide(doc_id: str, body: Decide, user: TokenData = Depends(get_current_user)):
     try: return await run_in_threadpool(S.decide, S.doc_id_from(doc_id), body.id, body.accept)
+    except Exception as exc: _fail(exc)
+
+
+@router.post('/doc/{doc_id}/suggestions/accept-all')
+async def accept_all(doc_id: str, user: TokenData = Depends(get_current_user)):
+    try: return await run_in_threadpool(S.accept_all, S.doc_id_from(doc_id))
     except Exception as exc: _fail(exc)
 
 

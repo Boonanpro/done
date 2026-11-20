@@ -14,21 +14,22 @@
 // - コメント: 文字を選ぶと右の余白（スマホは選んだ所の下）にコメントの印が出る。ドキュメントのコメントとして入るので、ダンが
 //   返事と直しをし、学習にも入る。ダンの直しは提案（緑＝足す、赤の線＝消す）で出て、ここで承認・却下できる。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ExternalLink, Loader2, MessageSquare, MessageSquarePlus, Pause, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
+import { CheckCheck, ExternalLink, Loader2, MessageSquare, MessageSquarePlus, Pause, PenLine, Pencil, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { get as idbGet, set as idbSet } from 'idb-keyval';
 
 import {
-  errorText, listenApi, type ListenDoc, type ListenUnit, type SayUnit, type Suggestion, type Thread,
+  errorText, listenApi, type EditMode, type ListenDoc, type ListenUnit, type SayUnit, type Suggestion, type Thread,
 } from '@/lib/script-listen-api';
 import { cn } from '@/lib/utils';
 
-import { buildHtml, diffLines, extract, getPos, nodeAt, setPos, type Line, type Pos } from './editor-dom';
+import { buildHtml, diffLines, extract, getPos, isOwnSuggestion, leaves, nodeAt, OWN_DEL, OWN_INS, setPos, type Line, type Pos } from './editor-dom';
 import { Composer, SuggestionCard, ThreadCard } from './listen-cards';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
 const RATE_KEY = 'script-listen-rate';
 const VOICE_KEY = 'script-listen-voice';
+const MODE_KEY = 'script-listen-mode';
 const posKey = (doc: string) => `script-listen-pos-${doc}`;
 const cacheKey = (doc: string, voice: string) => `script-listen-doc-${doc}-${voice}`;
 // Every clip ends with 0.16 s of silence (+0.03 s kept after the voice). The next clip starts this many seconds of the
@@ -68,7 +69,7 @@ type Draft = { quote: string; n: number; start: number | null; from?: Pos | null
 // Taps on a phone: one tap types there, two taps in a row play from there.
 const DOUBLE_TAP = 300;
 type Snap = { html: string; pos: Pos | null };
-type AfterBuild = { pos: Pos | null; focus: boolean; play: boolean };
+type AfterBuild = { pos: Pos | null; focus: boolean; play: boolean; line?: string };
 
 function setPitchKeep(el: HTMLAudioElement) {
   const a = el as HTMLAudioElement & { preservesPitch?: boolean; webkitPreservesPitch?: boolean; mozPreservesPitch?: boolean };
@@ -156,6 +157,173 @@ function revealUnit(n: number) {
   el.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
+// ---------------------------------------------------------------- the owner's suggestion mode (11/20)
+// 本人「僕の方で提案モードで何か書き込んだりするということができないので、それもできるようにしたい」. Typing in suggestion
+// mode puts the new words in the owner's colour and strikes the words taken out instead of removing them, like Docs. The
+// change goes to the server as it would in edit mode (struck letters marked), which keeps it as the owner's suggestion.
+
+const ownSpan = (kind: 'ins' | 'del') => {
+  const sp = document.createElement('span');
+  sp.setAttribute(kind === 'ins' ? 'data-oi' : 'data-od', '');
+  sp.className = kind === 'ins' ? OWN_INS : OWN_DEL;
+  return sp;
+};
+/** The owner's own added words (new here, or already kept as their suggestion): taking them out removes them. */
+const ownAdded = (el: Element | null) => {
+  const h = el?.closest('[data-oi],[data-sug][data-kind="ins"]') as HTMLElement | null;
+  return !!h && (h.hasAttribute('data-oi') || isOwnSuggestion(h.dataset.sug));
+};
+const struckHost = (el: Element | null) => el?.closest('[data-od],[data-sug][data-kind="del"]') as HTMLElement | null;
+const leafOf = (root: HTMLElement, n: Node) => leaves(root).find(l => l === n || l.contains(n)) || null;
+
+function textPieces(range: Range) {
+  const out: { node: Text; s: number; e: number }[] = [];
+  const top = range.commonAncestorContainer;
+  if (top.nodeType === 3) {
+    out.push({ node: top as Text, s: range.startOffset, e: range.endOffset });
+    return out;
+  }
+  const w = document.createTreeWalker(top, NodeFilter.SHOW_TEXT);
+  for (let t = w.nextNode() as Text | null; t; t = w.nextNode() as Text | null) {
+    if (!range.intersectsNode(t)) continue;
+    const s = t === range.startContainer ? range.startOffset : 0;
+    const e = t === range.endContainer ? range.endOffset : t.data.length;
+    if (e > s) out.push({ node: t, s, e });
+  }
+  return out;
+}
+
+/** Strike ``range`` the suggestion-mode way. Returns how many letters stayed (struck) or 'para' when it crosses the
+ * end of a paragraph (suggestion mode keeps paragraphs as they are). */
+function strike(root: HTMLElement, range: Range): number | 'para' {
+  const a = leafOf(root, range.startContainer), b = leafOf(root, range.endContainer);
+  if (!a || a !== b) return 'para';
+  let kept = 0;
+  for (const { node, s, e } of textPieces(range).reverse()) {
+    const host = node.parentElement;
+    if (ownAdded(host)) { node.deleteData(s, e - s); continue; }
+    if (struckHost(host)) { kept += e - s; continue; }
+    const mid = node.splitText(s);
+    mid.splitText(e - s);
+    const sp = ownSpan('del');
+    mid.replaceWith(sp);
+    sp.appendChild(mid);
+    kept += e - s;
+  }
+  return kept;
+}
+
+/** Put ``text`` in at the caret as the owner's added words. */
+function addOwn(root: HTMLElement, text: string) {
+  const sel = window.getSelection();
+  if (!sel?.rangeCount) return;
+  const r = sel.getRangeAt(0);
+  const at = r.startContainer;
+  const el = at.nodeType === 1 ? (at as Element) : at.parentElement;
+  let node: Text;
+  if (at.nodeType === 3 && ownAdded(el)) {
+    (at as Text).insertData(r.startOffset, text);
+    node = at as Text;
+    const c = document.createRange(); c.setStart(node, r.startOffset + text.length); c.collapse(true);
+    sel.removeAllRanges(); sel.addRange(c);
+    return;
+  }
+  const sp = ownSpan('ins');
+  node = document.createTextNode(text);
+  sp.appendChild(node);
+  const host = struckHost(el);
+  if (host && root.contains(host)) {
+    // Not inside struck words: next to them (before when the caret is at their start).
+    const atStart = at.nodeType === 3 && r.startOffset === 0 && host.firstChild === at;
+    if (atStart) host.before(sp); else host.after(sp);
+  } else {
+    r.insertNode(sp);
+  }
+  const c = document.createRange(); c.setStart(node, text.length); c.collapse(true);
+  sel.removeAllRanges(); sel.addRange(c);
+}
+
+/** The caret in a paragraph that changed from ``was`` to ``now`` (e.g. a suggestion's struck words went): it keeps to
+ * the letters after it when the change was before it. */
+function movedCaret(pos: Pos, was: string, now: string): Pos {
+  if (was === now) return pos;
+  let p = 0;
+  while (p < was.length && p < now.length && was[p] === now[p]) p++;
+  if (pos.off <= p) return pos;
+  let s = 0;
+  while (s < was.length - p && s < now.length - p && was[was.length - 1 - s] === now[now.length - 1 - s]) s++;
+  if (pos.off >= was.length - s) return { line: pos.line, off: Math.max(0, now.length - (was.length - pos.off)) };
+  return { line: pos.line, off: Math.min(pos.off, now.length - s) };
+}
+
+/** The words ``quote`` inside the elements of a unit, as a range (spaces ignored); the whole unit when not found. */
+function quoteRange(root: HTMLElement, n: number, quote: string): Range | null {
+  const els = Array.from(root.querySelectorAll<HTMLElement>(`[data-n="${n}"]`));
+  if (!els.length) return null;
+  const chars: { node: Text; off: number }[] = [];
+  let flat = '';
+  for (const el of els) {
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let t = w.nextNode() as Text | null; t; t = w.nextNode() as Text | null) {
+      for (let k = 0; k < t.data.length; k++) if (!/\s/.test(t.data[k])) { chars.push({ node: t, off: k }); flat += t.data[k]; }
+    }
+  }
+  const r = document.createRange();
+  const q = quote.replace(/\s+/g, '');
+  const i = q ? flat.indexOf(q) : -1;
+  if (i >= 0 && q.length) {
+    r.setStart(chars[i].node, chars[i].off);
+    const last = chars[i + q.length - 1];
+    r.setEnd(last.node, last.off + 1);
+  } else {
+    r.setStartBefore(els[0]);
+    r.setEndAfter(els[els.length - 1]);
+  }
+  return r;
+}
+
+const FLASH_MS = 2400;
+/** A soft yellow glow over words that fades away (11/20 本人「一瞬黄色くぼんやりと目立たせて、数秒したら消える」). */
+function flashRange(r: Range | null) {
+  const hl = (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
+  const H = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+  if (!r || !hl || !H) return;
+  let style = document.getElementById('cm-flash-style') as HTMLStyleElement | null;
+  if (!style) { style = document.createElement('style'); style.id = 'cm-flash-style'; document.head.appendChild(style); }
+  hl.set('cm-flash', new H(r));
+  const t0 = performance.now();
+  const me = Symbol('flash');
+  (flashRange as unknown as { cur?: symbol }).cur = me;
+  const step = (now: number) => {
+    if ((flashRange as unknown as { cur?: symbol }).cur !== me) return;
+    const k = Math.min(1, (now - t0) / FLASH_MS);
+    // hold, then fade
+    const a = k < 0.35 ? 0.85 : 0.85 * (1 - (k - 0.35) / 0.65);
+    style!.textContent = `::highlight(cm-flash){background-color:rgb(253 224 71 / ${a.toFixed(3)})}`;
+    if (k < 1) requestAnimationFrame(step); else { hl.delete('cm-flash'); style!.textContent = ''; }
+  };
+  requestAnimationFrame(step);
+}
+
+/** The same glow around a card. */
+function flashCard(id: string) {
+  const el = document.querySelector<HTMLElement>(`[data-card="${CSS.escape(id)}"]`);
+  const card = (el?.firstElementChild as HTMLElement | null) || el;
+  if (!el || !card) return;
+  const box = el.closest('[data-scroller]') as HTMLElement | null;
+  if (box) {
+    const r = el.getBoundingClientRect(), b = box.getBoundingClientRect();
+    if (r.top < b.top + 24 || r.bottom > b.bottom - 24) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  } else {
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+  card.animate?.([
+    { boxShadow: '0 0 0 4px rgb(253 224 71 / 0.9), 0 0 22px 6px rgb(253 224 71 / 0.65)', backgroundColor: 'rgb(254 249 195)' },
+    { boxShadow: '0 0 0 4px rgb(253 224 71 / 0.9), 0 0 22px 6px rgb(253 224 71 / 0.65)', backgroundColor: 'rgb(254 249 195)', offset: 0.35 },
+    { boxShadow: '0 0 0 0 rgb(253 224 71 / 0), 0 0 0 0 rgb(253 224 71 / 0)', backgroundColor: 'rgb(255 255 255)' },
+  ], { duration: FLASH_MS, easing: 'ease-out' });
+}
+
 export function ListenScreen({ docId }: { docId: string }) {
   const [doc, setDoc] = useState<ListenDoc | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -180,6 +348,11 @@ export function ListenScreen({ docId }: { docId: string }) {
   const [wide, setWide] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches);
   const [touch, setTouch] = useState(() => typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches);
   const [build, setBuild] = useState(0);        // bumps to put the doc's text into the surface again
+  // Edit (into the doc) or suggest (the owner's suggestion), like the mode switch in Google Docs.
+  const [mode, setMode] = useState<EditMode>(() => (typeof window !== 'undefined' && localStorage.getItem(MODE_KEY) === 'suggest' ? 'suggest' : 'edit'));
+  const modeRef = useRef<EditMode>(mode);
+  const compStart = useRef<Pos | null>(null);
+  const [acceptingAll, setAcceptingAll] = useState(false);
 
   const says = useMemo(() => (doc?.units.filter(u => u.kind === 'say') as SayUnit[]) || [], [doc]);
   const sayIndex = useMemo(() => new Map(says.map((u, i) => [u.n, i])), [says]);
@@ -448,6 +621,8 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   useEffect(() => () => { token.current += 1; clearTick(); active_.current?.pause(); }, []);
 
+  useEffect(() => { modeRef.current = mode; try { localStorage.setItem(MODE_KEY, mode); } catch { /* ignore */ } }, [mode]);
+
   // ---------------------------------------------------------------- comments and suggestions
   const units = useMemo(() => doc?.units || [], [doc]);
   const unitByN = useMemo(() => new Map(units.map(u => [u.n, u])), [units]);
@@ -554,6 +729,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     paintDraft();
     const after = afterBuild.current;
     afterBuild.current = null;
+    if (after?.pos && after.line != null) after.pos = movedCaret(after.pos, after.line, leaves(root)[after.pos.line]?.textContent ?? '');
     if (after?.pos) {
       const i = sayAtPos(after.pos);
       if (i >= 0) { curRef.current = i; setCur(i); }
@@ -579,9 +755,17 @@ export function ListenScreen({ docId }: { docId: string }) {
     setSaving(true);
     try {
       const { next, ...body } = change;
-      const r = await listenApi.replace(docId, body);
-      if (r.revision) ownRevisions.current.add(r.revision);
+      const r = await listenApi.replace(docId, { ...body, mode: modeRef.current });
+      // Put onto someone else's change: the screen is not the doc any more, so it is read again like their change.
+      if (r.revision && !r.rebased) ownRevisions.current.add(r.revision);
       baseRef.current = next;
+      const settledNow = r.settled && Object.keys(r.settled).length ? r.settled : null;
+      if (r.reload || r.rebased || settledNow) {
+        // Read the doc again now (keeping the caret), unless more is being typed: then the next pause does it.
+        window.setTimeout(() => {
+          if (saveTimer.current == null && !composingRef.current) void settleRef.current({ focus: document.activeElement === editorRef.current, play: false });
+        }, 0);
+      }
     } catch (e) {
       toast.error(errorText(e));
       // The doc did not take it: show the doc as it is (the undo steps no longer match it).
@@ -632,7 +816,10 @@ export function ListenScreen({ docId }: { docId: string }) {
       const pos = root ? getPos(root) : null;
       dirtyRef.current = false;
       typedRef.current = false;
-      afterBuild.current = { pos, focus: opts.focus && !!pos, play: opts.play };
+      // The paragraph's text as the screen shows it now: the doc may read differently (a suggestion settled), and the
+      // caret is moved by the difference.
+      const line = root && pos ? leaves(root)[pos.line]?.textContent ?? undefined : undefined;
+      afterBuild.current = { pos, focus: opts.focus && !!pos, play: opts.play, line };
       const here = saysRef.current[curRef.current];
       await load(here ? { start: here.start, text: here.text } : undefined);
       setBuild(b => b + 1);
@@ -721,6 +908,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     };
   }, [unitByN, wide]);
 
+  const suggestInputRef = useRef<(e: InputEvent) => void>(() => {});
   // Native listeners the surface needs (React has no onBeforeInput with inputType).
   useEffect(() => {
     const root = editorRef.current;
@@ -732,10 +920,78 @@ export function ListenScreen({ docId }: { docId: string }) {
       if (e.inputType.startsWith('format') && e.inputType !== 'formatBold') { e.preventDefault(); return; }
       if (composingRef.current || e.isComposing) return;
       remember(e.inputType.startsWith('delete') ? 'delete' : 'insert');
+      if (modeRef.current === 'suggest') suggestInputRef.current(e);
     };
     root.addEventListener('beforeinput', onBefore);
     return () => root.removeEventListener('beforeinput', onBefore);
   }, [undo, redo, remember, hasDoc]);
+
+  /** Suggestion mode: keys that would remove words strike them, typed words go in the owner's colour. */
+  function suggestInput(e: InputEvent) {
+    const root = editorRef.current;
+    const sel = window.getSelection();
+    if (!root || !sel?.rangeCount) return;
+    const t = e.inputType;
+    const refuse = () => { e.preventDefault(); toast('提案モードでは段落を分けたり、つなげたりできません。上の「編集」に切り替えてください。'); };
+    if (t === 'insertParagraph' || t === 'insertLineBreak') { refuse(); return; }
+    const strikeSel = (forward: boolean) => {
+      const r = sel.getRangeAt(0);
+      const start = getPos(root, r.startContainer, r.startOffset);
+      const kept = strike(root, r);
+      if (kept === 'para') return false;
+      if (start) setPos(root, forward ? { line: start.line, off: start.off + kept } : start);
+      return true;
+    };
+    if (t.startsWith('delete')) {
+      e.preventDefault();
+      const forward = /Forward$/.test(t);
+      if (sel.isCollapsed) {
+        const unit = t.includes('Word') ? 'word' : t.includes('Line') ? 'lineboundary' : 'character';
+        (sel as Selection & { modify?: (a: string, d: string, g: string) => void }).modify?.('extend', forward ? 'forward' : 'backward', unit);
+        if (sel.isCollapsed) return;
+      }
+      if (!strikeSel(forward || t === 'deleteByCut')) { refuse(); return; }
+      changed();
+      return;
+    }
+    if (t === 'insertText' || t === 'insertReplacementText') {
+      const text = e.data ?? e.dataTransfer?.getData('text/plain') ?? '';
+      if (!text) return;
+      e.preventDefault();
+      if (!sel.isCollapsed && !strikeSel(true)) { refuse(); return; }
+      addOwn(root, text);
+      changed();
+    }
+  }
+
+  /** Suggestion mode, after Japanese input: the words just composed go in the owner's colour (the input itself cannot
+   * be taken over while it is being composed). */
+  function ownComposed() {
+    const root = editorRef.current, sel = window.getSelection();
+    const start = compStart.current;
+    compStart.current = null;
+    if (!root || !sel?.rangeCount || !start) return;
+    const end = getPos(root);
+    if (!end || end.line !== start.line || end.off <= start.off) return;
+    const a = nodeAt(root, start), b = nodeAt(root, end);
+    if (!a || !b) return;
+    const inEl = b.node.nodeType === 1 ? (b.node as Element) : b.node.parentElement;
+    if (ownAdded(inEl)) return;                      // typed inside the owner's own added words: already theirs
+    const host = struckHost(inEl);
+    const r = document.createRange();
+    try { r.setStart(a.node, a.off); r.setEnd(b.node, b.off); } catch { return; }
+    const sp = ownSpan('ins');
+    sp.appendChild(r.extractContents());
+    if (host && root.contains(host)) host.after(sp); else r.insertNode(sp);
+    sp.normalize();
+    const last = sp.lastChild;
+    if (last && last.nodeType === 3) {
+      const c = document.createRange(); c.setStart(last, (last as Text).data.length); c.collapse(true);
+      sel.removeAllRanges(); sel.addRange(c);
+    }
+  }
+
+  useEffect(() => { suggestInputRef.current = suggestInput; });
 
   const onEditorKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const mod = e.ctrlKey || e.metaKey;
@@ -760,6 +1016,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
     if (e.key === 'Enter' && e.shiftKey) {
       e.preventDefault();
+      if (modeRef.current === 'suggest') { toast('提案モードでは段落を分けられません。上の「編集」に切り替えてください。'); return; }
       remember('insert', true);
       document.execCommand('insertParagraph');
       return;
@@ -802,17 +1059,24 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   const onEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const t = e.target as HTMLElement;
-    const sug = t.closest('[data-sug]') as HTMLElement | null;
-    if (sug?.dataset.sug) { pickSuggestion(sug.dataset.sug); return; }
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed && e.detail < 2) return;     // selecting words
+    // Words of a suggestion: the caret goes there (they can be typed in) and its card comes forward, glowing a
+    // moment (11/20 本人「文章をクリックしてもカードの方に遷移するように」).
+    const sug = (t.closest('[data-sug]') as HTMLElement | null)?.dataset.sug;
+    if (sug && suggestions.some(x => x.id === sug)) {
+      if (!touch) { if (e.detail < 2) showCard(sug); return; }
+      if (!armed) { pickSuggestion(sug); flashLater(sug); return; }
+      setActive(sug);
+      return;
+    }
     const n = unitAtPoint(e.clientX, e.clientY, t);
     if (n == null) return;
     if (!touch) {
       // A click only puts the caret there, like in a document. The comment on those words comes forward.
       if (e.detail >= 2) return;                        // the double click plays (onDoubleClick)
       const list = threadsAt.get(n);
-      if (list?.length) setActive(talkOf.get(list[0].id) || list[0].id);
+      if (list?.length) showCard(talkOf.get(list[0].id) || list[0].id);
       return;
     }
     // Phone: two taps in a row play from there; one tap types there (or opens the comment on those words).
@@ -832,7 +1096,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     tapTimer.current = window.setTimeout(() => {
       tapTimer.current = null;
       const list = threadsAt.get(n);
-      if (list?.length) { pickThreads(list); return; }
+      if (list?.length) { pickThreads(list); flashLater(talkOf.get(list[0].id) || list[0].id); return; }
       if (playingRef.current) stop();
       tapAt.current = { x, y };
       setArmed(true);
@@ -842,7 +1106,6 @@ export function ListenScreen({ docId }: { docId: string }) {
   const onEditorDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (touch) return;                                  // phones count their own taps (onEditorClick)
     const t = e.target as HTMLElement;
-    if (t.closest('[data-sug]')) return;
     const n = unitAtPoint(e.clientX, e.clientY, t);
     if (n == null) return;
     playAt(n, e.clientX, e.clientY);
@@ -962,10 +1225,59 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
   }, [docId, load, settle]);
 
+  /** Every suggestion at once (11/20 本人「全部眺めてまとめて承認できる選択肢があった方が楽」). */
+  const acceptAll = useCallback(async () => {
+    setAcceptingAll(true);
+    try {
+      await settle({ focus: false, play: false });
+      const r = await listenApi.acceptAll(docId);
+      undoRef.current = []; redoRef.current = [];
+      const here = saysRef.current[curRef.current];
+      await load(here ? { start: here.start, text: here.text } : undefined);
+      setSheet(null);
+      setActive(null);
+      toast(r.failed ? `${r.accepted}件を承認しました。${r.failed}件は別の提案と重なっていたので残しました。` : `${r.accepted}件の提案をすべて承認しました`);
+    } catch (e) {
+      toast.error(errorText(e));
+      await load();
+    } finally {
+      setAcceptingAll(false);
+    }
+  }, [docId, load, settle]);
+
+  const switchMode = useCallback(async (m: EditMode) => {
+    if (m === modeRef.current) return;
+    // What was typed so far goes in the way it was typed.
+    await flush();
+    modeRef.current = m;
+    setMode(m);
+  }, [flush]);
+
   const focusUnit = useCallback((n: number) => {
     lastUserScroll.current = Date.now();
     revealUnit(n);
   }, []);
+  /** From a card to its words: they come into view and glow a moment (only when the card was not already the one). */
+  const goText = (id: string, n: number, quote?: string) => {
+    const again = active === id;
+    setActive(id);
+    focusUnit(n);
+    if (again) return;
+    const root = editorRef.current;
+    if (!root) return;
+    let r: Range | null = null;
+    const spans = root.querySelectorAll(`[data-sug="${CSS.escape(id)}"]`);
+    if (spans.length) { r = document.createRange(); r.setStartBefore(spans[0]); r.setEndAfter(spans[spans.length - 1]); }
+    else r = quoteRange(root, n, quote || '');
+    flashRange(r);
+  };
+  /** From words to their card (PC: the card beside the text). */
+  const showCard = (id: string) => {
+    if (active === id) return;
+    setActive(id);
+    flashLater(id);
+  };
+  const flashLater = (id: string) => window.setTimeout(() => flashCard(id), 60);
   function pickSuggestion(id: string) {
     setActive(id);
     if (!wide) setSheet({ kind: 'suggestion', id });
@@ -1030,19 +1342,36 @@ export function ListenScreen({ docId }: { docId: string }) {
         <div className="mx-auto flex max-w-6xl items-center gap-2">
           <Volume2 className="h-4 w-4 shrink-0 text-amber-700" />
           <div className="min-w-0 flex-1 truncate text-[14px] font-semibold">{doc.title}</div>
+          <div role="radiogroup" aria-label="書き方" className="flex shrink-0 overflow-hidden rounded-md border border-stone-300 text-[12px]">
+            {([['edit', '編集', Pencil], ['suggest', '提案', PenLine]] as const).map(([m, label, Icon]) => (
+              <button
+                key={m}
+                type="button"
+                role="radio"
+                aria-checked={mode === m}
+                title={m === 'edit' ? '打った直しがそのままドキュメントに入ります' : '打った直しが自分の提案になります（消した所は線で残ります）'}
+                onClick={() => void switchMode(m)}
+                className={cn('flex items-center gap-1 px-1.5 py-1 sm:px-2', mode === m
+                  ? (m === 'suggest' ? 'bg-violet-600 text-white' : 'bg-stone-800 text-white')
+                  : 'bg-white text-stone-700')}
+              >
+                <Icon className="hidden h-3.5 w-3.5 sm:block" /><span>{label}</span>
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             onClick={() => (wide ? setShowResolved(v => !v) : setSheet({ kind: 'all' }))}
             className="flex shrink-0 items-center gap-1 rounded-md border border-stone-300 px-2 py-1 text-[12px] text-stone-700"
           >
             <MessageSquare className="h-3.5 w-3.5" />
-            {wide ? (showResolved ? '解決済みを隠す' : `コメント ${openCount}`) : `コメント ${openCount}`}
+            {wide ? (showResolved ? '解決済みを隠す' : `コメント ${openCount}`) : openCount}
           </button>
           <select
             aria-label="声"
             value={voice}
             onChange={e => changeVoice(e.target.value)}
-            className="max-w-[8rem] rounded-md border border-stone-300 bg-white px-1.5 py-1 text-[12px]"
+            className="max-w-[4.5rem] shrink rounded-md border border-stone-300 bg-white px-1 py-1 text-[12px] sm:max-w-[8rem] sm:px-1.5"
           >
             {doc.voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
           </select>
@@ -1079,13 +1408,36 @@ export function ListenScreen({ docId }: { docId: string }) {
               onKeyDown={onEditorKey}
               onClick={onEditorClick}
               onDoubleClick={onEditorDoubleClick}
-              onCompositionStart={() => { composingRef.current = true; remember('compose'); }}
-              onCompositionEnd={() => { composingRef.current = false; changed(); }}
+              onCompositionStart={() => {
+                composingRef.current = true;
+                remember('compose');
+                const root = editorRef.current, sel = window.getSelection();
+                compStart.current = root && sel?.rangeCount ? getPos(root, sel.getRangeAt(0).startContainer, sel.getRangeAt(0).startOffset) : null;
+              }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+                if (modeRef.current === 'suggest') ownComposed();
+                changed();
+              }}
               onPaste={e => {
                 e.preventDefault();
                 const text = e.clipboardData.getData('text/plain');
                 if (!text) return;
                 remember('paste', true);
+                if (modeRef.current === 'suggest') {
+                  const root = editorRef.current, sel = window.getSelection();
+                  if (!root || !sel?.rangeCount) return;
+                  if (!sel.isCollapsed) {
+                    const r = sel.getRangeAt(0);
+                    const start = getPos(root, r.startContainer, r.startOffset);
+                    const kept = strike(root, r);
+                    if (kept === 'para') { toast('提案モードでは段落をまたいで置き換えられません。'); return; }
+                    if (start) setPos(root, { line: start.line, off: start.off + kept });
+                  }
+                  addOwn(root, text.replace(/\r\n?|\n/g, ' '));
+                  changed();
+                  return;
+                }
                 document.execCommand('insertText', false, text.replace(/\r\n?/g, '\n'));
               }}
               onBlur={() => {
@@ -1112,7 +1464,7 @@ export function ListenScreen({ docId }: { docId: string }) {
             {(
               <div className="mt-8 text-center text-[12px] text-stone-400">
                 {touch ? '文を2回続けて押すと、そこから聞けます（もう一度2回押すと止まります）。1回押すとそこで直せます。' : '文をダブルクリックすると、そこから聞けます（鳴っている文をもう一度ダブルクリックすると止まります）。Google ドキュメントと同じように直せて、打つのを止めると自動でドキュメントに入ります。'}
-                文字を選ぶとコメントできます。提案にもコメントできます。
+                文字を選ぶとコメントできます。提案にもコメントでき、提案の文字もそのまま直せます。上の「提案」にすると、打った直しが自分の提案になります。
               </div>
             )}
           </div>
@@ -1127,15 +1479,15 @@ export function ListenScreen({ docId }: { docId: string }) {
               )}
               {visibleThreads.filter(t => place.has(t.id) && !talkOf.has(t.id)).map(t => (
                 <div key={t.id} ref={el => { if (el) cardRefs.current.set(t.id, el); else cardRefs.current.delete(t.id); }}
-                  data-anchor={place.get(t.id)} className={cn('absolute inset-x-0', active === t.id && 'z-10')}>
-                  <ThreadCard thread={t} active={active === t.id} onFocus={() => { setActive(t.id); focusUnit(place.get(t.id)!); }}
+                  data-card={t.id} data-anchor={place.get(t.id)} className={cn('absolute inset-x-0', active === t.id && 'z-10')}>
+                  <ThreadCard thread={t} active={active === t.id} onFocus={() => goText(t.id, place.get(t.id)!, t.quote)}
                     onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} />
                 </div>
               ))}
               {suggestions.map(s => (
                 <div key={s.id} ref={el => { if (el) cardRefs.current.set(s.id, el); else cardRefs.current.delete(s.id); }}
-                  data-anchor={s.n} className={cn('absolute inset-x-0', active === s.id && 'z-10')}>
-                  <SuggestionCard s={s} active={active === s.id} onFocus={() => { setActive(s.id); focusUnit(s.n); }} onDecide={a => decide(s, a)}
+                  data-card={s.id} data-anchor={s.n} className={cn('absolute inset-x-0', active === s.id && 'z-10')}>
+                  <SuggestionCard s={s} active={active === s.id} onFocus={() => goText(s.id, s.n)} onDecide={a => decide(s, a)}
                     threads={sugTalk.get(s.id)?.threads} earlier={sugTalk.get(s.id)?.earlier} canComment={canComment} onComment={commentOnSuggestion(s)} />
                 </div>
               ))}
@@ -1171,9 +1523,9 @@ export function ListenScreen({ docId }: { docId: string }) {
             </button>
           </div>
           {sheet.kind === 'compose' && draft && <Composer quote={draft.quote} onSend={sendComment} onCancel={() => { setDraft(null); setSheet(null); }} />}
-          {sheetSuggestion && <SuggestionCard s={sheetSuggestion} active onDecide={a => decide(sheetSuggestion, a)}
+          {sheetSuggestion && <div data-card={sheetSuggestion.id}><SuggestionCard s={sheetSuggestion} active onDecide={a => decide(sheetSuggestion, a)}
             threads={sugTalk.get(sheetSuggestion.id)?.threads} earlier={sugTalk.get(sheetSuggestion.id)?.earlier}
-            canComment={canComment} onComment={commentOnSuggestion(sheetSuggestion)} />}
+            canComment={canComment} onComment={commentOnSuggestion(sheetSuggestion)} /></div>}
           {sheet.kind === 'all' && (
             <label className="mb-2 flex items-center gap-1.5 text-[12px] text-stone-600">
               <input type="checkbox" checked={showResolved} onChange={e => setShowResolved(e.target.checked)} />解決済みも見る
@@ -1181,15 +1533,15 @@ export function ListenScreen({ docId }: { docId: string }) {
           )}
           {sheet.kind === 'all' && suggestions.length > 0 && (
             <div className="mb-3 space-y-2">
-              {suggestions.map(s => <SuggestionCard key={s.id} s={s} onFocus={() => { focusUnit(s.n); }} onDecide={a => decide(s, a)}
+              {suggestions.map(s => <SuggestionCard key={s.id} s={s} onFocus={() => { setSheet(null); goText(s.id, s.n); }} onDecide={a => decide(s, a)}
                 threads={sugTalk.get(s.id)?.threads} earlier={sugTalk.get(s.id)?.earlier} canComment={canComment} onComment={commentOnSuggestion(s)} />)}
             </div>
           )}
           <div className="space-y-2">
             {sheetThreads.map(t => (
-              <ThreadCard key={t.id} thread={t} active={active === t.id || sheet.kind === 'threads'}
-                onFocus={() => { setActive(t.id); const n = place.get(t.id); if (n != null) focusUnit(n); }}
-                onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} />
+              <div key={t.id} data-card={t.id}><ThreadCard thread={t} active={active === t.id || sheet.kind === 'threads'}
+                onFocus={() => { const n = place.get(t.id); if (n != null) { if (sheet.kind === 'all') setSheet(null); goText(t.id, n, t.quote); } else setActive(t.id); }}
+                onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} /></div>
             ))}
             {sheet.kind === 'all' && !sheetThreads.length && !suggestions.length && <div className="py-4 text-center text-[13px] text-stone-500">コメントはありません</div>}
           </div>
@@ -1200,6 +1552,17 @@ export function ListenScreen({ docId }: { docId: string }) {
         <div className="mx-auto max-w-3xl">
           <div className="flex items-center justify-between gap-2 text-[12px] text-stone-500">
             <span>{says.length ? `${cur + 1} / ${says.length}文` : '読む文がありません'}</span>
+            {suggestions.length >= 2 && (
+              <button
+                type="button"
+                disabled={acceptingAll}
+                onClick={() => void acceptAll()}
+                className="flex items-center gap-1 rounded-full bg-emerald-600 px-3 py-1 text-[12px] font-semibold text-white shadow-sm active:bg-emerald-700 disabled:opacity-50"
+              >
+                {acceptingAll ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5" />}
+                提案をすべて承認（{suggestions.length}）
+              </button>
+            )}
             <span className="flex items-center gap-1">
               {saving && <><Loader2 className="h-3 w-3 animate-spin" />ドキュメントに入れています</>}
               {!saving && waiting && <><Loader2 className="h-3 w-3 animate-spin" />声を作っています</>}

@@ -290,11 +290,22 @@ def evidence(job_id, full=False):
             'snapshots':{sid:{k:r[k] for k in ('id','created','origin','raw_path')} for sid,r in snaps.items()},
             'pending_suggestions':suggestions(job['file_id'],last),
             'owner_actions':owner_actions(job['file_id'],first['created']-60,last['created']+60),
+            'owner_screen_suggestions':owner_screen_suggestions(job['file_id']),
             'note':'snapshots は場所だけ。全文は raw_path のDOCX、またはこのコマンドに --full を付けて取得する。'
                    'owner_actions は本人が「台本を聞く画面」で自分の手でした直し・提案の承認と却下で、作者は確実に本人。'}
 
 
 LISTEN_LOG = Path.home()/'.dan'/'script-listen'/'owner_edits.jsonl'
+LISTEN_SUGGESTIONS = Path.home()/'.dan'/'script-listen'/'owner_suggestions.json'
+
+
+def owner_screen_suggestions(file_id, path=None):
+    """The owner's suggestions written in suggestion mode on the listening screen that still stand. The Docs API
+    cannot write suggestions, so they are not in the doc (nor in its DOCX): before → after with the words around."""
+    try: rows = (json.loads((path or LISTEN_SUGGESTIONS).read_text()) or {}).get(file_id) or []
+    except Exception: return []
+    return [{'at': r.get('at'), 'before': (r.get('pre') or '') + (r.get('del') or '') + (r.get('post') or ''),
+             'after': (r.get('pre') or '') + (r.get('ins') or '') + (r.get('post') or '')} for r in rows]
 
 
 def owner_actions(file_id, since, until, path=None):
@@ -319,7 +330,16 @@ def owner_actions(file_id, since, until, path=None):
                 last['after'] = row.get('after'); last['at'] = row['at']; continue
             out.append({'action': 'edit', 'at': row['at'], 'before': row.get('before'), 'after': row.get('after')})
         elif action in ('accept', 'reject'):
-            out.append({'action': action, 'at': row['at'], 'added': row.get('added'), 'removed': row.get('removed')})
+            out.append({'action': action, 'at': row['at'], 'added': row.get('added'), 'removed': row.get('removed'),
+                        **({'by_edit': True} if row.get('by_edit') else {})})
+        elif action == 'suggest':
+            # The owner's own suggestion on the screen (suggestion mode): the latest wording of it, while it stands.
+            out = [a for a in out if a.get('suggestion') != row.get('suggestion')]
+            out.append({'action': 'suggest', 'at': row['at'], 'suggestion': row.get('suggestion'),
+                        'before': row.get('before'), 'after': row.get('after')})
+        elif action == 'settle':
+            # Taken (that is an edit, logged as one) or withdrawn: no longer a suggestion.
+            out = [a for a in out if not (a['action'] == 'suggest' and a.get('suggestion') == row.get('suggestion'))]
     # Typing that was undone (Ctrl+Z on the screen) ends where it began: nothing the owner changed.
     return [a for a in out if not (a['action'] == 'edit' and a['before'] == a['after'])]
 
