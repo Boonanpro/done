@@ -667,14 +667,35 @@ def anchor_start(a):
     return a.get('start') if isinstance(a, dict) else a
 
 
+def _suggestion_words(sug):
+    ins, dele = (sug.get('ins') or '').strip(), (sug.get('del') or '').strip()
+    if ins and dele: return f"置き換え「{dele}」→「{ins}」"
+    if ins: return f"足す「{ins}」"
+    return f"消す「{dele}」"
+
+
 def anchor_note(comment_ids):
-    """For Dan's answer: the sentence each comment made on the listening screen was written on."""
+    """For Dan's answer: the sentence each comment made on the listening screen was written on, and the suggestion
+    it is about when the owner wrote it on a suggestion's card (11/20 本人「提案に対して『それおかしいから、もう少し
+    こういう風に直して』と言いたい」)."""
     anchors = _anchors()
-    lines = [f"{cid}: 文「{anchors[cid]['sentence']}」" for cid in comment_ids
-             if isinstance(anchors.get(cid), dict) and anchors[cid].get('sentence')]
-    if not lines: return ''
-    return ('台本を聞く画面から書かれたコメントの場所（Googleでは本文の位置が残らないので、ここで分かる）。'
-            'quote はその文の中で本人が選んだ言葉:\n' + '\n'.join(lines))
+    lines, about = [], []
+    for cid in comment_ids:
+        a = anchors.get(cid)
+        if not isinstance(a, dict): continue
+        if a.get('sentence'): lines.append(f"{cid}: 文「{a['sentence']}」")
+        if isinstance(a.get('suggestion'), dict): about.append(f"{cid}: 提案（{_suggestion_words(a['suggestion'])}）")
+    out = []
+    if lines:
+        out.append('台本を聞く画面から書かれたコメントの場所（Googleでは本文の位置が残らないので、ここで分かる）。'
+                   'quote はその文の中で本人が選んだ言葉:\n' + '\n'.join(lines))
+    if about:
+        out.append('次のコメントは、本人が本文の提案（ドキュメントの提案モードの直し）の札に書いたもの。コメントはその提案への'
+                   '意見や直しの頼み:\n' + '\n'.join(about) + '\n'
+                   'その提案を直す時は、ダンが出した提案なら、ブラウザでその提案を却下してから、直した提案を同じ所に入れ直す'
+                   '（古い提案と新しい提案を両方残さない）。返事は同じコメントのスレッドに書く。ダン以外が出した提案は承認も却下もせず、'
+                   '返事で本人に確かめる。')
+    return '\n'.join(out)
 
 
 def _who(item, private):
@@ -712,8 +733,11 @@ def comments(doc_id):
             msgs.append({'id': item['id'], 'who': _who(item, private), 'name': (item.get('author') or {}).get('displayName'),
                          'text': text, 'at': item.get('createdTime')})
         quote = html.unescape((t.get('quotedFileContent') or {}).get('value') or '')
+        a = anchors.get(t['id'])
+        sug = a.get('suggestion') if isinstance(a, dict) and isinstance(a.get('suggestion'), dict) else None
         out.append({'id': t['id'], 'quote': quote, 'resolved': bool(t.get('resolved')), 'messages': msgs,
-                    'at': t.get('createdTime'), 'working': busy.get(t['id']), 'start': anchor_start(anchors.get(t['id']))})
+                    'at': t.get('createdTime'), 'working': busy.get(t['id']), 'start': anchor_start(a),
+                    'suggestion': sug.get('id') if sug else None})
     out.sort(key=lambda x: x['at'] or '')
     return {'threads': out, 'can_comment': private}
 
@@ -726,7 +750,21 @@ def _owner_words(text):
     return text
 
 
-def add_comment(doc_id, quote, text, start=None, sentence=''):
+def _clean_suggestion(sug):
+    if not isinstance(sug, dict) or not sug.get('id'): return None
+    return {'id': str(sug['id'])[:200], 'ins': str(sug.get('ins') or '')[:2000], 'del': str(sug.get('del') or '')[:2000]}
+
+
+def _remember_anchor(cid, **fields):
+    STATE.mkdir(parents=True, exist_ok=True)
+    anchors = _anchors()
+    a = anchors.get(cid) if isinstance(anchors.get(cid), dict) else {}
+    a.update({k: v for k, v in fields.items() if v is not None})
+    anchors[cid] = a
+    ANCHORS.write_text(json.dumps(anchors, ensure_ascii=False))
+
+
+def add_comment(doc_id, quote, text, start=None, sentence='', suggestion=None):
     from app.services import gdoc_drive as G
     text = _owner_words(text)
     if not owner_only(doc_id) or not ensure_watched(doc_id):
@@ -738,20 +776,21 @@ def add_comment(doc_id, quote, text, start=None, sentence=''):
     made = G.request(_account(doc_id), 'POST', f'files/{doc_id}/comments', body, {'fields': 'id'})
     # Where it was written. Docs keeps no place for a comment made through the API, so Dan's answer reads the sentence
     # from here (gdoc_events.prompt): 11/19 a comment on 「行動力」 could have meant any of ten sentences.
-    STATE.mkdir(parents=True, exist_ok=True)
-    anchors = _anchors()
-    anchors[made['id']] = {'start': start, 'sentence': (sentence or '').strip()[:600], 'doc_id': doc_id}
-    ANCHORS.write_text(json.dumps(anchors, ensure_ascii=False))
+    _remember_anchor(made['id'], start=start, sentence=(sentence or '').strip()[:600], doc_id=doc_id,
+                     suggestion=_clean_suggestion(suggestion))
     _poke(doc_id)
     return {'id': made['id']}
 
 
-def reply(doc_id, comment_id, text):
+def reply(doc_id, comment_id, text, suggestion=None):
     from app.services import gdoc_drive as G
     text = _owner_words(text)
     if not owner_only(doc_id) or not ensure_watched(doc_id):
         raise ListenError('お客さんも開けるドキュメントなので、ここからは返事を書けません。', 403)
     made = G.request(_account(doc_id), 'POST', f'files/{doc_id}/comments/{comment_id}/replies', {'content': text}, {'fields': 'id'})
+    # A reply on a suggestion's card: the thread is now about that suggestion (Dan may have put in a new one).
+    sug = _clean_suggestion(suggestion)
+    if sug: _remember_anchor(comment_id, doc_id=doc_id, suggestion=sug)
     _poke(doc_id)
     return {'id': made['id']}
 

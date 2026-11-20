@@ -111,25 +111,7 @@ export function ThreadCard({
       {thread.quote && (
         <div className="mb-1.5 line-clamp-2 border-l-2 border-yellow-400 pl-2 text-[12px] text-stone-500">{thread.quote}</div>
       )}
-      <div className="space-y-2">
-        {thread.messages.map(m => (
-          <div key={m.id}>
-            <div className="flex items-baseline gap-1.5 text-[11px] text-stone-500">
-              <span className={cn('font-semibold', m.who === 'dan' ? 'text-amber-800' : 'text-stone-700')}>{WHO[m.who] || m.name || '他の人'}</span>
-              <span>{when(m.at)}</span>
-            </div>
-            {m.action
-              ? <div className="text-[12px] text-stone-500">{m.action === 'resolve' ? '解決にしました' : '開き直しました'}</div>
-              : <div className="whitespace-pre-wrap break-words leading-relaxed text-stone-800">{(m.text || '').replace(/^ダン[：:]\s*/, '')}</div>}
-          </div>
-        ))}
-      </div>
-      {thread.working && thread.working !== 'needs_room' && (
-        <div className="mt-2 flex items-center gap-1.5 text-[12px] text-amber-800"><Loader2 className="h-3.5 w-3.5 animate-spin" />ダンが対応しています</div>
-      )}
-      {thread.working === 'needs_room' && (
-        <div className="mt-2 text-[12px] text-amber-800">ダンが、どの部屋の台本かを聞いています。返事に部屋の名前を書いてください。</div>
-      )}
+      <Messages thread={thread} />
       {canWrite && active && !thread.resolved && (
         <div onClick={e => e.stopPropagation()}>
           <ReplyBox placeholder="返事を書く" onSend={onReply} />
@@ -149,15 +131,53 @@ export function ThreadCard({
   );
 }
 
+/** The messages of one thread and whether Dan is on it (a comment card, or a suggestion's card). */
+function Messages({ thread }: { thread: Thread }) {
+  return (
+    <>
+      <div className="space-y-2">
+        {thread.messages.map(m => (
+          <div key={m.id}>
+            <div className="flex items-baseline gap-1.5 text-[11px] text-stone-500">
+              <span className={cn('font-semibold', m.who === 'dan' ? 'text-amber-800' : 'text-stone-700')}>{WHO[m.who] || m.name || '他の人'}</span>
+              <span>{when(m.at)}</span>
+            </div>
+            {m.action
+              ? <div className="text-[12px] text-stone-500">{m.action === 'resolve' ? '解決にしました' : '開き直しました'}</div>
+              : <div className="whitespace-pre-wrap break-words leading-relaxed text-stone-800">{(m.text || '').replace(/^ダン[：:]\s*/, '')}</div>}
+          </div>
+        ))}
+      </div>
+      {thread.working && thread.working !== 'needs_room' && (
+        <div className="mt-2 flex items-center gap-1.5 text-[12px] text-amber-800"><Loader2 className="h-3.5 w-3.5 animate-spin" />ダンが対応しています</div>
+      )}
+      {thread.working === 'needs_room' && (
+        <div className="mt-2 text-[12px] text-amber-800">ダンが、どの部屋の台本かを聞いています。返事に部屋の名前を書いてください。</div>
+      )}
+    </>
+  );
+}
+
+/** A suggestion (Dan's or someone's change in suggestion mode) with 承認 / 却下, and the owner's talk about it: what is
+ * written here goes to Dan as a comment on that suggestion, in one thread that keeps going when Dan puts in a new
+ * suggestion for it (11/20 本人「提案に対して『それおかしいから、もう少しこういう風に直して』と言いたい」). */
 export function SuggestionCard({
-  s, active, onFocus, onDecide,
-}: { s: Suggestion; active?: boolean; onFocus?: () => void; onDecide: (accept: boolean) => Promise<void> }) {
+  s, active, onFocus, onDecide, threads = [], canComment = false, onComment, earlier = false,
+}: {
+  s: Suggestion; active?: boolean; onFocus?: () => void; onDecide: (accept: boolean) => Promise<void>;
+  threads?: Thread[]; canComment?: boolean; onComment?: (text: string) => Promise<void>;
+  /** The talk began on an earlier suggestion at this place (Dan replaced it with this one). */
+  earlier?: boolean;
+}) {
   const [busy, setBusy] = useState<'' | 'yes' | 'no'>('');
+  const [writing, setWriting] = useState(false);
   const go = async (accept: boolean) => {
     setBusy(accept ? 'yes' : 'no');
     try { await onDecide(accept); } finally { setBusy(''); }
   };
   const kind = s.ins && s.del ? '置き換え' : s.ins ? '足す' : '消す';
+  const talking = threads.length > 0;
+  const showBox = canComment && !!onComment && (writing || (active && talking));
   return (
     <div
       onClick={onFocus}
@@ -166,7 +186,28 @@ export function SuggestionCard({
       <div className="mb-1 text-[11px] font-semibold text-emerald-800">提案（{kind}）</div>
       {s.del && <div className="line-clamp-3 text-red-700/80 line-through decoration-red-500">{s.del.trim()}</div>}
       {s.ins && <div className="mt-0.5 line-clamp-4 text-emerald-800">{s.ins.trim()}</div>}
-      <div className="mt-2 flex justify-end gap-1.5" onClick={e => e.stopPropagation()}>
+      {talking && (
+        <div className="mt-2 space-y-2 border-t border-stone-100 pt-2">
+          {earlier && <div className="text-[11px] text-stone-400">前の提案からの続き</div>}
+          {threads.map(t => <Messages key={t.id} thread={t} />)}
+        </div>
+      )}
+      {showBox && (
+        <div onClick={e => e.stopPropagation()}>
+          <ReplyBox autoFocus={writing} placeholder="この提案へのコメント（例：ここは言い切らずに、もう少し柔らかく）"
+            onSend={async text => { await onComment!(text); setWriting(false); }} />
+        </div>
+      )}
+      <div className="mt-2 flex items-center justify-end gap-1.5" onClick={e => e.stopPropagation()}>
+        {canComment && onComment && !showBox && (
+          <button
+            type="button"
+            onClick={() => { setWriting(true); onFocus?.(); }}
+            className="mr-auto flex items-center gap-1 rounded-md px-2 py-1 text-[12px] text-stone-600 hover:bg-stone-100"
+          >
+            <MessageSquare className="h-3.5 w-3.5" />{talking ? '返事を書く' : 'コメント'}
+          </button>
+        )}
         <button
           type="button"
           disabled={!!busy}
