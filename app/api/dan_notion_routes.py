@@ -60,8 +60,10 @@ def _svc() -> DanNotionService:
 # Blocks
 # ============================================================
 
+# Plain def: the database calls are blocking, and inside an async def they held the whole server while they ran
+# (the dev-lead board's 80 reads at opening waited 2-4 s each behind them, 11/20).
 @router.get("/pages", response_model=list[BlockResponse])
-async def list_root_pages(user: TokenData = Depends(get_current_user)):
+def list_root_pages(user: TokenData = Depends(get_current_user)):
     return _svc().list_root_pages(user.user_id)
 
 
@@ -74,18 +76,14 @@ def get_block(block_id: str, user: TokenData = Depends(get_current_user)):
 
 
 @router.get("/blocks/{block_id}/children", response_model=list[BlockResponse])
-async def list_children(block_id: str, omit_image_data: bool = False, user: TokenData = Depends(get_current_user)):
+def list_children(block_id: str, omit_image_data: bool = False, user: TokenData = Depends(get_current_user)):
     if not _svc().get_block(user.user_id, block_id):
         raise HTTPException(status_code=404, detail="ブロックが見つかりません")
-    rows = _svc().list_children(user.user_id, block_id)
     if omit_image_data:
         # 画像の中身（データURL）を外し、hash だけ返す。画面は端末に控えた絵を使い、無い絵だけ1枚ずつ読む
-        # （開発室のボードは子に3.6MBの絵を持ち、開くたびに全部運んでいた。11-08）
-        for row in rows:
-            image = (row.get("properties") or {}).get("image")
-            if isinstance(image, dict) and "data" in image:
-                row["properties"] = {**row["properties"], "image": {k: v for k, v in image.items() if k != "data"}}
-    return rows
+        # （開発室のボードは子に3.6MBの絵を持ち、開くたびに全部運んでいた。11-08。11-20 からは DB から hash だけ読む）
+        return _svc().list_children_light(user.user_id, block_id)
+    return _svc().list_children(user.user_id, block_id)
 
 
 @router.post("/blocks", response_model=BlockResponse)

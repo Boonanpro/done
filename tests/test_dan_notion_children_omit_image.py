@@ -27,6 +27,9 @@ class _Svc:
     def list_children(self, user_id, parent_id):
         return [_row(1, {"image": {"hash": "h1", "data": "data:image/png;base64,AAAA"}}), _row(2, {"thread": {"room_id": "r"}})]
 
+    def list_children_light(self, user_id, parent_id):
+        return [_row(1, {"image": {"hash": "h1"}}), _row(2, {"thread": {"room_id": "r"}})]
+
 
 def _client(monkeypatch) -> TestClient:
     app = FastAPI()
@@ -45,3 +48,60 @@ def test_children_omit_image_data(monkeypatch):
     rows = _client(monkeypatch).get(f"/dan-notion/blocks/{PARENT}/children?omit_image_data=true").json()
     assert rows[0]["properties"]["image"] == {"hash": "h1"}
     assert rows[1]["properties"] == {"thread": {"room_id": "r"}}
+
+
+class _Query:
+    """A stand-in for the Supabase table query: keeps the filters and answers like the database would."""
+    def __init__(self, rows):
+        self.rows, self.cols, self.image = rows, "*", None
+
+    def select(self, cols):
+        self.cols = cols
+        return self
+
+    def eq(self, *_):
+        return self
+
+    def order(self, *_):
+        return self
+
+    def is_(self, col, _):
+        if col == "properties->image": self.image = False
+        return self
+
+    @property
+    def not_(self):
+        outer = self
+
+        class _Not:
+            def is_(self, col, _):
+                if col == "properties->image": outer.image = True
+                return outer
+        return _Not()
+
+    def execute(self):
+        rows = sorted(self.rows, key=lambda r: r["order_key"])
+        if self.image is not None:
+            rows = [r for r in rows if ("image" in r["properties"]) == self.image]
+        if self.cols == "*":
+            data = [dict(r) for r in rows]
+        else:
+            data = []
+            for r in rows:
+                d = {k: v for k, v in r.items() if k != "properties"}
+                d["image_hash"] = (r["properties"].get("image") or {}).get("hash")
+                data.append(d)
+        return type("R", (), {"data": data})()
+
+
+def test_light_children_read_only_the_hash_and_keep_the_order():
+    from app.services.dan_notion_service import DanNotionService
+    rows = [_row(3, {"thread": {"room_id": "r"}}), _row(1, {"image": {"hash": "h1", "data": "data:image/png;base64,AAAA"}}),
+            _row(2, {"goal": {"text": "g"}})]
+    svc = DanNotionService.__new__(DanNotionService)
+    svc.sb = type("SB", (), {"table": lambda self, name: _Query(rows)})()
+    out = svc.list_children_light(USER, PARENT)
+    assert [r["order_key"] for r in out] == ["1", "2", "3"]
+    assert out[0]["properties"] == {"image": {"hash": "h1"}}
+    assert out[1]["properties"] == {"goal": {"text": "g"}}
+    assert out[2]["properties"] == {"thread": {"room_id": "r"}}

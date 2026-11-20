@@ -1125,7 +1125,7 @@ export function ListenScreen({ docId }: { docId: string }) {
           aria-label="コメントを追加"
           title="コメントを追加（Ctrl+Alt+M）"
           onMouseDown={e => e.preventDefault()}
-          onClick={() => openDraft({ quote: selBtn.quote, n: selBtn.n, start: selBtn.start })}
+          onClick={() => openDraft({ quote: selBtn.quote, n: selBtn.n, start: selBtn.start, from: selBtn.from, to: selBtn.to })}
           style={wide
             ? { left: selBtn.x - 28, top: Math.max(selBtn.y - 4, 56) }
             : { left: Math.max(8, selBtn.x - 40), top: Math.min(selBtn.y + 10, window.innerHeight - 190) }}

@@ -166,7 +166,10 @@ export function nodeAt(root: HTMLElement, pos: Pos): { node: Node; off: number }
   let left = pos.off;
   let last: Text | null = null;
   for (let t = w.nextNode() as Text | null; t; t = w.nextNode() as Text | null) {
-    if (t.parentElement?.closest('[contenteditable="false"]')) { left -= t.data.length; last = null; continue; }
+    // Suggestions inside the paragraph are not typed in. The whole text being read-only (a phone before the second
+    // tap, last time's copy while the doc is read again) does not count: a position there is still a position.
+    const fixed = t.parentElement?.closest('[contenteditable="false"]');
+    if (fixed && leaf.contains(fixed)) { left -= t.data.length; last = null; continue; }
     if (left <= t.data.length) return { node: t, off: Math.max(0, left) };
     left -= t.data.length;
     last = t;
