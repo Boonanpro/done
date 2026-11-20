@@ -46,6 +46,28 @@ class DanNotionService:
         )
         return res.data or []
 
+    def list_children_light(self, user_id: str, parent_id: str) -> list[dict[str, Any]]:
+        """The children without the pictures' data: a picture child comes back as properties {"image": {"hash"}}.
+        Reading every child whole carried 3.6 MB of pictures from the database to strip them afterwards (1.2 s of the
+        dev-lead board's 6 s opening, 11/20); asking the database for the hash alone takes 0.3 s."""
+        cols = ("id,user_id,parent_id,type,content,icon,cover_url,order_key,is_starred,tags,source,source_id,"
+                "created_by,version,created_at,updated_at")
+        # Every child in the database's order, light; then the whole of the children that are not pictures.
+        rows = (self.sb.table("blocks").select(cols + ",image_hash:properties->image->>hash").eq("user_id", user_id)
+                .eq("parent_id", parent_id).is_("deleted_at", "null").order("order_key").execute().data or [])
+        plain = (self.sb.table("blocks").select("*").eq("user_id", user_id).eq("parent_id", parent_id)
+                 .is_("deleted_at", "null").is_("properties->image", "null").execute().data or [])
+        whole = {r["id"]: r for r in plain}
+        out = []
+        for row in rows:
+            if row["id"] in whole:
+                out.append(whole[row["id"]])
+                continue
+            pic = row.pop("image_hash", None)
+            row["properties"] = {"image": {"hash": pic}} if pic else {}
+            out.append(row)
+        return out
+
     def get_block(self, user_id: str, block_id: str) -> Optional[dict[str, Any]]:
         res = (
             self.sb.table("blocks")
