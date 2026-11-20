@@ -1,6 +1,7 @@
 """The script listening screen's text handling (app/services/script_listen.py)."""
 import numpy as np
 
+import pytest
 from app.services import script_listen as S
 
 
@@ -428,3 +429,25 @@ def test_activity_lights_only_what_dans_browser_touches_now(tmp_path, monkeypatc
     job('just', current_tool=None, last_tool={'name': 'browser', 'touch': words, 'at': iso(now - 1)})
     out = {j['id']: j['touch'] for j in S.activity('DOC')['jobs']}
     assert out == {'typing': {'words': words, 'live': True}, 'thinking': None, 'just': {'words': words, 'live': False}}
+
+
+def test_a_write_that_lost_the_race_is_tried_again(monkeypatch):
+    # 11/21: Docs says「The required revision ID … does not match the latest revision.」; that came out as 500 and the
+    # screen threw away what the owner had typed while Dan wrote to the doc.
+    from app.services import gdoc_drive as G
+    import httpx
+    req = httpx.Request('POST', 'https://docs.googleapis.com/v1/documents/d:batchUpdate')
+    stale = httpx.Response(400, request=req, json={'error': {'code': 400, 'message': "The required revision ID 'AB' does not match the latest revision.", 'status': 'INVALID_ARGUMENT'}})
+    monkeypatch.setattr(S, '_token', lambda account: 't')
+    monkeypatch.setattr(G._client, 'request', lambda *a, **k: stale)
+    with pytest.raises(S.Stale) as e:
+        S._docs('POST', 'd:batchUpdate', 'x', body={})
+    assert e.value.status == 409
+    calls = []
+    @S._retry_stale
+    def write():
+        calls.append(1)
+        if len(calls) < 3: raise S.Stale()
+        return 'ok'
+    monkeypatch.setattr(S.time, 'sleep', lambda s: None)
+    assert write() == 'ok' and len(calls) == 3
