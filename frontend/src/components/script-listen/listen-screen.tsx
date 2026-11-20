@@ -612,6 +612,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     prevLive.current = liveIds;
     if (was.some(id => !liveIds.split(',').includes(id))) void loadComments();
   }, [liveIds, loadComments]);
+  // The one picked in the monitor, else the one working now (the list comes working → waiting → ended).
   const shownJob = jobs.find(j => j.id === jobSel)?.id ?? jobs[0]?.id ?? null;
 
   const editing = () => dirtyRef.current || (!!editorRef.current && document.activeElement === editorRef.current && typedRef.current);

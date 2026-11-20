@@ -64,7 +64,8 @@ export interface ThreadMessage {
 }
 
 /** One line of Dan's work log on a comment (the same lines the chat shows while Dan works). */
-export interface WorkEvent { seq: number; kind: 'progress' | 'result' | 'error' | 'tool' | 'input'; text: string; at: string }
+/** say: a tool step in plain words (for the one line when Dan has not written a line for a while). */
+export interface WorkEvent { seq: number; kind: 'progress' | 'result' | 'error' | 'tool' | 'input'; text: string; at: string; say?: string }
 
 /** Dan's answer to one or more comments: waiting, working, or just ended (kept 15 min). */
 export interface DanJob {

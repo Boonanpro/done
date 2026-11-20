@@ -26,6 +26,11 @@ export function latestLine(j: DanJob): string {
     const r = [...j.events].reverse().find(e => e.kind === 'result');
     return r ? `終わりました：${firstLine(r.text)}` : '終わりました';
   }
+  // Dan writes a line now and then; between them, the step he is on in plain words.
+  const tool = [...j.events].reverse().find(e => e.kind === 'tool');
+  const stale = !last || last.text === '作業を始めています'
+    || (!!tool && tool.seq > last.seq && Date.parse(tool.at) - Date.parse(last.at) > 25000);
+  if (tool?.say && stale) return tool.say;
   return last ? firstLine(last.text) : '作業を始めています';
 }
 
@@ -68,6 +73,17 @@ function rows(events: WorkEvent[]): Row[] {
   return out;
 }
 
+/** Tool steps in plain words, the same words in a row folded into one (the commands themselves on hover). */
+function steps(list: WorkEvent[]) {
+  const out: { first: WorkEvent; labels: string[] }[] = [];
+  for (const e of list) {
+    const last = out[out.length - 1];
+    if (last && (last.first.say || last.first.text) === (e.say || e.text)) last.labels.push(e.text);
+    else out.push({ first: e, labels: [e.text] });
+  }
+  return out;
+}
+
 function ToolRow({ list }: { list: WorkEvent[] }) {
   const [open, setOpen] = useState(false);
   return (
@@ -77,7 +93,11 @@ function ToolRow({ list }: { list: WorkEvent[] }) {
       </button>
       {open && (
         <div className="mt-1 space-y-0.5 border-l border-stone-200 pl-2">
-          {list.map(e => <div key={e.seq} className="truncate font-mono text-[10.5px] text-stone-400" title={e.text}>{hm(e.at)} {e.text}</div>)}
+          {steps(list).map(g => (
+            <div key={g.first.seq} className="truncate text-[11px] text-stone-500" title={g.labels.join('\n')}>
+              {hm(g.first.at)} {g.first.say || g.first.text}{g.labels.length > 1 && <span className="text-stone-400"> ×{g.labels.length}</span>}
+            </div>
+          ))}
         </div>
       )}
     </div>

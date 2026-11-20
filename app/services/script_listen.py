@@ -928,6 +928,24 @@ def _ts(value):
     except Exception: return 0.0
 
 
+_JP = re.compile(r'[\u3040-\u30ff\u4e00-\u9fff]')
+_TOOL_SAYS = (
+    (('script_learning.py before',), '直す前の本文を記録しています'),
+    (('script_learning.py after',), '直した後の本文を記録しています'),
+    (('gdoc_comments.py reply', 'confirm-export-reply'), 'コメントに返事を書いています'),
+    (('talk-script', 'SKILL.md', 'revision.md'), '台本の直し方の手順を読んでいます'),
+    (('ブラウザ', 'browser', '要素 @', 'クリック'), 'ドキュメントの画面で作業しています'),
+    (('ファイル読み取り',), '資料を読んでいます'),
+)
+
+
+def _tool_says(label):
+    """A tool step in plain words, for the monitor's one line when Dan has not written a line for a while."""
+    for keys, words in _TOOL_SAYS:
+        if any(k in label for k in keys): return words
+    return '調べています'
+
+
 def activity(doc_id):
     """What Dan is doing on the doc's comments now: one entry per answer (batch) that is waiting, working or ended
     in the last DONE_SHOWN seconds, with the comments it is about and its work log (the same lines as the chat's)."""
@@ -949,15 +967,22 @@ def activity(doc_id):
         for e in state.get('events') or []:
             if e.get('kind') not in _JOB_KINDS: continue
             text = (e.get('label') if e.get('kind') == 'tool' and e.get('label') else e.get('text')) or ''
-            if e.get('kind') == 'tool': text = text.strip().splitlines()[0][:160] if text.strip() else ''
-            events.append({'seq': e.get('seq'), 'kind': e['kind'], 'text': text[:4000], 'at': e.get('at')})
+            # The text Dan writes between steps is sometimes an English note to himself: not a line for the owner.
+            if e['kind'] == 'progress' and len(_JP.findall(text)) * 2 < len(re.findall(r'[A-Za-z]', text)): continue
+            item = {'seq': e.get('seq'), 'kind': e['kind'], 'text': text[:4000], 'at': e.get('at')}
+            if e['kind'] == 'tool':
+                item['say'] = _tool_says(text)
+                item['text'] = text.strip().splitlines()[0][:160] if text.strip() else ''
+            events.append(item)
         # The batch row says if the answer really landed (a fluent reply without a Docs reply is needs_attention).
         status = r['status'] if r['status'] in ('pending', 'running', 'needs_room') else (
             'completed' if r['status'] == 'completed' else 'failed' if r['status'] in ('failed', 'cancelled') else 'attention')
         if status == 'running' and state.get('state') in ('queued', 'pending', None) and not events: status = 'pending'
         jobs.append({'id': r['id'], 'status': status, 'comment_ids': ids, 'started': state.get('created_at') or r['created'],
                      'updated': state.get('updated_at'), 'events': events[-200:]})
-    jobs.sort(key=lambda j: (j['status'] not in ('running', 'pending', 'needs_room'), -(_ts(j['started']))))
+    # The one working now first, then the ones waiting their turn (oldest first), then the ended ones (newest first).
+    rank = {'running': 0, 'needs_room': 1, 'pending': 2}
+    jobs.sort(key=lambda j: (rank.get(j['status'], 3), _ts(j['started']) if j['status'] in rank else -_ts(j['started'])))
     return {'jobs': jobs}
 
 
