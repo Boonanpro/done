@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import secrets
 import sqlite3
+import sys
 import time
 import uuid
 
@@ -642,6 +643,24 @@ def confirm_export_reply(batch_id, comment_id, content):
     return {'verified_export':True,'reply_id':export_identity(matches[0])}
 
 
+RELOAD_CHECK = 300
+
+
+def code_changed(since):
+    """True once a loaded Dan module's file is newer than this worker. The worker runs for days under launchd and
+    restart_dan_core.py does not touch it, so without this a merged prompt change never reached comment jobs
+    (11/20: the 18:55 progress-line instruction was still missing from a 19:11 job; the worker dated from 11/19)."""
+    base = str(Path(__file__).resolve().parents[2]) + os.sep
+    for m in list(sys.modules.values()):
+        f = getattr(m, '__file__', None) or ''
+        if f.startswith(base):
+            try:
+                if os.path.getmtime(f) > since: return True
+            except OSError:
+                pass
+    return False
+
+
 async def serve():
     from watchdog.events import FileSystemEventHandler
     from watchdog.observers import Observer
@@ -661,6 +680,7 @@ async def serve():
         tasks = {}
         learning_tasks = {}
         next_adopt = 0
+        started, next_reload_check = time.time(), time.time() + RELOAD_CHECK
         try:
             while True:
                 wake.clear()
@@ -751,6 +771,16 @@ async def serve():
                     import logging
                     logging.exception('Script learning tick failed')
                     deadlines.append(time.time()+60)
+                if time.time() >= next_reload_check:
+                    next_reload_check = time.time() + RELOAD_CHECK
+                    # Jobs run in their own processes and are picked up again from their state files, but leave only
+                    # between jobs so no launch is cut halfway. launchd's KeepAlive starts the new code.
+                    if (all(t.done() for t in (*tasks.values(), *learning_tasks.values()))
+                            and await asyncio.to_thread(code_changed, started)):
+                        import logging
+                        logging.warning('Dan code changed since this worker started; exiting for launchd to restart')
+                        return
+                deadlines.append(next_reload_check)
                 if wake.is_set(): continue
                 timeout = max(.1, min(deadlines)-time.time()) if deadlines else None
                 try: await asyncio.wait_for(wake.wait(), timeout)
