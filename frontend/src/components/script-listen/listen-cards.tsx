@@ -3,12 +3,12 @@
 // 台本を聞く画面のコメントと提案の札（2026-11-19）。コメントは Google ドキュメントのコメントそのもの
 // （app/services/script_listen.py の comments）。ここで書くと、ドキュメントで書いた時と同じくダンが返事と直しをする。
 import { useEffect, useRef, useState } from 'react';
-import { Check, Loader2, MessageSquare, RotateCcw, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Loader2, MessageSquare, RotateCcw, X } from 'lucide-react';
 
 import type { Seg, Suggestion, Thread } from '@/lib/script-listen-api';
 import { cn } from '@/lib/utils';
 
-import { useDanLive } from './listen-dan';
+import { JobLog, Mark, latestLine, useDanLive } from './listen-dan';
 
 export function SegText({ segs, onSuggestion }: { segs: Seg[]; onSuggestion?: (id: string) => void }) {
   return (
@@ -136,7 +136,8 @@ export function ThreadCard({
 /** The messages of one thread and whether Dan is on it (a comment card, or a suggestion's card). */
 function Messages({ thread }: { thread: Thread }) {
   const live = useDanLive();
-  const line = thread.working && thread.working !== 'needs_room' ? live.lineFor(thread.id) : null;
+  const job = thread.working === 'needs_room' ? null : live.jobFor(thread.id);
+  const open = !!job && live.expanded === job.id;
   return (
     <>
       <div className="space-y-2">
@@ -152,17 +153,27 @@ function Messages({ thread }: { thread: Thread }) {
           </div>
         ))}
       </div>
-      {thread.working && thread.working !== 'needs_room' && (
-        // The newest line of Dan's work on it; pressing it opens the whole log below (11/20).
-        <button
-          type="button"
-          data-testid="card-dan-line"
-          onClick={e => { e.stopPropagation(); live.open(thread.id); }}
-          className="mt-2 flex w-full items-start gap-1.5 rounded-md bg-sky-50 px-1.5 py-1 text-left text-[12px] text-sky-900 hover:bg-sky-100"
-        >
+      {job && (
+        // The newest line of Dan's work on it; pressing it opens the whole log here in the card (11/20).
+        <div onClick={e => e.stopPropagation()}>
+          <button
+            type="button"
+            data-testid="card-dan-line"
+            onClick={() => live.toggle(job.id)}
+            className="mt-2 flex w-full items-start gap-1.5 rounded-md bg-sky-50 px-1.5 py-1 text-left text-[12px] text-sky-900 hover:bg-sky-100"
+          >
+            <Mark j={job} className="mt-[1px]" />
+            <span className="min-w-0 flex-1 break-words"><b className="mr-1 font-semibold">ダン</b>{latestLine(job)}</span>
+            {open ? <ChevronUp className="mt-[1px] h-3.5 w-3.5 shrink-0 text-sky-700" /> : <ChevronDown className="mt-[1px] h-3.5 w-3.5 shrink-0 text-sky-700" />}
+          </button>
+          {open && <JobLog j={job} />}
+        </div>
+      )}
+      {!job && thread.working && thread.working !== 'needs_room' && (
+        <div className="mt-2 flex items-start gap-1.5 rounded-md bg-sky-50 px-1.5 py-1 text-[12px] text-sky-900">
           <Loader2 className="mt-[1px] h-3.5 w-3.5 shrink-0 animate-spin text-sky-600" />
-          <span className="min-w-0 flex-1 break-words"><b className="mr-1 font-semibold">ダン</b>{line || '対応しています'}</span>
-        </button>
+          <span className="min-w-0 flex-1 break-words"><b className="mr-1 font-semibold">ダン</b>対応しています</span>
+        </div>
       )}
       {thread.working === 'needs_room' && (
         <div className="mt-2 text-[12px] text-amber-800">ダンが、どの部屋の台本かを聞いています。返事に部屋の名前を書いてください。</div>

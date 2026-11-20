@@ -25,7 +25,7 @@ import { cn } from '@/lib/utils';
 
 import { buildHtml, diffLines, extract, getPos, isOwnSuggestion, leaves, nodeAt, OWN_DEL, OWN_INS, setPos, type Line, type Pos } from './editor-dom';
 import { Composer, SuggestionCard, ThreadCard } from './listen-cards';
-import { DanLiveContext, DanMonitor, isLive, latestLine } from './listen-dan';
+import { DanLiveContext, isLive } from './listen-dan';
 import { RefsPanel, type SectionHead } from './listen-refs';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
@@ -344,7 +344,8 @@ export function ListenScreen({ docId }: { docId: string }) {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [jobs, setJobs] = useState<DanJob[]>([]);           // Dan's answers to the comments, with their work log
   const [jobSel, setJobSel] = useState<string | null>(null);
-  const [monitorOpen, setMonitorOpen] = useState(false);
+  // The job whose log is open in its comment card.
+  const [expanded, setExpanded] = useState<string | null>(null);
   const [canComment, setCanComment] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
   const [active, setActive] = useState<string | null>(null);  // thread or suggestion id
@@ -1516,23 +1517,24 @@ export function ListenScreen({ docId }: { docId: string }) {
     window.addEventListener('resize', on);
     return () => { sc.removeEventListener('scroll', on); window.removeEventListener('resize', on); if (raf) cancelAnimationFrame(raf); };
   }, [bars, shownJob]);
-  const openJob = useCallback((id: string) => { setJobSel(id); setMonitorOpen(true); }, []);
-  /** From the monitor to the words its job is about. */
-  const goJob = (j: DanJob) => {
-    for (const id of j.comment_ids) {
-      const sid = talkOf.get(id);
-      const sg = sid ? suggestions.find(x => x.id === sid) : undefined;
-      if (sid && sg) { goText(sid, sg.n); return; }
-      const n = place.get(id);
-      if (n != null) { goText(id, n, threads.find(x => x.id === id)?.quote); return; }
+  /** From Dan's mark beside the words to the card of the comment his job is about, with its log open. */
+  const openJob = (id: string) => {
+    setJobSel(id);
+    setExpanded(id);
+    const j = jobs.find(x => x.id === id);
+    for (const cid of j?.comment_ids || []) {
+      const sid = talkOf.get(cid);
+      if (sid && suggestions.some(x => x.id === sid)) { pickSuggestion(sid); flashLater(sid); return; }
+      const t = threads.find(x => x.id === cid);
+      if (t) { pickThreads([t]); flashLater(t.id); return; }
     }
-    const b = bars.find(x => x.job === j.id);
-    if (b) focusUnit(b.n);
   };
   const danLiveValue = useMemo(() => ({
-    lineFor: (tid: string) => { const j = jobs.find(x => isLive(x) && x.comment_ids.includes(tid)); return j ? latestLine(j) : null; },
-    open: (tid: string) => { const j = jobs.find(x => x.comment_ids.includes(tid)); if (j) openJob(j.id); },
-  }), [jobs, openJob]);
+    // The job working on it, else the one that ended a little while ago (the list keeps ended ones for 15 minutes).
+    jobFor: (tid: string) => jobs.find(x => isLive(x) && x.comment_ids.includes(tid)) || jobs.find(x => x.comment_ids.includes(tid)) || null,
+    expanded,
+    toggle: (id: string) => { setJobSel(id); setExpanded(e => (e === id ? null : id)); },
+  }), [jobs, expanded]);
 
   // ---------------------------------------------------------------- 見本の台本と比べる (11/20)
   useEffect(() => {
@@ -1896,45 +1898,48 @@ export function ListenScreen({ docId }: { docId: string }) {
 
       <div className="shrink-0 border-t border-stone-200 bg-white/95 px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 backdrop-blur sm:px-6">
         <div className="mx-auto max-w-3xl">
-          {jobs.length > 0 && (
-            <DanMonitor jobs={jobs} threads={threads} selected={shownJob} onSelect={setJobSel}
-              open={monitorOpen} onOpen={setMonitorOpen} onGoText={goJob} />
-          )}
-          <div className="flex items-center justify-between gap-2 text-[12px] text-stone-500">
-            <span>{says.length ? `${cur + 1} / ${says.length}文` : '読む文がありません'}</span>
-            {suggestions.length >= 2 && (
+          {/* One row: where it is on the left, the player in the middle, 提案をすべて承認 on the right — nothing stacked
+              above the player, so the script keeps its height (11/20 本人「上下に重ねるんじゃなくて右側に」). */}
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1">
+            <div className="min-w-0 text-[11.5px] leading-tight text-stone-500 sm:text-[12px]">
+              <div className="tabular-nums">{says.length ? `${cur + 1} / ${says.length}文` : '読む文がありません'}</div>
+              <div className="flex items-center gap-1">
+                {saving && <><Loader2 className="h-3 w-3 shrink-0 animate-spin" /><span className="truncate">ドキュメントに入れています</span></>}
+                {!saving && waiting && <><Loader2 className="h-3 w-3 shrink-0 animate-spin" /><span className="truncate">声を作っています</span></>}
+                {!saving && !waiting && says.length > 0 && `残り約${fmtMinutes(remaining)}`}
+              </div>
+            </div>
+            <div className="flex items-center justify-center gap-1 sm:gap-3">
+              <button type="button" aria-label="前の文" onClick={() => void playFrom(Math.max(0, cur - 1))} className="rounded-full p-2 text-stone-700 active:bg-stone-200 sm:p-2.5">
+                <SkipBack className="h-6 w-6" />
+              </button>
               <button
                 type="button"
-                disabled={acceptingAll}
-                onClick={() => void acceptAll()}
-                className="flex items-center gap-1 rounded-full bg-emerald-600 px-3 py-1 text-[12px] font-semibold text-white shadow-sm active:bg-emerald-700 disabled:opacity-50"
+                aria-label={playing ? '止める' : '聞く'}
+                onClick={() => void toggle()}
+                disabled={!says.length}
+                className="flex h-14 w-14 items-center justify-center rounded-full bg-amber-600 text-white shadow active:bg-amber-700 disabled:opacity-40"
               >
-                {acceptingAll ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5" />}
-                提案をすべて承認（{suggestions.length}）
+                {playing ? <Pause className="h-7 w-7" /> : <Play className="ml-0.5 h-7 w-7" />}
               </button>
-            )}
-            <span className="flex items-center gap-1">
-              {saving && <><Loader2 className="h-3 w-3 animate-spin" />ドキュメントに入れています</>}
-              {!saving && waiting && <><Loader2 className="h-3 w-3 animate-spin" />声を作っています</>}
-              {!saving && !waiting && says.length > 0 && `残り約${fmtMinutes(remaining)}`}
-            </span>
-          </div>
-          <div className="mt-1.5 flex items-center justify-center gap-3">
-            <button type="button" aria-label="前の文" onClick={() => void playFrom(Math.max(0, cur - 1))} className="rounded-full p-2.5 text-stone-700 active:bg-stone-200">
-              <SkipBack className="h-6 w-6" />
-            </button>
-            <button
-              type="button"
-              aria-label={playing ? '止める' : '聞く'}
-              onClick={() => void toggle()}
-              disabled={!says.length}
-              className="flex h-14 w-14 items-center justify-center rounded-full bg-amber-600 text-white shadow active:bg-amber-700 disabled:opacity-40"
-            >
-              {playing ? <Pause className="h-7 w-7" /> : <Play className="ml-0.5 h-7 w-7" />}
-            </button>
-            <button type="button" aria-label="次の文" onClick={() => void playFrom(cur + 1)} className="rounded-full p-2.5 text-stone-700 active:bg-stone-200">
-              <SkipForward className="h-6 w-6" />
-            </button>
+              <button type="button" aria-label="次の文" onClick={() => void playFrom(cur + 1)} className="rounded-full p-2 text-stone-700 active:bg-stone-200 sm:p-2.5">
+                <SkipForward className="h-6 w-6" />
+              </button>
+            </div>
+            <div className="flex justify-end">
+              {suggestions.length >= 2 && (
+                <button
+                  type="button"
+                  disabled={acceptingAll}
+                  onClick={() => void acceptAll()}
+                  aria-label={`提案をすべて承認（${suggestions.length}）`}
+                  className="flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-[12px] font-semibold text-white shadow-sm active:bg-emerald-700 disabled:opacity-50"
+                >
+                  {acceptingAll ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5 shrink-0" />}
+                  <span className="whitespace-nowrap"><span className="hidden sm:inline">提案を</span>すべて承認（{suggestions.length}）</span>
+                </button>
+              )}
+            </div>
           </div>
           {/* All speeds on one screen: on a phone they wrap to a second line instead of hiding off the side (11/20 4倍). */}
           <div className="mt-2 flex flex-wrap items-center justify-center gap-1">
