@@ -27,7 +27,7 @@ export type ListenUnit =
 export type SayUnit = Extract<ListenUnit, { kind: 'say' }>;
 
 /** by owner: written in suggestion mode on this screen (kept by the screen; the Docs API cannot write suggestions). */
-export interface Suggestion { id: string; ins: string; del: string; n: number; by?: 'owner' | 'doc' }
+export interface Suggestion { id: string; ins: string; del: string; n: number; by?: 'owner' | 'doc' | 'client' }
 
 export type EditMode = 'edit' | 'suggest';
 
@@ -133,7 +133,10 @@ export function errorText(e: unknown): string {
 }
 
 /** url null: no copy made yet. behind: the working doc moved on since the copy was last updated. */
-export interface ShareState { url: string | null; behind: boolean; pending: number; updated_at?: string | null }
+/** The copy the other side gets follows the working doc by itself (11/21): synced_at = last written, from_client =
+ *  what they changed that stands as suggestions on the script, error = the last try failed. */
+export interface ShareState { url: string | null; auto?: boolean; synced_at?: string | null; checked_at?: string | null;
+  from_client?: number; error?: string | null; following?: boolean }
 
 /** A thumbnail of the doc tied to a work made of parts (app/services/script_listen_thumbs.py). */
 export interface ThumbItem { order: number; object: string; content_id: string; synced_rev: number; rev: number; stale: boolean }

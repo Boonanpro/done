@@ -227,3 +227,19 @@ def test_deciding_an_overlapping_suggestion(tmp_path, monkeypatch, sid, accept, 
     if sid == 'b':
         with pytest.raises(S.ListenError):     # keeping words someone adds as plain cannot be written
             S.decide('d', 'b', False)
+
+
+def test_a_rewritten_suggestion_of_dans_is_kept_for_the_learning(tmp_path):
+    from app.services import script_learning as L
+    log = tmp_path / 'log.jsonl'
+    dan = {'by': 'dan', 'suggestion': 's', 'del': 'すぐ受け取れます', 'ins': 'XY'}
+    rows = [{'at': '2026-11-21T01:00:00+0900', 'doc_id': 'd', 'action': 'adopt', 'suggestion': 'o-1', 'before': 'aすぐ', 'after': 'aXY', 'revised_from': dan},
+            {'at': '2026-11-21T01:00:01+0900', 'doc_id': 'd', 'action': 'adopt', 'suggestion': 'o-2', 'before': 'b', 'after': 'c', 'revised_from': dan},
+            {'at': '2026-11-21T01:00:05+0900', 'doc_id': 'd', 'action': 'suggest', 'suggestion': 'o-1', 'before': 'aすぐ', 'after': 'aXZY', 'revised_from': dan},
+            {'at': '2026-11-21T01:00:05+0900', 'doc_id': 'd', 'action': 'settle', 'suggestion': 'o-2'},      # joined into o-1
+            {'at': '2026-11-21T01:00:09+0900', 'doc_id': 'd', 'action': 'settle', 'suggestion': 'o-1', 'accept': True, 'revised_from': dan}]
+    import json
+    log.write_text('\n'.join(json.dumps(r, ensure_ascii=False) for r in rows))
+    out = L.owner_actions('d', 0, 2e9, path=log)
+    got = [a for a in out if a['action'] == 'revised_suggestion']
+    assert len(got) == 1 and got[0]['dan'] == dan and got[0]['owner_wording'] == {'before': 'aすぐ', 'after': 'aXZY'} and got[0]['accepted'] is True

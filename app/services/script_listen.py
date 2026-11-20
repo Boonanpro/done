@@ -342,9 +342,11 @@ def _inline_images(units, most=40):
         u['src'] = _image_cache[key]
 
 
-def suggestions_of(units):
+def suggestions_of(units, kept=()):
     """Each suggestion once, with the text it adds and removes and the first unit it shows in. ``by`` owner: written
-    in suggestion mode on this screen (kept here, not in the doc)."""
+    in suggestion mode on this screen (kept here, not in the doc); client: what the other side changed in the copy
+    they were sent (script_share), kept the same way. ``kept``: the screen's suggestions (for whose each is)."""
+    whose = {k.get('id'): k.get('by') for k in kept or ()}
     out = {}
     for u in units:
         if u['kind'] == 'image':
@@ -358,7 +360,8 @@ def suggestions_of(units):
             for kind in ('ins', 'del'):
                 sid = seg.get(kind)
                 if not sid: continue
-                s = out.setdefault(sid, {'id': sid, 'ins': '', 'del': '', 'n': u['n'], 'by': 'owner' if M.is_owner(sid) else 'doc'})
+                by = ('client' if whose.get(sid) == 'client' else 'owner') if M.is_owner(sid) else 'doc'
+                s = out.setdefault(sid, {'id': sid, 'ins': '', 'del': '', 'n': u['n'], 'by': by})
                 s[kind] += seg['t']
     return list(out.values())
 
@@ -372,7 +375,7 @@ def view(doc_id, doc=None):
 
 
 def read(doc_id, voice=DEFAULT_VOICE):
-    doc, _, _ = view(doc_id)
+    doc, kept, _ = view(doc_id)
     units = outline(doc)
     for n, u in enumerate(units):
         u['n'] = n
@@ -390,7 +393,7 @@ def read(doc_id, voice=DEFAULT_VOICE):
     watch_soon(doc_id)
     return {'doc_id': doc_id, 'title': title, 'revision': doc.get('revisionId'), 'version': doc.get('revisionId'),
             'voice': voice, 'voices': [{'id': v['id'], 'name': v['name']} for v in VOICES], 'units': units,
-            'suggestions': suggestions_of(units)}
+            'suggestions': suggestions_of(units, kept)}
 
 
 def version(doc_id):
@@ -861,6 +864,13 @@ def adopt_pieces(shown, sids, now=''):
         # The paragraph as it reads once those suggestions are taken back: their added words go, struck words stay.
         mine = lambda t: t['k'] == 'x' and t['sid'] in sids
         raw = lambda t: t['k'] in ('p', 'd') or (t['k'] == 'x' and not (mine(t) and t['xk'] == 'i'))
+        # What Dan suggested here, whole (Docs puts the added words before the struck ones, so one suggestion can be
+        # two stretches): kept on every piece for the learning.
+        whole = {}
+        for t in toks:
+            if mine(t):
+                w = whole.setdefault(t['sid'], {'by': 'dan', 'suggestion': t['sid'], 'del': '', 'ins': ''})
+                w['del' if t['xk'] == 'd' else 'ins'] += t['ch']
         i = 0
         while i < len(toks):
             if not mine(toks[i]): i += 1; continue
@@ -877,7 +887,7 @@ def adopt_pieces(shown, sids, now=''):
             out.append({'id': M.OWNER + uuid.uuid4().hex[:12], 'para': pi, 'pre': pre[-M.CONTEXT:], 'del': dele,
                         'ins': ''.join(t['ch'] for t in ins), 'bm': ''.join('1' if t['b'] else '0' for t in ins),
                         'post': post[:M.CONTEXT], 'at': now,
-                        'from': {'by': 'dan', 'suggestion': toks[i]['sid'], 'del': dele, 'ins': ''.join(t['ch'] for t in ins)}})
+                        'from': dict(whole[toks[i]['sid']])})
             i = j
     return out
 
@@ -893,7 +903,8 @@ def _adopt(doc_id, doc, shown, sugs, sids):
     M.save(OWNER_SUGS, doc_id, list(sugs) + pieces)
     for piece in pieces:
         _log_owner_action(doc_id, doc.get('title', ''), action='adopt', suggestion=piece['id'], dan_suggestion=piece['from']['suggestion'],
-                          before=piece['pre'] + piece['del'] + piece['post'], after=piece['pre'] + piece['ins'] + piece['post'])
+                          before=piece['pre'] + piece['del'] + piece['post'], after=piece['pre'] + piece['ins'] + piece['post'],
+                          revised_from=piece['from'])
 
 
 def accept_all(doc_id):

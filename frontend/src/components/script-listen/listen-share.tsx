@@ -6,9 +6,15 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Copy, Link2, Loader2, RefreshCw } from 'lucide-react';
+import { Check, Copy, Link2, Loader2 } from 'lucide-react';
 
 import { errorText, listenApi, type ShareState } from '@/lib/script-listen-api';
+
+function when(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 
 async function copyText(text: string): Promise<boolean> {
   try { await navigator.clipboard.writeText(text); return true; } catch { /* 下の方法へ */ }
@@ -25,7 +31,7 @@ async function copyText(text: string): Promise<boolean> {
 export function ListenShare({ docId }: { docId: string }) {
   const [info, setInfo] = useState<ShareState | null>(null);
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<'' | 'make' | 'update'>('');
+  const [busy, setBusy] = useState<'' | 'make'>('');
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState('');
   const box = useRef<HTMLDivElement>(null);
@@ -71,15 +77,6 @@ export function ListenShare({ docId }: { docId: string }) {
     finally { setBusy(''); }
   };
 
-  const update = async () => {
-    setBusy('update'); setFailed('');
-    try {
-      const s = await listenApi.share(docId, true);
-      setInfo(s);
-      if (s.url) await copy(s.url);
-    } catch (e) { setFailed(errorText(e)); }
-    finally { setBusy(''); }
-  };
 
   return (
     <div ref={box} className="relative shrink-0">
@@ -112,19 +109,17 @@ export function ListenShare({ docId }: { docId: string }) {
                 </button>
               </div>
               <div className="text-[12px] text-stone-500">リンクを知っている人は、誰でも編集・コメントできます。ダンのコメントと提案は入っていません。</div>
-              {info.behind && (
-                <div className="space-y-1.5 rounded-md bg-amber-50 p-2 text-[12px] text-amber-900">
-                  <div>このドキュメントは、今の台本より前の中身です。更新すると、変わった所が相手には提案の色で見えます。</div>
-                  <button type="button" data-testid="share-update" disabled={!!busy} onClick={() => void update()}
-                    className="flex items-center gap-1 rounded border border-amber-300 bg-white px-2 py-1 disabled:opacity-50">
-                    {busy === 'update' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                    今の台本に更新する
-                  </button>
-                </div>
-              )}
-              {info.pending > 0 && (
-                <div className="text-[12px] text-stone-500">承認していない提案{info.pending}件は入っていません。</div>
-              )}
+              <div data-testid="share-follow" className="rounded-md bg-stone-50 p-2 text-[12px] text-stone-600">
+                {info.error ? (
+                  <span className="text-red-700">相手のドキュメントに写せませんでした。少ししてからもう一度写します。</span>
+                ) : (
+                  <>台本を直すと、数秒で相手のドキュメントも同じに書き換わります。承認していない提案は写りません。
+                    {info.synced_at && <span className="text-stone-400">（最後に写した時刻 {when(info.synced_at)}）</span>}</>
+                )}
+                {!!info.from_client && (
+                  <div className="mt-1 text-amber-800">相手が直した所が{info.from_client}か所あります。台本に「相手の直し」の提案として入っています。決めるまで、そこは相手の文のままにしています。</div>
+                )}
+              </div>
             </div>
           ) : null}
           {failed && <div className="mt-2 text-[12px] text-red-600">{failed}</div>}

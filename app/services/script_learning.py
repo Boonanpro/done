@@ -340,7 +340,7 @@ def owner_actions(file_id, since, until, path=None):
             was = next((a for a in out if a.get('suggestion') == row.get('suggestion')), None)
             out = [a for a in out if a.get('suggestion') != row.get('suggestion')]
             revised = row.get('revised_from') or (was or {}).get('revised_from')
-            if action == 'adopt': revised = {'by': 'dan', 'suggestion': row.get('dan_suggestion'), 'before': row.get('before'), 'after': row.get('after')}
+            if action == 'adopt': revised = row.get('revised_from') or {'by': 'dan', 'suggestion': row.get('dan_suggestion')}
             out.append({'action': 'suggest', 'at': row['at'], 'suggestion': row.get('suggestion'),
                         'before': was.get('before') if was and action != 'adopt' else row.get('before'),
                         'after': row.get('after'), **({'revised_from': revised} if revised else {})})
@@ -349,7 +349,7 @@ def owner_actions(file_id, since, until, path=None):
             # owner rewrote keeps a record: Dan's words, the owner's, and whether it was taken.
             was = next((a for a in out if a['action'] == 'suggest' and a.get('suggestion') == row.get('suggestion')), None)
             out = [a for a in out if not (a['action'] == 'suggest' and a.get('suggestion') == row.get('suggestion'))]
-            if was and was.get('revised_from'):
+            if was and was.get('revised_from') and 'accept' in row:     # decided (承認 / 却下), not joined into another
                 out.append({'action': 'revised_suggestion', 'at': row['at'], 'dan': was['revised_from'],
                             'owner_wording': {'before': was.get('before'), 'after': was.get('after')}, 'accepted': row.get('accept')})
     # Typing that was undone (Ctrl+Z on the screen) ends where it began: nothing the owner changed.
