@@ -154,3 +154,29 @@ class Settle(BaseModel):
 async def settle(doc_id: str, comment_id: str, body: Settle, user: TokenData = Depends(get_current_user)):
     try: return await run_in_threadpool(S.settle, S.doc_id_from(doc_id), comment_id, body.reopen)
     except Exception as exc: _fail(exc)
+
+
+class NewImage(BaseModel):
+    after_para: int
+    type: str = Field(max_length=100)
+    data: str = Field(max_length=28_000_000)    # base64 (20 MB at most)
+
+
+@router.post('/doc/{doc_id}/image')
+async def add_image(doc_id: str, body: NewImage, user: TokenData = Depends(get_current_user)):
+    import base64
+    import binascii
+    try: data = base64.b64decode(body.data.split(',')[-1], validate=True)
+    except (binascii.Error, ValueError): raise HTTPException(status_code=400, detail='画像を読めませんでした。')
+    try: return await run_in_threadpool(S.add_image, S.doc_id_from(doc_id), body.after_para, data, body.type)
+    except Exception as exc: _fail(exc)
+
+
+class DropImage(BaseModel):
+    id: str = Field(max_length=200)
+
+
+@router.post('/doc/{doc_id}/image/delete')
+async def remove_image(doc_id: str, body: DropImage, user: TokenData = Depends(get_current_user)):
+    try: return await run_in_threadpool(S.remove_image, S.doc_id_from(doc_id), body.id)
+    except Exception as exc: _fail(exc)

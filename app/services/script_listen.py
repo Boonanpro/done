@@ -203,10 +203,18 @@ def outline(doc):
         chars = _chars(p)
         text = ''.join(c[1] for c in chars if not c[2]['del']).strip()
         style = (p.get('paragraphStyle') or {}).get('namedStyleType', 'NORMAL_TEXT')
-        if mode != 'script':
-            for e in p.get('elements', []):
-                src = e.get('inlineObjectElement') and _image(doc, e)
-                if src: units.append({'kind': 'image', 'src': src})
+        # Pictures show where they are in the doc, in the script too (11/20 本人「スクショはどこにあるん？該当部分に
+        # 貼っといて」: the screenshots Dan put under the comment line were in the doc but not on the screen).
+        for e in p.get('elements', []):
+            src = e.get('inlineObjectElement') and _image(doc, e)
+            if not src: continue
+            img = {'kind': 'image', 'src': src, 'id': e['inlineObjectElement'].get('inlineObjectId'), 'para': pi}
+            sug = (e['inlineObjectElement'].get('suggestedInsertionIds') or [None])[0]
+            gone = (e['inlineObjectElement'].get('suggestedDeletionIds') or [None])[0]
+            if sug: img['ins'] = sug
+            if gone: img['del'] = gone
+            if mode != 'script': img['section'] = 'top'
+            units.append(img)
         if not text:
             # A paragraph whose every character is a suggested deletion still shows, struck through.
             if ''.join(c[1] for c in chars).strip() and any(c[2]['del'] for c in chars):
@@ -268,23 +276,45 @@ def outline(doc):
 
 
 _image_cache: dict = {}
+IMAGE_WIDTH = 1000          # pictures travel inside the answer, so they are made small first
 
 
-def _inline_images(units):
+def _small(data):
+    """A picture as a JPEG at most IMAGE_WIDTH wide (a screenshot is 1 MB as a PNG, 80 kB like this)."""
+    from PIL import Image
+    im = Image.open(io.BytesIO(data))
+    if im.mode in ('RGBA', 'LA', 'P'):
+        im = im.convert('RGBA')
+        bg = Image.new('RGB', im.size, 'white')
+        bg.paste(im, mask=im.split()[-1])
+        im = bg
+    elif im.mode != 'RGB':
+        im = im.convert('RGB')
+    if im.width > IMAGE_WIDTH:
+        im = im.resize((IMAGE_WIDTH, round(im.height * IMAGE_WIDTH / im.width)), Image.LANCZOS)
+    out = io.BytesIO()
+    im.save(out, 'JPEG', quality=82, optimize=True)
+    return out.getvalue()
+
+
+def _inline_images(units, most=40):
     """The doc's picture links only open from a server (a browser signed in to Google gets refused, 11/19), so the
-    pictures of the top part (the thumbnail) travel inside the answer."""
+    pictures travel inside the answer, made small."""
     import base64
-    for u in [x for x in units if x['kind'] == 'image'][:4]:
+    for u in [x for x in units if x['kind'] == 'image'][:most]:
         src = u['src']
         key = src.split('?')[0]
         if key not in _image_cache:
             try:
                 r = httpx.get(src, timeout=15, follow_redirects=True)
                 r.raise_for_status()
-                if len(r.content) > 3_000_000: continue
-                kind = r.headers.get('content-type', 'image/jpeg').split(';')[0]
-                _image_cache[key] = f'data:{kind};base64,' + base64.b64encode(r.content).decode()
-                if len(_image_cache) > 30: _image_cache.pop(next(iter(_image_cache)))
+                if len(r.content) > 20_000_000: continue
+                try:
+                    data, kind = _small(r.content), 'image/jpeg'
+                except Exception:
+                    data, kind = r.content, r.headers.get('content-type', 'image/jpeg').split(';')[0]
+                _image_cache[key] = f'data:{kind};base64,' + base64.b64encode(data).decode()
+                if len(_image_cache) > 80: _image_cache.pop(next(iter(_image_cache)))
             except Exception:
                 continue
         u['src'] = _image_cache[key]
@@ -295,6 +325,13 @@ def suggestions_of(units):
     in suggestion mode on this screen (kept here, not in the doc)."""
     out = {}
     for u in units:
+        if u['kind'] == 'image':
+            for kind in ('ins', 'del'):
+                sid = u.get(kind)
+                if sid:
+                    s = out.setdefault(sid, {'id': sid, 'ins': '', 'del': '', 'n': u['n'], 'by': 'doc'})
+                    s[kind] += '［画像］'
+            continue
         for seg in u.get('segs') or ():
             for kind in ('ins', 'del'):
                 sid = seg.get(kind)
@@ -584,6 +621,85 @@ def delete_requests(doc, u):
     return [{'deleteContentRange': {'range': {'startIndex': u['start'], 'endIndex': end}}}]
 
 
+IMAGE_TYPES = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.png'}
+PAGE_WIDTH_PT = 468         # the doc's text width (612 pt page, 72 pt margins)
+
+
+def image_requests(doc, after_para, uri, width_pt):
+    """A new paragraph holding the picture right after paragraph ``after_para`` (a plain paragraph, not a heading)."""
+    content = doc.get('body', {}).get('content', [])
+    if not (0 <= after_para < len(content)) or 'paragraph' not in content[after_para]:
+        raise ListenError('画像を入れる場所が分かりませんでした。入れたい所の文を押してから、もう一度貼ってください。', 409)
+    end = content[after_para]['endIndex']
+    return [
+        {'insertText': {'location': {'index': end - 1}, 'text': '\n'}},
+        {'updateParagraphStyle': {'range': {'startIndex': end, 'endIndex': end + 1},
+                                  'paragraphStyle': {'namedStyleType': 'NORMAL_TEXT'}, 'fields': 'namedStyleType'}},
+        {'insertInlineImage': {'location': {'index': end}, 'uri': uri,
+                               'objectSize': {'width': {'magnitude': width_pt, 'unit': 'PT'}}}},
+    ]
+
+
+def add_image(doc_id, after_para, data, content_type):
+    """A picture the owner pasted on the screen, into the doc under the paragraph the cursor was in (11/20 本人「この
+    読み上げページ（台本エディター）には画像も貼れるようにしたい」). Google reads the picture from Dan's public file link."""
+    import uuid
+    from PIL import Image
+    from app.paths import LIVE_ROOT
+    kind = (content_type or '').split(';')[0].strip().lower()
+    if kind not in IMAGE_TYPES: raise ListenError('貼れるのは PNG・JPEG・GIF・WebP の画像です。')
+    if not data or len(data) > 20_000_000: raise ListenError('画像が大きすぎます（20MBまで）。')
+    try:
+        im = Image.open(io.BytesIO(data)); im.load()
+    except Exception:
+        raise ListenError('画像を読めませんでした。')
+    if kind == 'image/webp':                    # Docs takes PNG / JPEG / GIF only
+        out = io.BytesIO(); im.save(out, 'PNG'); data = out.getvalue()
+    name = f'script-image-{uuid.uuid4().hex}{IMAGE_TYPES[kind]}'
+    folder = LIVE_ROOT / 'uploads'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(data)
+    origin = os.environ.get('DAN_PUBLIC_ORIGIN') or 'https://dan.paina.info'
+    width = max(60, min(PAGE_WIDTH_PT, round(im.width * 0.75)))
+    _follow(doc_id)
+    with _owner_lock:
+        doc = fetch(doc_id)
+        reqs = image_requests(doc, after_para, f'{origin}/api/v1/files/{name}', width)
+        done = _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
+                     body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+    _log_owner_action(doc_id, doc.get('title', ''), action='image', file=name, after_para=after_para)
+    return {'changed': True, 'para': after_para + 1, 'file': f'/api/v1/files/{name}',
+            'revision': (done.get('writeControl') or {}).get('requiredRevisionId')}
+
+
+def image_delete_requests(doc, object_id):
+    """Take a picture out; its paragraph goes too when the picture was all it held."""
+    for el in doc.get('body', {}).get('content', []):
+        p = el.get('paragraph')
+        if not p: continue
+        for e in p.get('elements', []):
+            ioe = e.get('inlineObjectElement')
+            if not ioe or ioe.get('inlineObjectId') != object_id: continue
+            if ioe.get('suggestedInsertionIds') or ioe.get('suggestedDeletionIds'):
+                raise ListenError('提案の画像は、提案の札で「承認」か「却下」を押してください。', 409)
+            alone = all(x is e or ((x.get('textRun') or {}).get('content', '').strip() == '') for x in p['elements'])
+            if alone and el['endIndex'] < doc['body']['content'][-1]['endIndex']:
+                return [{'deleteContentRange': {'range': {'startIndex': el['startIndex'], 'endIndex': el['endIndex']}}}]
+            return [{'deleteContentRange': {'range': {'startIndex': e['startIndex'], 'endIndex': e['endIndex']}}}]
+    raise ListenError('その画像はもうドキュメントにありません。', 409)
+
+
+def remove_image(doc_id, object_id):
+    _follow(doc_id)
+    with _owner_lock:
+        doc = fetch(doc_id)
+        reqs = image_delete_requests(doc, object_id)
+        _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
+              body={'requests': reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+    _log_owner_action(doc_id, doc.get('title', ''), action='image-delete', object=object_id)
+    return {'changed': True}
+
+
 def _log_owner_edit(doc_id, title, old, new):
     # The doc shows these edits under Dan's Google account; this file keeps that they were the owner's words. The
     # learning reads it (script_learning.owner_actions).
@@ -617,6 +733,17 @@ def decide(doc_id, sid, accept, by_edit=False):
         nxt = (paras[k + 1]['paragraph'].get('paragraphStyle') or {}).get('namedStyleType', 'NORMAL_TEXT') if k + 1 < len(paras) else None
         for e in p.get('elements', []):
             r = e.get('textRun')
+            ioe = e.get('inlineObjectElement')
+            if ioe and (sid in (ioe.get('suggestedInsertionIds') or []) or sid in (ioe.get('suggestedDeletionIds') or [])):
+                # A picture in the suggestion (Dan puts screenshots in as suggestions, 11/20): written again plainly
+                # from its own picture link when it stays, taken out when it goes.
+                kind = 'ins' if sid in (ioe.get('suggestedInsertionIds') or []) else 'del'
+                emb = ((doc.get('inlineObjects') or {}).get(ioe.get('inlineObjectId'), {}).get('inlineObjectProperties') or {}).get('embeddedObject') or {}
+                image = {'uri': (emb.get('imageProperties') or {}).get('contentUri'), 'size': emb.get('size')}
+                if (kind == 'ins') == accept and not image['uri']:
+                    raise ListenError('この提案の画像を読めませんでした。ドキュメントで決めてください。', 409)
+                runs.append((e['startIndex'], e.get('endIndex', e['startIndex'] + 1), kind, '', {}, pstyle, nxt, image))
+                continue
             if not r: continue
             ins, dele = r.get('suggestedInsertionIds') or [], r.get('suggestedDeletionIds') or []
             if sid not in ins and sid not in dele: continue
@@ -639,7 +766,7 @@ def decide(doc_id, sid, accept, by_edit=False):
           body={'requests': text_reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
     if style_reqs:
         _docs('POST', f'{doc_id}:batchUpdate', doc['_account'], body={'requests': style_reqs})
-    added = ''.join(r[3] for r in runs if r[2] == 'ins').strip()
+    added = ''.join(r[3] or '' for r in runs if r[2] == 'ins').strip()
     removed = ''.join(r[3] for r in runs if r[2] == 'del').strip()
     _log_owner_action(doc_id, doc.get('title', ''), action='accept' if accept else 'reject', suggestion=sid,
                       added=added, removed=removed, **({'by_edit': True} if by_edit else {}))
@@ -689,6 +816,17 @@ def accept_all(doc_id):
         nxt = (paras[k + 1]['paragraph'].get('paragraphStyle') or {}).get('namedStyleType', 'NORMAL_TEXT') if k + 1 < len(paras) else None
         for e in p.get('elements', []):
             r = e.get('textRun')
+            ioe = e.get('inlineObjectElement')
+            if ioe and (sid in (ioe.get('suggestedInsertionIds') or []) or sid in (ioe.get('suggestedDeletionIds') or [])):
+                # A picture in the suggestion (Dan puts screenshots in as suggestions, 11/20): written again plainly
+                # from its own picture link when it stays, taken out when it goes.
+                kind = 'ins' if sid in (ioe.get('suggestedInsertionIds') or []) else 'del'
+                emb = ((doc.get('inlineObjects') or {}).get(ioe.get('inlineObjectId'), {}).get('inlineObjectProperties') or {}).get('embeddedObject') or {}
+                image = {'uri': (emb.get('imageProperties') or {}).get('contentUri'), 'size': emb.get('size')}
+                if (kind == 'ins') == accept and not image['uri']:
+                    raise ListenError('この提案の画像を読めませんでした。ドキュメントで決めてください。', 409)
+                runs.append((e['startIndex'], e.get('endIndex', e['startIndex'] + 1), kind, '', {}, pstyle, nxt, image))
+                continue
             if not r: continue
             ins, dele = r.get('suggestedInsertionIds') or [], r.get('suggestedDeletionIds') or []
             if not ins and not dele: continue
@@ -714,7 +852,15 @@ def decide_requests(runs, accept, body_end=None):
     Returns (text requests, style requests). The styles go in a second write at the final positions: written in the
     same write, text put back next to the suggestion's other runs still counted as suggested and lost its bold (11/19)."""
     text_reqs, kept = [], []
-    for start, end, kind, text, style, pstyle, nxt in sorted(runs, key=lambda r: r[0], reverse=True):
+    for start, end, kind, text, style, pstyle, nxt, *more in sorted(runs, key=lambda r: r[0], reverse=True):
+        image = more[0] if more else None
+        if image is not None:                     # a picture: out, and in again plainly when it stays
+            text_reqs.append({'deleteContentRange': {'range': {'startIndex': start, 'endIndex': end}}})
+            if (kind == 'ins') == accept:
+                put = {'location': {'index': start}, 'uri': image['uri']}
+                if image.get('size'): put['objectSize'] = image['size']
+                text_reqs.append({'insertInlineImage': put})
+            continue
         if body_end and end >= body_end:          # the doc's last newline cannot be deleted
             end, text = end - 1, text[:-1]
             if end <= start: continue
