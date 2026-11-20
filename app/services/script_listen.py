@@ -60,14 +60,13 @@ class ListenError(Exception):
 
 def _token(account):
     from app.services import gdoc_drive as G
-    G.request(account, 'GET', 'about', params={'fields': 'user'})
-    return G._tokens[account][0]
+    return G.access_token(account)
 
 
 def _docs(method, path, account, body=None, params=None):
-    with httpx.Client(timeout=40, trust_env=False) as c:
-        r = c.request(method, 'https://docs.googleapis.com/v1/documents/' + path,
-                      headers={'Authorization': 'Bearer ' + _token(account)}, json=body, params=params)
+    from app.services import gdoc_drive as G
+    r = G._client.request(method, 'https://docs.googleapis.com/v1/documents/' + path, timeout=40,
+                          headers={'Authorization': 'Bearer ' + _token(account)}, json=body, params=params)
     if r.status_code == 404 or r.status_code == 403:
         raise ListenError('このドキュメントを開けませんでした。ダンのGoogleアカウントに共有されているか確かめてください。', 404)
     if r.status_code == 400 and 'requiredRevisionId' in r.text:
