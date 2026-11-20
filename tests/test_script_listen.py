@@ -227,3 +227,25 @@ def test_bold_is_written_only_where_the_screen_changed_it():
     st = [r['updateTextStyle'] for r in reqs]
     assert len(st) == 1 and st[0]['textStyle'] == {'bold': True}
     assert (st[0]['range']['startIndex'] - pos[0], st[0]['range']['endIndex'] - pos[0]) == (2, 4)
+
+
+def test_anchor_note_names_the_suggestion_a_comment_is_about(tmp_path, monkeypatch):
+    """11/20: a comment written on a suggestion's card reaches Dan with that suggestion, and the rule to replace
+    Dan's own old suggestion instead of piling a second one on it."""
+    from app.services import script_listen as S
+    monkeypatch.setattr(S, 'ANCHORS', tmp_path / 'anchors.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    S._remember_anchor('c1', start=10, sentence='一括なら36万円です。', doc_id='d',
+                       suggestion=S._clean_suggestion({'id': 's1', 'ins': 'なら', 'del': 'で'}))
+    S._remember_anchor('c2', start=20, sentence='別の文。', doc_id='d')
+    note = S.anchor_note(['c1', 'c2'])
+    assert '文「一括なら36万円です。」' in note and '文「別の文。」' in note
+    assert 'c1: 提案（置き換え「で」→「なら」）' in note
+    assert 'c2: 提案' not in note
+    assert '却下してから' in note
+    # a reply on the card of Dan's new suggestion moves the thread on to it, keeping where it was written
+    S._remember_anchor('c1', doc_id='d', suggestion=S._clean_suggestion({'id': 's2', 'ins': 'の場合は', 'del': ''}))
+    a = S._anchors()['c1']
+    assert a['suggestion']['id'] == 's2' and a['sentence'] == '一括なら36万円です。'
+    assert '提案（足す「の場合は」）' in S.anchor_note(['c1'])
+    assert S.anchor_note(['c2']).count('提案') == 0
