@@ -56,6 +56,8 @@ export interface Thread {
   start: number | null;
   /** Written on a suggestion's card: the suggestion it is about (it may be gone by now). */
   suggestion?: string | null;
+  /** That suggestion's words (to find the one Dan put in for it when it is gone). */
+  suggestion_words?: { ins: string; del: string } | null;
 }
 
 async function send(path: string, init: { method?: string; body?: unknown } = {}): Promise<Response> {
