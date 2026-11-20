@@ -38,6 +38,31 @@ const LEAD = 0.17;
 const SAVE_AFTER = 900;
 
 type Clip = { url: string; el: HTMLAudioElement };
+/** Which of the suggestions now in the sentence Dan put in for the gone one: the one sharing the most of its words.
+ * Other suggestions in the same sentence (Dan's or someone's) are not it — 11/20 the talk about 「、税込」→「（税込）」
+ * moved to the 「月々約33,000円から、総額でも」 card next to it. With more than one and nothing shared, none. */
+function followingSuggestion(cands: Suggestion[], old?: { ins: string; del: string } | null): Suggestion | undefined {
+  if (cands.length <= 1) return cands[0];
+  if (!old) return undefined;
+  const grams = (t: string) => {
+    const g = new Set<string>();
+    const c = t.replace(/\s+/g, '');
+    if (c.length === 1) g.add(c);
+    for (let i = 0; i + 1 < c.length; i++) g.add(c.slice(i, i + 2));
+    return g;
+  };
+  const was = grams(old.del + '\n' + old.ins);
+  let best: Suggestion | undefined, top = 0;
+  for (const s of cands) {
+    const now = grams(s.del + '\n' + s.ins);
+    let hit = 0;
+    for (const g of now) if (was.has(g)) hit++;
+    const score = hit / Math.max(1, Math.min(was.size, now.size));
+    if (score > top) { top = score; best = s; }
+  }
+  return best;
+}
+
 type Sheet = { kind: 'threads'; ids: string[] } | { kind: 'suggestion'; id: string } | { kind: 'compose' } | { kind: 'all' } | null;
 type Draft = { quote: string; n: number; start: number | null; from?: Pos | null; to?: Pos | null };
 // Taps on a phone: one tap types there, two taps in a row play from there.
@@ -448,7 +473,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     for (const t of visibleThreads) {
       if (!t.suggestion || ids.has(t.suggestion) || t.resolved) continue;
       const n = place.get(t.id);
-      const next = suggestions.find(x => x.n === n && !taken.has(x.id));
+      const next = followingSuggestion(suggestions.filter(x => x.n === n && !taken.has(x.id)), t.suggestion_words);
       if (next) { pairs.push([next.id, t, true]); taken.add(next.id); }
     }
     const talk = new Map<string, { threads: Thread[]; earlier: boolean }>();
