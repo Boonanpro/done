@@ -1821,7 +1821,7 @@ export function ListenScreen({ docId }: { docId: string }) {
                   className="flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-[12px] font-semibold text-white shadow-sm active:bg-emerald-700 disabled:opacity-50"
                 >
                   {acceptingAll ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5 shrink-0" />}
-                  <span className="hidden sm:inline">提案を</span>すべて承認<span className="tabular-nums">（{suggestions.length}）</span>
+                  <span className="whitespace-nowrap"><span className="hidden sm:inline">提案を</span>すべて承認（{suggestions.length}）</span>
                 </button>
               )}
             </div>
