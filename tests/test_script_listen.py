@@ -249,3 +249,37 @@ def test_anchor_note_names_the_suggestion_a_comment_is_about(tmp_path, monkeypat
     assert a['suggestion']['id'] == 's2' and a['sentence'] == '一括なら36万円です。'
     assert '提案（足す「の場合は」）' in S.anchor_note(['c1'])
     assert S.anchor_note(['c2']).count('提案') == 0
+
+
+def test_activity_lists_dans_work_on_the_doc(tmp_path, monkeypatch):
+    """The screen's work monitor: the one working first, English notes and the answer's echo left out, steps in words,
+    long-ended answers not shown, other docs not shown (11/20)."""
+    import json as J
+    import time as T
+    from datetime import datetime, timezone
+    from app.services import gdoc_events as E
+    monkeypatch.setattr(E, 'ROOT', tmp_path)
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat()
+    now = T.time()
+    jobs = tmp_path / 'jobs'; jobs.mkdir()
+    def batch(bid, file_id, status, cid, events, updated):
+        with E.db() as c:
+            c.execute('INSERT INTO batches(id,file_id,payload,status,created) VALUES(?,?,?,?,?)',
+                      (bid, file_id, J.dumps([{'comment_id': cid}]), status, iso(updated - 60)))
+        (jobs / f'{bid}.json').write_text(J.dumps({'created_at': iso(updated - 60), 'updated_at': iso(updated), 'events': events}))
+    ans = '直しました。' * 120
+    batch('a', 'DOC', 'completed', 'c1', [
+        {'seq': 1, 'kind': 'progress', 'text': '作業を始めています', 'at': iso(now - 100)},
+        {'seq': 2, 'kind': 'progress', 'text': 'Menu is open; click 提案.', 'at': iso(now - 90)},
+        {'seq': 3, 'kind': 'tool', 'text': 'Bash', 'label': 'コマンド実行: python scripts/script_learning.py before --file DOC', 'at': iso(now - 80)},
+        {'seq': 4, 'kind': 'progress', 'text': ans[:500], 'at': iso(now - 70)},
+        {'seq': 5, 'kind': 'result', 'text': ans, 'at': iso(now - 70)}], now - 70)
+    batch('b', 'DOC', 'running', 'c2', [{'seq': 1, 'kind': 'progress', 'text': '作業を始めています', 'at': iso(now - 5)}], now - 5)
+    batch('old', 'DOC', 'completed', 'c3', [], now - S.DONE_SHOWN - 60)
+    batch('other', 'OTHER', 'running', 'c4', [], now)
+    out = S.activity('DOC')['jobs']
+    assert [j['id'] for j in out] == ['b', 'a']
+    a = out[1]
+    assert a['comment_ids'] == ['c1'] and a['status'] == 'completed'
+    assert [e['kind'] for e in a['events']] == ['progress', 'tool', 'result']
+    assert a['events'][1]['say'] == '直す前の本文を記録しています'
