@@ -9,6 +9,8 @@ speak: |
   - 台本の Google ドキュメントを読み上げで聞き、その場で直し、コメントでダンとやり取りする画面です。
   - 撮る時に開くのは中村さんの台本（④2本目）。開くだけでは台本は変わらない。直す確かめは消してよい写しで scripts/check_script_listen.py を使う。
 shows: []
+fingerprint: 025dcc3439fd44b8
+described: bbd0a0676cb72e3e
 ---
 # 台本を聞いて直す画面
 
@@ -32,3 +34,17 @@ shows: []
 
 - 読む・直す・コメントの裏側: app/services/script_listen.py（read・replace・decide・comments）。
 - 通しの確かめ: `python scripts/check_script_listen.py --base https://dan.paina.info --doc <ID> --edit-doc <消してよい写し> [--phone] [--comment]`。写しの作り方と片付けは記憶 project-script-listen-screen-20261118。
+
+<!-- place_map:auto:start -->
+## コードから（自動）
+
+`python scripts/place_map.py stamp script-listen` が書き直す。手で直さない。
+
+- 見張るファイル: `app/api/script_listen_screen.py`, `app/services/script_listen.py`, `frontend/src/app/script-listen/page.tsx`, `frontend/src/components/script-listen/editor-dom.ts`, `frontend/src/components/script-listen/listen-cards.tsx`, `frontend/src/components/script-listen/listen-screen.tsx`, `frontend/src/lib/script-listen-api.ts`
+- ラベル: 「書き方」、「画像を入れる」、「声」、「ドキュメント」、「ダンの作業の様子を見る」、「前の文」、「次の文」、「ダンと台本」、「閉じる」、「ダンが直している所へ」、「コメントを追加」
+- 試験の印: 「card-dan-line」、「script-editor」、「chat-toggle」、「compare-toggle」、「image-add」、「dan-bar」、「ref-panel」、「listen-thumb」、「dan-glow」
+- ボタンの字: 「開く」、「やめる」
+- 見出し: 「台本を聞く」
+
+<!-- place_map:files {"app/api/script_listen_screen.py": "2de5c7c510", "app/services/script_listen.py": "c854addf6a", "frontend/src/app/script-listen/page.tsx": "3f1dbf07f6", "frontend/src/components/script-listen/editor-dom.ts": "7101a9b8f2", "frontend/src/components/script-listen/listen-cards.tsx": "7551bb2441", "frontend/src/components/script-listen/listen-screen.tsx": "9c078e474e", "frontend/src/lib/script-listen-api.ts": "213e1cd2cb"} -->
+<!-- place_map:auto:end -->
