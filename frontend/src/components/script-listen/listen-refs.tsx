@@ -9,7 +9,7 @@ import { ExternalLink, PlayCircle } from 'lucide-react';
 import type { Reference } from '@/lib/script-listen-api';
 import { cn } from '@/lib/utils';
 
-export interface SectionHead { n: number; text: string }
+export interface SectionHead { n: number; text: string; level: number }
 
 const norm = (s: string) => s.replace(/[▼◎■●・【】［］\[\]「」\s　]/g, '');
 
@@ -28,10 +28,21 @@ function at(url: string, sec: number) {
   }
 }
 
-/** Which heading of the script each section of a reference lines up with. */
+/** Which heading of the script each section of a reference lines up with: the heading of that name, or (renamed
+ * or missing) the heading at the same place among the script's top headings (【】, or ▼ when there are no 【】). */
 export function lineUp(ref: Reference, heads: SectionHead[]): (number | null)[] {
   const byName = new Map(heads.map(h => [norm(h.text), h.n]));
-  return ref.sections.map((s, i) => byName.get(norm(s.match)) ?? heads[i]?.n ?? null);
+  const top = Math.min(...heads.map(h => h.level));
+  const tops = heads.filter(h => h.level === top);
+  return ref.sections.map((s, i) => byName.get(norm(s.match)) ?? tops[i]?.n ?? null);
+}
+
+/** The section of the reference for where the owner is: the last one whose heading is at or above that place. */
+function sectionAt(lined: (number | null)[], here: number | null): number {
+  if (here == null) return -1;
+  let best = -1, bestN = -1;
+  lined.forEach((n, i) => { if (n != null && n <= here && n > bestN) { best = i; bestN = n; } });
+  return best;
 }
 
 export function RefsPanel({ refs, heads, here, onGo, side }: {
@@ -52,13 +63,14 @@ export function RefsPanel({ refs, heads, here, onGo, side }: {
   useEffect(() => {
     const box = boxRef.current;
     if (!box || here == null) return;
-    const i = lined.indexOf(here);
+    const i = sectionAt(lined, here);
     const el = i >= 0 ? box.querySelector<HTMLElement>(`[data-ref-sec="${i}"]`) : null;
     if (!el) return;
     const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - 8;
     box.scrollTo({ top, behavior: 'smooth' });
   }, [here, lined, pick]);
 
+  const lit = sectionAt(lined, here);
   if (!ref) return null;
   return (
     <div className={cn('flex min-h-0 min-w-0 flex-1 flex-col bg-white', side ? 'border-l border-stone-200' : 'border-t-2 border-stone-300')}>
@@ -74,7 +86,7 @@ export function RefsPanel({ refs, heads, here, onGo, side }: {
               className={cn('rounded-full border px-2.5 py-0.5 text-[12px]', i === pick
                 ? 'border-sky-700 bg-sky-700 text-white' : 'border-stone-300 bg-white text-stone-700')}
             >
-              {r.who}「{r.title}」
+              {r.who}<span className="hidden sm:inline">「{r.title}」</span>
             </button>
           ))}
           {ref.url && (
@@ -88,7 +100,7 @@ export function RefsPanel({ refs, heads, here, onGo, side }: {
       <div ref={boxRef} data-testid="ref-box" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-24 pt-2">
         {ref.sections.map((s, i) => {
           const n = lined[i];
-          const on = n != null && n === here;
+          const on = i === lit;
           return (
             <section key={i} data-ref-sec={i} className={cn('mb-3 rounded-lg px-2.5 py-2 transition-colors', on ? 'bg-sky-50 ring-1 ring-sky-300' : '')}>
               <div className="mb-1 flex items-center gap-2">

@@ -1335,12 +1335,11 @@ export function ListenScreen({ docId }: { docId: string }) {
     return () => { live = false; };
   }, [docId]);
   useEffect(() => { localStorage.setItem(COMPARE_KEY, compare ? '1' : '0'); }, [compare]);
-  /** The sections of the spoken part: the read headings under ◎台本 (▼ / 【】). */
+  /** The headings of the spoken part: every read heading under ◎台本 (【】 and the ▼ inside them), in order. */
   const heads = useMemo<SectionHead[]>(() => {
     const hs = units.filter(u => u.kind === 'heading' && u.read) as Extract<ListenUnit, { kind: 'heading' }>[];
-    const top = Math.min(...hs.map(h => h.level));
-    const inner = hs.filter(h => h.level > top);
-    return (inner.length ? inner : hs).map(h => ({ n: h.n, text: h.text }));
+    const i = hs.findIndex(h => h.text.replace(/\s/g, '') === '◎台本');
+    return (i >= 0 ? hs.slice(i + 1) : hs).map(h => ({ n: h.n, text: h.text, level: h.level }));
   }, [units]);
   // Where the owner is in the script: the last section heading above a third of the way down the script's box.
   useEffect(() => {
