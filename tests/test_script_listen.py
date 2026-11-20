@@ -123,7 +123,7 @@ def test_top_part_keeps_pictures():
     doc['body']['content'][1]['paragraph']['elements'].insert(0, {'startIndex': 1, 'inlineObjectElement': {'inlineObjectId': 'i.0'}})
     doc['inlineObjects'] = {'i.0': {'inlineObjectProperties': {'embeddedObject': {'imageProperties': {'contentUri': 'https://x/img'}}}}}
     units = S.outline(doc)
-    assert {'kind': 'image', 'src': 'https://x/img'} in units
+    assert {'kind': 'image', 'src': 'https://x/img', 'id': 'i.0', 'para': 1, 'section': 'top'} in units
 
 
 def _apply(text, reqs, base=1):
@@ -283,3 +283,67 @@ def test_activity_lists_dans_work_on_the_doc(tmp_path, monkeypatch):
     assert a['comment_ids'] == ['c1'] and a['status'] == 'completed'
     assert [e['kind'] for e in a['events']] == ['progress', 'tool', 'result']
     assert a['events'][1]['say'] == '直す前の本文を記録しています'
+
+
+def _with_picture(doc, para, oid, uri='https://x/img', **marks):
+    el = doc['body']['content'][para]
+    start = el['paragraph']['elements'][0]['startIndex']
+    for e in el['paragraph']['elements']: e['startIndex'] += 1
+    for later in doc['body']['content'][para + 1:]:
+        later['startIndex'] += 1
+        for e in later['paragraph']['elements']: e['startIndex'] += 1
+    el['paragraph']['elements'].insert(0, {'startIndex': start, 'endIndex': start + 1, 'inlineObjectElement': {'inlineObjectId': oid, **marks}})
+    doc.setdefault('inlineObjects', {})[oid] = {'inlineObjectProperties': {'embeddedObject': {
+        'imageProperties': {'contentUri': uri}, 'size': {'width': {'magnitude': 468, 'unit': 'PT'}}}}}
+    for el in doc['body']['content']:
+        els = el['paragraph']['elements']
+        el['endIndex'] = els[-1]['startIndex'] + (1 if 'inlineObjectElement' in els[-1] else sum(S._units16(c) for c in els[-1]['textRun']['content']))
+    return doc
+
+
+def test_pictures_in_the_script_show_where_they_are():
+    # 11/20: the screenshots under a comment line were in the doc but only the top part showed pictures
+    doc = _doc(('◎台本\n', 'HEADING_2'), '［コメントを画面に出す］\n', '\n', '次の文です。\n')
+    _with_picture(doc, 2, 'kix.a', suggestedInsertionIds=['s1'])
+    units = S.outline(doc)
+    for n, u in enumerate(units): u['n'] = n
+    kinds = [u['kind'] for u in units]
+    pic = next(u for u in units if u['kind'] == 'image')
+    assert kinds.index('image') > kinds.index('note') and kinds.index('image') < kinds.index('say')
+    assert pic['id'] == 'kix.a' and pic['ins'] == 's1' and pic['para'] == 2 and 'section' not in pic
+    assert {'id': 's1', 'ins': '［画像］', 'del': '', 'n': pic['n'], 'by': 'doc'} in S.suggestions_of(units)
+
+
+def test_a_suggested_picture_is_written_again_plainly_when_taken():
+    runs = [(10, 11, 'ins', '', {}, 'NORMAL_TEXT', None, {'uri': 'https://x/img', 'size': {'w': 1}}),
+            (11, 12, 'ins', '\n', {}, 'NORMAL_TEXT', 'NORMAL_TEXT')]
+    text, _ = S.decide_requests(runs, True)
+    assert {'insertInlineImage': {'location': {'index': 10}, 'uri': 'https://x/img', 'objectSize': {'w': 1}}} in text
+    assert text[-2] == {'deleteContentRange': {'range': {'startIndex': 10, 'endIndex': 11}}}
+    gone, _ = S.decide_requests(runs, False)
+    assert not any('insertInlineImage' in r for r in gone)
+    assert {'deleteContentRange': {'range': {'startIndex': 10, 'endIndex': 11}}} in gone
+
+
+def test_a_pasted_picture_goes_in_a_new_plain_paragraph_after_the_cursor():
+    doc = _doc(('◎台本\n', 'HEADING_2'), ('見出し\n', 'HEADING_3'), '次の文です。\n')
+    for el in doc['body']['content']:
+        el['endIndex'] = el['startIndex'] + sum(S._units16(c) for c in el['paragraph']['elements'][0]['textRun']['content'])
+    end = doc['body']['content'][1]['endIndex']
+    reqs = S.image_requests(doc, 1, 'https://dan/api/v1/files/a.png', 300)
+    assert reqs[0] == {'insertText': {'location': {'index': end - 1}, 'text': '\n'}}
+    assert reqs[1]['updateParagraphStyle']['paragraphStyle'] == {'namedStyleType': 'NORMAL_TEXT'}
+    assert reqs[2]['insertInlineImage']['location'] == {'index': end}
+    import pytest
+    with pytest.raises(S.ListenError): S.image_requests(doc, 9, 'u', 300)
+
+
+def test_taking_a_picture_out_takes_its_empty_paragraph_too():
+    doc = _doc(('◎台本\n', 'HEADING_2'), '\n', '次の文です。\n')
+    _with_picture(doc, 1, 'kix.p')
+    el = doc['body']['content'][1]
+    assert S.image_delete_requests(doc, 'kix.p') == [{'deleteContentRange': {'range': {'startIndex': el['startIndex'], 'endIndex': el['endIndex']}}}]
+    doc2 = _with_picture(_doc(('◎台本\n', 'HEADING_2'), '\n', '次の文です。\n'), 1, 'kix.q', suggestedInsertionIds=['s'])
+    import pytest
+    with pytest.raises(S.ListenError): S.image_delete_requests(doc2, 'kix.q')
+    with pytest.raises(S.ListenError): S.image_delete_requests(doc, 'kix.none')

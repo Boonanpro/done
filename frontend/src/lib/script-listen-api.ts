@@ -11,7 +11,8 @@ export type Seg = { t: string; ins?: string; del?: string; blue?: boolean; b?: b
 
 export type ListenUnit =
   | { n: number; kind: 'title'; text: string }
-  | { n: number; kind: 'image'; src: string }
+  /** A picture where it is in the doc. ins / del: the suggestion that adds / takes it out. */
+  | { n: number; kind: 'image'; src: string; id?: string; para?: number; ins?: string; del?: string; section?: string }
   | { n: number; kind: 'heading'; level: number; text: string; read: boolean; segs?: Seg[]; para?: number }
   | { n: number; kind: 'note'; text: string; section?: string; para?: number; segs?: Seg[] }
   | { n: number; kind: 'blank'; text: string; section?: string; para: number; segs: Seg[] }
@@ -147,6 +148,11 @@ export const listenApi = {
     json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments/${encodeURIComponent(cid)}/reply`, { text, suggestion }),
   settle: (id: string, cid: string, reopen = false) =>
     json<{ done: boolean }>(`/doc/${encodeURIComponent(id)}/comments/${encodeURIComponent(cid)}/settle`, { reopen }),
+  /** 画像（base64）を、段落 after_para の下の新しい段落としてドキュメントに入れる。 */
+  addImage: (id: string, afterPara: number, type: string, data: string) =>
+    json<{ changed: boolean; para: number }>(`/doc/${encodeURIComponent(id)}/image`, { after_para: afterPara, type, data }),
+  removeImage: (id: string, objectId: string) =>
+    json<{ changed: boolean }>(`/doc/${encodeURIComponent(id)}/image/delete`, { id: objectId }),
   decide: (id: string, sid: string, accept: boolean) =>
     json<{ done: boolean }>(`/doc/${encodeURIComponent(id)}/suggestion`, { id: sid, accept }),
   /** 1文の音声（mp3）。まだ無ければ裏で作ってから返る（1文2秒ほど）。 */
