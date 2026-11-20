@@ -17,6 +17,8 @@ watches:
   - frontend/src/components/script-listen/listen-screen.tsx
   - frontend/src/components/script-listen/listen-chat.tsx
   - app/services/script_rooms.py
+fingerprint: 1e8e98c6352153b1
+described: 8e6c4602edc6ab0f
 ---
 # 台本を聞く画面の「ダンと台本」
 
@@ -37,3 +39,15 @@ watches:
 
 - 台本の中身: `python -m app.services.script_rooms text <台本のID>`（段落番号つき、画面と同じ並び）
 - サムネ: `python scripts/thumb.py show <部屋> <作品>` ほか。ドキュメントの絵へ入れるのは `python -m app.services.script_listen_thumbs sync <台本のID>`
+
+<!-- place_map:auto:start -->
+## コードから（自動）
+
+`python scripts/place_map.py stamp script-room` が書き直す。手で直さない。
+
+- 見張るファイル: `app/services/script_rooms.py`, `frontend/src/components/script-listen/listen-screen.tsx`
+- ラベル: 「書き方」、「画像を入れる」、「声」、「ドキュメント」、「ダンの作業の様子を見る」、「前の文」、「次の文」、「ダンと台本」、「閉じる」、「ダンが直している所へ」、「コメントを追加」
+- 試験の印: 「script-editor」、「chat-toggle」、「compare-toggle」、「image-add」、「dan-bar」、「ref-panel」、「listen-thumb」、「dan-glow」
+
+<!-- place_map:files {"app/services/script_rooms.py": "56c20031cd", "frontend/src/components/script-listen/listen-screen.tsx": "5fce11d231"} -->
+<!-- place_map:auto:end -->
