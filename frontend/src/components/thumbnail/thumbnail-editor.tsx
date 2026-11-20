@@ -27,6 +27,8 @@ type Props = {
   compact?: boolean;
   phoneChat?: ((lead: ReactNode) => ReactNode) | null;
   onBack: () => void;
+  /** 戻るボタンの説明（既定はエディターのライブラリへ。台本を聞く画面では「台本に戻る」） */
+  backLabel?: string;
 };
 
 type JobState = { job_id: string; state: string; label: string; active: boolean; progress?: string | null; result?: string | null };
@@ -64,6 +66,7 @@ function scalePart(p: ThumbPart, [ax, ay]: [number, number], k: number): ThumbPa
     y: ay + (p.y - ay) * k,
     size: Math.max(4, Math.round(p.size * k * 10) / 10),
     stroke_width: r(p.stroke_width),
+    outline_width: r(p.outline_width),
     letter_spacing: r(p.letter_spacing),
     line_height: r(p.line_height),
     bg: p.bg ? { ...p.bg, top: p.bg.top * k, bottom: p.bg.bottom * k, left: p.bg.left * k, right: p.bg.right * k, radius: (p.bg.radius || 0) * k } : p.bg,
@@ -77,7 +80,7 @@ function partLabel(p: ThumbPart) {
   return '絵';
 }
 
-export function ThumbnailEditor({ roomId, contentId, title, compact = false, phoneChat, onBack }: Props) {
+export function ThumbnailEditor({ roomId, contentId, title, compact = false, phoneChat, onBack, backLabel }: Props) {
   const [doc, setDoc] = useState<ThumbDoc | null>(null);
   const docRef = useRef<ThumbDoc | null>(null);
   docRef.current = doc;
@@ -668,6 +671,12 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
             <label><span className={label}>縁の太さ</span>
               <input type="number" className={field} value={Math.round(sel.stroke_width || 0)} min={0} onChange={(e) => updatePart(sel.id, { stroke_width: Math.max(0, Number(e.target.value)) })} />
             </label>
+            <label><span className={label}>外の縁の色</span>
+              <input type="color" className="h-8 w-full rounded border border-border" value={(sel.outline || '#000000').slice(0, 7)} onChange={(e) => updatePart(sel.id, { outline: e.target.value, outline_width: sel.outline_width || Math.round((sel.stroke_width || 0) * 1.8) || 20 })} />
+            </label>
+            <label><span className={label}>外の縁の太さ</span>
+              <input type="number" className={field} value={Math.round(sel.outline_width || 0)} min={0} onChange={(e) => updatePart(sel.id, { outline_width: Math.max(0, Number(e.target.value)) })} data-thumb-outline />
+            </label>
             <label><span className={label}>字の間</span>
               <input type="number" className={field} value={Math.round(sel.letter_spacing || 0)} onChange={(e) => updatePart(sel.id, { letter_spacing: Number(e.target.value) })} />
             </label>
@@ -827,7 +836,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     return (
       <div className="relative flex h-full min-h-0 flex-col bg-background" data-thumb-editor="phone">
         <div className="flex shrink-0 items-center gap-2 px-2 py-1.5">
-          <button type="button" onClick={onBack} className="rounded p-1.5 hover:bg-muted" title="戻る"><ArrowLeft className="h-5 w-5" /></button>
+          <button type="button" onClick={onBack} className="rounded p-1.5 hover:bg-muted" title={backLabel || '戻る'} aria-label={backLabel || '戻る'} data-thumb-back><ArrowLeft className="h-5 w-5" /></button>
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</span>
           <span className="text-[11px] text-muted-foreground">{savingText}</span>
         </div>
@@ -861,7 +870,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   return (
     <div className="flex h-full min-h-0 flex-col bg-background" data-thumb-editor="pc">
       <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
-        <button type="button" onClick={onBack} className="rounded p-1.5 hover:bg-muted" title="ライブラリへ戻る"><ArrowLeft className="h-4 w-4" /></button>
+        <button type="button" onClick={onBack} className="flex items-center gap-1 rounded p-1.5 text-xs hover:bg-muted" title={backLabel || 'ライブラリへ戻る'} aria-label={backLabel || 'ライブラリへ戻る'} data-thumb-back><ArrowLeft className="h-4 w-4" />{backLabel ? <span>{backLabel}</span> : null}</button>
         <h1 className="min-w-0 max-w-[30%] truncate text-sm font-semibold">{title}</h1>
         <div className="ml-2 min-w-0 flex-1">{tools}</div>
         <span className="text-[11px] text-muted-foreground">{savingText}</span>

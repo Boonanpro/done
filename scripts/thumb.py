@@ -5,6 +5,7 @@
   python scripts/thumb.py set     <部屋> <作品> <部品id> key=値 …     数値・色・文字を直す
         例: x=820 y+=-30 size=300 fill=#ffe400 stroke_width=22 text="先に\\nビジネス" font=hiragino-w9
             hidden=true opacity=0.8 rotation=-4 shadow.blur=12 bg.color=#0a080ed7
+            二重の縁: stroke=#ffffff stroke_width=16 outline=#000000 outline_width=30（外の縁。影は外の縁に付く）
             画像は x y w h（scale=1.1 で真ん中を中心に大きさを変える）
   python scripts/thumb.py order   <部屋> <作品> <部品id> front|back|up|down
   python scripts/thumb.py add-text <部屋> <作品> "文字" x y [size] [fill]
@@ -77,7 +78,8 @@ def show(doc: dict) -> str:
         else:
             t = str(p.get('text') or '').replace('\n', '\\n')
             out.append(f"- {p['id']} [文字] 「{t}」 {p.get('name') or ''}  x={p.get('x')} y={p.get('y')}(ベースライン) size={p.get('size')} "
-                       f"font={p.get('font')} fill={p.get('fill')} 縁={p.get('stroke')}/{p.get('stroke_width')} 字間={p.get('letter_spacing') or 0}{flags}")
+                       f"font={p.get('font')} fill={p.get('fill')} 縁={p.get('stroke')}/{p.get('stroke_width')}"
+                       f"{(' 外の縁=' + str(p.get('outline')) + '/' + str(p.get('outline_width'))) if p.get('outline_width') else ''} 字間={p.get('letter_spacing') or 0}{flags}")
     return '\n'.join(out)
 
 

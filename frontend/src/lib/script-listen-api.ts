@@ -12,7 +12,9 @@ export type Seg = { t: string; ins?: string; del?: string; blue?: boolean; b?: b
 export type ListenUnit =
   | { n: number; kind: 'title'; text: string }
   /** A picture where it is in the doc. ins / del: the suggestion that adds / takes it out. */
-  | { n: number; kind: 'image'; src: string; id?: string; para?: number; ins?: string; del?: string; section?: string }
+  | { n: number; kind: 'image'; src: string; id?: string; para?: number; ins?: string; del?: string; section?: string;
+      /** A picture of the top part (a thumbnail): its place among them, and its work made of parts when it has one. */
+      thumb_order?: number; thumb?: string }
   | { n: number; kind: 'heading'; level: number; text: string; read: boolean; segs?: Seg[]; para?: number }
   | { n: number; kind: 'note'; text: string; section?: string; para?: number; segs?: Seg[] }
   | { n: number; kind: 'blank'; text: string; section?: string; para: number; segs: Seg[] }
@@ -76,6 +78,8 @@ export interface DanJob {
   started: string;
   updated: string | null;
   events: WorkEvent[];
+  /** The words Dan's browser step is selecting / typing in the doc now (live), or did a few seconds ago. */
+  touch?: { words: string[]; live: boolean } | null;
 }
 
 export interface Thread {
@@ -128,7 +132,18 @@ export function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** A thumbnail of the doc tied to a work made of parts (app/services/script_listen_thumbs.py). */
+export interface ThumbItem { order: number; object: string; content_id: string; synced_rev: number; rev: number; stale: boolean }
+
 export const listenApi = {
+  thumbOpen: (id: string, object: string | null, order: number | null) =>
+    json<{ room_id: string; content_id: string }>(`/doc/${encodeURIComponent(id)}/thumb/open`, { object, order }),
+  thumbs: (id: string) => json<{ items: ThumbItem[] }>(`/doc/${encodeURIComponent(id)}/thumbs`),
+  thumbSync: (id: string, contentId?: string) => json<{ changed?: number; busy?: boolean }>(`/doc/${encodeURIComponent(id)}/thumb/sync`, { content_id: contentId || null }),
+  /** The room of the chat at the side of the screen (app/services/script_rooms.py). */
+  room: (id: string) => json<{ project_id: string; room_id: string; title: string }>(`/doc/${encodeURIComponent(id)}/room`, {}),
+  state: (id: string, body: { para?: number | null; sentence?: string; selection?: string; playing?: boolean; thumb?: string }) =>
+    json<{ ok: boolean }>(`/doc/${encodeURIComponent(id)}/state`, body),
   doc: (id: string, voice: string) => json<ListenDoc>(`/doc/${encodeURIComponent(id)}?voice=${encodeURIComponent(voice)}`),
   references: (id: string) => json<{ refs: Reference[] }>(`/doc/${encodeURIComponent(id)}/references`),
   version: (id: string) => json<{ version: string | null }>(`/doc/${encodeURIComponent(id)}/version`),
@@ -140,6 +155,7 @@ export const listenApi = {
     para_from: number; para_to: number; old: string; new: string; old_bmask: string; new_bmask: string; new_dmask?: string; mode?: EditMode;
   }) => json<ReplaceResult>(`/doc/${encodeURIComponent(id)}/replace`, body),
   acceptAll: (id: string) => json<{ accepted: number; failed: number }>(`/doc/${encodeURIComponent(id)}/suggestions/accept-all`, {}),
+  rejectAll: (id: string) => json<{ rejected: number; failed: number }>(`/doc/${encodeURIComponent(id)}/suggestions/reject-all`, {}),
   activity: (id: string) => json<{ jobs: DanJob[] }>(`/doc/${encodeURIComponent(id)}/activity`),
   comments: (id: string) => json<{ threads: Thread[]; can_comment: boolean }>(`/doc/${encodeURIComponent(id)}/comments`),
   addComment: (id: string, body: { text: string; quote: string; start?: number | null; sentence?: string; suggestion?: Suggestion }) =>

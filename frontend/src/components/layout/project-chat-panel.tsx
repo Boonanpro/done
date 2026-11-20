@@ -89,6 +89,8 @@ interface ProjectChatPanelProps {
   editorChat?: boolean;
   /** エディターの欄の上の帯の左に置く物（スマホのタイムライン／チャットの切り替え） */
   editorHeaderLead?: ReactNode;
+  /** 会話がまだ無い時の一言（既定はエディターの「どんな動画を作りたいか…」） */
+  emptyHint?: string;
 }
 
 const INITIAL_CHAT_RENDER_COUNT = 80;
@@ -2311,7 +2313,7 @@ function mergeFreshMessages(
   return { messages: merged };
 }
 
-export function ProjectChatPanel({ projectId, commandCenter = false, editorChat = false, editorHeaderLead }: ProjectChatPanelProps) {
+export function ProjectChatPanel({ projectId, commandCenter = false, editorChat = false, editorHeaderLead, emptyHint }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const router = useRouter();
   const isMobile = useIsMobile();
@@ -3362,7 +3364,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
           <div className="flex h-full flex-col items-center justify-center p-6">
             <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/20" />
             <p className="text-base text-muted-foreground md:text-[17px]">
-              {editorChat ? 'どんな動画を作りたいか、ここに書くか、上の「話す」で話してください。' : 'メッセージを送信して開始してください。'}
+              {emptyHint || (editorChat ? 'どんな動画を作りたいか、ここに書くか、上の「話す」で話してください。' : 'メッセージを送信して開始してください。')}
             </p>
           </div>
         ) : (

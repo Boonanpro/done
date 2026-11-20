@@ -381,3 +381,50 @@ def test_accept_all_takes_out_a_picture_suggested_out(tmp_path, monkeypatch):
     monkeypatch.setattr(S, '_docs', lambda m, path, acc, body=None, params=None: sent.append(body) or {})
     assert S.accept_all('d') == {'accepted': 1, 'failed': 0}
     assert not any('insertInlineImage' in r for r in sent[0]['requests'])
+
+
+def test_reject_all_takes_suggested_pictures_back(tmp_path, monkeypatch):
+    # 11/20 本人「全却下ボタンも作って」: an added picture goes, a picture suggested out stays
+    doc = _doc(('◎台本\n', 'HEADING_2'), '［コメントを画面に出す］\n', '\n', '\n', '次の文です。\n')
+    _with_picture(doc, 2, 'kix.a', suggestedInsertionIds=['s1'])
+    _with_picture(doc, 3, 'kix.b', uri='https://x/kept', suggestedDeletionIds=['s2'])
+    doc['revisionId'], doc['_account'] = 'r1', 'x'
+    monkeypatch.setattr(S, 'OWNER_SUGS', tmp_path / 'sugs.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: doc)
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    logged = []
+    monkeypatch.setattr(S, '_log_owner_action', lambda *a, **k: logged.append(k['action']))
+    sent = []
+    monkeypatch.setattr(S, '_docs', lambda m, path, acc, body=None, params=None: sent.append(body) or {})
+    assert S.reject_all('d') == {'rejected': 2, 'failed': 0}
+    puts = [r['insertInlineImage']['uri'] for r in sent[0]['requests'] if 'insertInlineImage' in r]
+    assert puts == ['https://x/kept'] and logged == ['reject', 'reject']
+
+
+def test_activity_lights_only_what_dans_browser_touches_now(tmp_path, monkeypatch):
+    """11/20 本人「今その瞬間実際に操作したり編集したりしている場所が光るべき。考えているだけの時は光るべきじゃない」."""
+    import json as J
+    import time as T
+    from datetime import datetime, timezone
+    from app.services import gdoc_events as E
+    from app.mcp_server import _touch_words
+    monkeypatch.setattr(E, 'ROOT', tmp_path)
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat()
+    now = T.time()
+    jobs = tmp_path / 'jobs'; jobs.mkdir()
+    words = _touch_words('browser', {'action': 'evaluate', 'expression':
+                                     'const OPS=[{find:"全く治らなかったんです。子どもだったので",text:"全く治らなかったんです。"}];x(1)'})
+    assert words == ['全く治らなかったんです。子どもだったので', '全く治らなかったんです。']
+    assert _touch_words('browser', {'action': 'click', 'ref': '@e1'}) == []
+    assert _touch_words('browser', {'action': 'evaluate', 'expression': 'document.title'}) == []
+    def job(bid, **st):
+        with E.db() as c:
+            c.execute('INSERT INTO batches(id,file_id,payload,status,created) VALUES(?,?,?,?,?)',
+                      (bid, 'DOC', J.dumps([{'comment_id': bid}]), 'running', iso(now - 60)))
+        (jobs / f'{bid}.json').write_text(J.dumps({'created_at': iso(now - 60), 'updated_at': iso(now), 'state': 'running', 'events': [], **st}))
+    job('typing', current_tool={'name': 'browser', 'touch': words})
+    job('thinking', current_tool={'name': 'Bash'}, last_tool={'name': 'browser', 'touch': words, 'at': iso(now - 30)})
+    job('just', current_tool=None, last_tool={'name': 'browser', 'touch': words, 'at': iso(now - 1)})
+    out = {j['id']: j['touch'] for j in S.activity('DOC')['jobs']}
+    assert out == {'typing': {'words': words, 'live': True}, 'thinking': None, 'just': {'words': words, 'live': False}}

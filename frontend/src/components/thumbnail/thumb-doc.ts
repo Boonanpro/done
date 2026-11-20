@@ -37,6 +37,8 @@ export type ThumbTextPart = ThumbBase & {
   fill: string;
   stroke?: string;       // 縁の色
   stroke_width?: number; // 縁の太さ（文字の外側へ出る幅 px）
+  outline?: string;       // 外の縁の色（二重の縁。内の縁 stroke の外にもう1本）
+  outline_width?: number; // 外の縁の太さ（文字の外側へ出る幅 px。stroke_width より太くする）。影はこちらに付く
   letter_spacing?: number;
   line_height?: number;  // 行の間（px、ベースラインからベースライン）
   shadow?: ThumbShadow | null;
