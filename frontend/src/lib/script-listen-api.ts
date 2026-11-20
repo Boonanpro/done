@@ -63,6 +63,19 @@ export interface ThreadMessage {
   at?: string;
 }
 
+/** One line of Dan's work log on a comment (the same lines the chat shows while Dan works). */
+export interface WorkEvent { seq: number; kind: 'progress' | 'result' | 'error' | 'tool' | 'input'; text: string; at: string }
+
+/** Dan's answer to one or more comments: waiting, working, or just ended (kept 15 min). */
+export interface DanJob {
+  id: string;
+  status: 'pending' | 'running' | 'needs_room' | 'completed' | 'attention' | 'failed';
+  comment_ids: string[];
+  started: string;
+  updated: string | null;
+  events: WorkEvent[];
+}
+
 export interface Thread {
   id: string;
   quote: string;
@@ -125,6 +138,7 @@ export const listenApi = {
     para_from: number; para_to: number; old: string; new: string; old_bmask: string; new_bmask: string; new_dmask?: string; mode?: EditMode;
   }) => json<ReplaceResult>(`/doc/${encodeURIComponent(id)}/replace`, body),
   acceptAll: (id: string) => json<{ accepted: number; failed: number }>(`/doc/${encodeURIComponent(id)}/suggestions/accept-all`, {}),
+  activity: (id: string) => json<{ jobs: DanJob[] }>(`/doc/${encodeURIComponent(id)}/activity`),
   comments: (id: string) => json<{ threads: Thread[]; can_comment: boolean }>(`/doc/${encodeURIComponent(id)}/comments`),
   addComment: (id: string, body: { text: string; quote: string; start?: number | null; sentence?: string; suggestion?: Suggestion }) =>
     json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments`, body),

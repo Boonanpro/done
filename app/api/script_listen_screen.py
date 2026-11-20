@@ -113,6 +113,13 @@ async def get_comments(doc_id: str, user: TokenData = Depends(get_current_user))
     except Exception as exc: _fail(exc)
 
 
+@router.get('/doc/{doc_id}/activity')
+async def get_activity(doc_id: str, user: TokenData = Depends(get_current_user)):
+    """Dan's answers to the doc's comments that are going on now (or just ended), with their work log."""
+    try: return await run_in_threadpool(S.activity, S.doc_id_from(doc_id))
+    except Exception as exc: _fail(exc)
+
+
 class NewComment(BaseModel):
     text: str
     quote: str = ''

@@ -8,6 +8,8 @@ import { Check, Loader2, MessageSquare, RotateCcw, X } from 'lucide-react';
 import type { Seg, Suggestion, Thread } from '@/lib/script-listen-api';
 import { cn } from '@/lib/utils';
 
+import { useDanLive } from './listen-dan';
+
 export function SegText({ segs, onSuggestion }: { segs: Seg[]; onSuggestion?: (id: string) => void }) {
   return (
     <>
@@ -133,6 +135,8 @@ export function ThreadCard({
 
 /** The messages of one thread and whether Dan is on it (a comment card, or a suggestion's card). */
 function Messages({ thread }: { thread: Thread }) {
+  const live = useDanLive();
+  const line = thread.working && thread.working !== 'needs_room' ? live.lineFor(thread.id) : null;
   return (
     <>
       <div className="space-y-2">
@@ -149,7 +153,16 @@ function Messages({ thread }: { thread: Thread }) {
         ))}
       </div>
       {thread.working && thread.working !== 'needs_room' && (
-        <div className="mt-2 flex items-center gap-1.5 text-[12px] text-amber-800"><Loader2 className="h-3.5 w-3.5 animate-spin" />ダンが対応しています</div>
+        // The newest line of Dan's work on it; pressing it opens the whole log below (11/20).
+        <button
+          type="button"
+          data-testid="card-dan-line"
+          onClick={e => { e.stopPropagation(); live.open(thread.id); }}
+          className="mt-2 flex w-full items-start gap-1.5 rounded-md bg-sky-50 px-1.5 py-1 text-left text-[12px] text-sky-900 hover:bg-sky-100"
+        >
+          <Loader2 className="mt-[1px] h-3.5 w-3.5 shrink-0 animate-spin text-sky-600" />
+          <span className="min-w-0 flex-1 break-words"><b className="mr-1 font-semibold">ダン</b>{line || '対応しています'}</span>
+        </button>
       )}
       {thread.working === 'needs_room' && (
         <div className="mt-2 text-[12px] text-amber-800">ダンが、どの部屋の台本かを聞いています。返事に部屋の名前を書いてください。</div>

@@ -917,6 +917,50 @@ def comments(doc_id):
     return {'threads': out, 'can_comment': private}
 
 
+# How long a finished answer stays on the screen's work monitor (11/20 本人「プロセスモニターも付けたい」).
+DONE_SHOWN = 15 * 60
+_JOB_KINDS = {'progress', 'result', 'error', 'tool', 'input'}
+
+
+def _ts(value):
+    from datetime import datetime
+    try: return datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp()
+    except Exception: return 0.0
+
+
+def activity(doc_id):
+    """What Dan is doing on the doc's comments now: one entry per answer (batch) that is waiting, working or ended
+    in the last DONE_SHOWN seconds, with the comments it is about and its work log (the same lines as the chat's)."""
+    from app.services import gdoc_events as E
+    with E.db() as c:
+        rows = c.execute("SELECT id,payload,status,created,result FROM batches WHERE file_id=? ORDER BY created DESC LIMIT 12",
+                         (doc_id,)).fetchall()
+    now = time.time()
+    jobs = []
+    for r in rows:
+        try: state = json.loads((E.ROOT / 'jobs' / f"{r['id']}.json").read_text())
+        except Exception: state = {}
+        live = r['status'] in ('pending', 'running', 'needs_room')
+        ended = _ts(state.get('updated_at') or r['created'])
+        if not live and now - ended > DONE_SHOWN: continue
+        try: ids = [x['comment_id'] for x in json.loads(r['payload'])]
+        except Exception: ids = []
+        events = []
+        for e in state.get('events') or []:
+            if e.get('kind') not in _JOB_KINDS: continue
+            text = (e.get('label') if e.get('kind') == 'tool' and e.get('label') else e.get('text')) or ''
+            if e.get('kind') == 'tool': text = text.strip().splitlines()[0][:160] if text.strip() else ''
+            events.append({'seq': e.get('seq'), 'kind': e['kind'], 'text': text[:4000], 'at': e.get('at')})
+        # The batch row says if the answer really landed (a fluent reply without a Docs reply is needs_attention).
+        status = r['status'] if r['status'] in ('pending', 'running', 'needs_room') else (
+            'completed' if r['status'] == 'completed' else 'failed' if r['status'] in ('failed', 'cancelled') else 'attention')
+        if status == 'running' and state.get('state') in ('queued', 'pending', None) and not events: status = 'pending'
+        jobs.append({'id': r['id'], 'status': status, 'comment_ids': ids, 'started': state.get('created_at') or r['created'],
+                     'updated': state.get('updated_at'), 'events': events[-200:]})
+    jobs.sort(key=lambda j: (j['status'] not in ('running', 'pending', 'needs_room'), -(_ts(j['started']))))
+    return {'jobs': jobs}
+
+
 def _owner_words(text):
     text = (text or '').strip()
     if not text: raise ListenError('空のままでは送れません。')

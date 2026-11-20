@@ -19,12 +19,13 @@ import { toast } from 'sonner';
 import { get as idbGet, set as idbSet } from 'idb-keyval';
 
 import {
-  errorText, listenApi, type EditMode, type ListenDoc, type ListenUnit, type Reference, type SayUnit, type Suggestion, type Thread,
+  errorText, listenApi, type DanJob, type EditMode, type ListenDoc, type ListenUnit, type Reference, type SayUnit, type Suggestion, type Thread,
 } from '@/lib/script-listen-api';
 import { cn } from '@/lib/utils';
 
 import { buildHtml, diffLines, extract, getPos, isOwnSuggestion, leaves, nodeAt, OWN_DEL, OWN_INS, setPos, type Line, type Pos } from './editor-dom';
 import { Composer, SuggestionCard, ThreadCard } from './listen-cards';
+import { DanLiveContext, DanMonitor, isLive, latestLine } from './listen-dan';
 import { RefsPanel, type SectionHead } from './listen-refs';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
@@ -341,6 +342,9 @@ export function ListenScreen({ docId }: { docId: string }) {
   const [saving, setSaving] = useState(false);
   const [armed, setArmed] = useState(false);    // touch: the text takes typing (after a second tap on the sentence)
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [jobs, setJobs] = useState<DanJob[]>([]);           // Dan's answers to the comments, with their work log
+  const [jobSel, setJobSel] = useState<string | null>(null);
+  const [monitorOpen, setMonitorOpen] = useState(false);
   const [canComment, setCanComment] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
   const [active, setActive] = useState<string | null>(null);  // thread or suggestion id
@@ -589,6 +593,27 @@ export function ListenScreen({ docId }: { docId: string }) {
     return () => window.clearInterval(t);
   }, [busy, loadComments]);
 
+  // What Dan is doing on the comments (11/20 本人「ダンがどこを編集してるか可視化」「プロセスモニターも」): read often
+  // while he works, so his lines and his suggestions show as they come.
+  const danLive = busy || jobs.some(isLive);
+  const loadJobs = useCallback(async () => {
+    try { setJobs((await listenApi.activity(docId)).jobs); } catch { /* next time */ }
+  }, [docId]);
+  useEffect(() => {
+    const first = window.setTimeout(() => void loadJobs(), 0);
+    const t = window.setInterval(() => { if (!document.hidden) void loadJobs(); }, danLive ? 2500 : 15000);
+    return () => { window.clearTimeout(first); window.clearInterval(t); };
+  }, [danLive, loadJobs]);
+  // A job just ended: its reply is in the doc now.
+  const liveIds = jobs.filter(isLive).map(j => j.id).join(',');
+  const prevLive = useRef('');
+  useEffect(() => {
+    const was = prevLive.current.split(',').filter(Boolean);
+    prevLive.current = liveIds;
+    if (was.some(id => !liveIds.split(',').includes(id))) void loadComments();
+  }, [liveIds, loadComments]);
+  const shownJob = jobs.find(j => j.id === jobSel)?.id ?? jobs[0]?.id ?? null;
+
   const editing = () => dirtyRef.current || (!!editorRef.current && document.activeElement === editorRef.current && typedRef.current);
 
   // The doc changed elsewhere (Dan's fix, Google Docs): read it again. While the owner types, wait until they stop
@@ -618,9 +643,9 @@ export function ListenScreen({ docId }: { docId: string }) {
         const d = await load(here ? { start: here.start, text: here.text } : undefined);
         if (d && wasPlaying) void playFrom(curRef.current);
       } catch { /* next time */ }
-    }, 8000);
+    }, danLive ? 3000 : 8000);   // while Dan works his suggestions come in as he makes them
     return () => window.clearInterval(t);
-  }, [doc, docId, saving, load, playFrom, stop]);
+  }, [doc, docId, saving, load, playFrom, stop, danLive]);
 
   // ---------------------------------------------------------------- speed, voice, keys
   useEffect(() => {
@@ -667,6 +692,36 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
     return { sugTalk: talk, talkOf: new Map(pairs.map(x => [x[1].id, x[0]] as const)) };
   }, [suggestions, visibleThreads, place]);
+  // Suggestions that come into the doc while Dan works on a comment are his edits for it (not the owner's own).
+  const seenSugs = useRef<Set<string> | null>(null);
+  const [danSugs, setDanSugs] = useState<Map<string, string>>(() => new Map());   // suggestion id -> job id
+  useEffect(() => {
+    if (!doc) return;
+    const ids = suggestions.filter(x => x.by !== 'owner').map(x => x.id);
+    if (!seenSugs.current) { seenSugs.current = new Set(ids); return; }
+    const fresh = ids.filter(id => !seenSugs.current!.has(id));
+    fresh.forEach(id => seenSugs.current!.add(id));
+    const working = jobs.find(j => j.status === 'running');
+    if (working && fresh.length) setDanSugs(m => { const n = new Map(m); fresh.forEach(id => n.set(id, working.id)); return n; });
+  }, [suggestions, jobs, doc]);
+  /** The units Dan is on now: the words of the comments he is answering, and the suggestions he has put in for them. */
+  const danUnits = useMemo(() => {
+    const m = new Map<number, string>();
+    const sugN = new Map(suggestions.map(x => [x.id, x.n]));
+    for (const j of jobs) {
+      if (!isLive(j)) continue;
+      for (const id of j.comment_ids) {
+        const sid = talkOf.get(id);
+        const n = place.get(id) ?? (sid ? sugN.get(sid) : undefined);
+        if (n != null && !m.has(n)) m.set(n, j.id);
+      }
+    }
+    danSugs.forEach((job, sid) => {
+      const n = sugN.get(sid);
+      if (n != null && !m.has(n) && jobs.some(j => j.id === job && isLive(j))) m.set(n, job);
+    });
+    return m;
+  }, [jobs, place, talkOf, suggestions, danSugs]);
   const unplaced = visibleThreads.filter(t => !place.has(t.id) && !talkOf.has(t.id));
   const openCount = threads.filter(t => !t.resolved).length;
 
@@ -709,7 +764,9 @@ export function ListenScreen({ docId }: { docId: string }) {
     // While the owner types, the sentence they are in is not banded (11/19「黄色い枠…余計なものを付けるな」).
     if (u && (playing || !dirtyRef.current)) root.querySelectorAll(`[data-n="${u.n}"]`).forEach(el => el.setAttribute('data-on', ''));
     threadsAt.forEach((_, n) => root.querySelectorAll(`[data-n="${n}"]`).forEach(el => el.setAttribute('data-cm', '')));
-  }, [says, cur, threadsAt, playing]);
+    root.querySelectorAll('[data-dan]').forEach(el => el.removeAttribute('data-dan'));
+    danUnits.forEach((_, n) => root.querySelectorAll(`[data-n="${n}"]`).forEach(el => el.setAttribute('data-dan', '')));
+  }, [says, cur, threadsAt, playing, danUnits]);
   useEffect(() => { applyMarks(); }, [applyMarks]);
 
   const sayAtPos = useCallback((pos: Pos | null) => {
@@ -1328,6 +1385,77 @@ export function ListenScreen({ docId }: { docId: string }) {
     return () => ro.disconnect();
   }, [wide, layoutCards, doc]);
 
+  // ---------------------------------------------------------------- where Dan is (11/20)
+  // A blue line beside the words Dan works on, outside the text (nothing in the text moves; the owner's screen is never
+  // scrolled for it). When those words are out of sight, the edge of the text toward them glows softly instead.
+  const [bars, setBars] = useState<{ n: number; job: string; top: number; height: number }[]>([]);
+  const [gutter, setGutter] = useState(0);
+  const layoutBars = useCallback(() => {
+    const box = contentRef.current, root = editorRef.current, sc = scrollerRef.current;
+    if (!box || !root) return;
+    const top0 = box.getBoundingClientRect().top;
+    const next: { n: number; job: string; top: number; height: number }[] = [];
+    danUnits.forEach((job, n) => {
+      let a = Infinity, b = -Infinity;
+      root.querySelectorAll(`[data-n="${n}"]`).forEach(el => {
+        for (const r of Array.from(el.getClientRects())) { if (r.height) { a = Math.min(a, r.top); b = Math.max(b, r.bottom); } }
+      });
+      if (a < b) next.push({ n, job, top: Math.round(a - top0), height: Math.round(b - a) });
+    });
+    setBars(was => JSON.stringify(was) === JSON.stringify(next) ? was : next);
+    if (sc) setGutter(Math.round(box.getBoundingClientRect().left - sc.getBoundingClientRect().left));
+  }, [danUnits]);
+  useLayoutEffect(() => { layoutBars(); }, [layoutBars, html, build, doc, threads]);
+  useEffect(() => {
+    if (!contentRef.current || !danUnits.size) return;
+    const ro = new ResizeObserver(() => layoutBars());
+    ro.observe(contentRef.current);
+    return () => ro.disconnect();
+  }, [layoutBars, danUnits.size, doc]);
+  const [glow, setGlow] = useState<{ dir: 'up' | 'down'; left: number; width: number; y: number; n: number } | null>(null);
+  useEffect(() => {
+    const sc = scrollerRef.current;
+    const target = bars.find(b => b.job === shownJob) || bars[0];
+    if (!sc || !target) { setGlow(null); return; }
+    let raf = 0;
+    const look = () => {
+      raf = 0;
+      const el = document.querySelector(`[data-testid="script-editor"] [data-n="${target.n}"]`) as HTMLElement | null;
+      const box = sc.getBoundingClientRect();
+      const r = el?.getBoundingClientRect();
+      if (!r) { setGlow(null); return; }
+      const dir = r.bottom < box.top + 4 ? 'up' : r.top > box.bottom - 4 ? 'down' : null;
+      setGlow(was => {
+        if (!dir) return null;
+        const y = dir === 'up' ? box.top : box.bottom;
+        if (was && was.dir === dir && was.y === y && was.n === target.n && was.left === box.left) return was;
+        return { dir, left: box.left, width: box.width, y, n: target.n };
+      });
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(look); };
+    look();
+    sc.addEventListener('scroll', on, { passive: true });
+    window.addEventListener('resize', on);
+    return () => { sc.removeEventListener('scroll', on); window.removeEventListener('resize', on); if (raf) cancelAnimationFrame(raf); };
+  }, [bars, shownJob]);
+  const openJob = useCallback((id: string) => { setJobSel(id); setMonitorOpen(true); }, []);
+  /** From the monitor to the words its job is about. */
+  const goJob = (j: DanJob) => {
+    for (const id of j.comment_ids) {
+      const sid = talkOf.get(id);
+      const sg = sid ? suggestions.find(x => x.id === sid) : undefined;
+      if (sid && sg) { goText(sid, sg.n); return; }
+      const n = place.get(id);
+      if (n != null) { goText(id, n, threads.find(x => x.id === id)?.quote); return; }
+    }
+    const b = bars.find(x => x.job === j.id);
+    if (b) focusUnit(b.n);
+  };
+  const danLiveValue = useMemo(() => ({
+    lineFor: (tid: string) => { const j = jobs.find(x => isLive(x) && x.comment_ids.includes(tid)); return j ? latestLine(j) : null; },
+    open: (tid: string) => { const j = jobs.find(x => x.comment_ids.includes(tid)); if (j) openJob(j.id); },
+  }), [jobs, openJob]);
+
   // ---------------------------------------------------------------- 見本の台本と比べる (11/20)
   useEffect(() => {
     let live = true;
@@ -1386,6 +1514,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   const sheetSuggestion = sheet?.kind === 'suggestion' ? suggestions.find(s => s.id === sheet.id) : undefined;
 
   return (
+    <DanLiveContext.Provider value={danLiveValue}>
     <div className="flex h-dvh flex-col bg-[#faf8f4] text-stone-900">
       <style>{'::highlight(cm-draft){background-color:rgb(252 211 77 / 0.75)}'}</style>
       <header className="shrink-0 border-b border-stone-200 bg-white/90 px-3 py-2 backdrop-blur sm:px-6">
@@ -1512,8 +1641,27 @@ export function ListenScreen({ docId }: { docId: string }) {
                 'whitespace-pre-wrap break-words outline-none caret-stone-900',
                 '[&_[data-on]]:rounded-[3px] [&_[data-on]]:bg-amber-200/70 [&_[data-on]]:[box-decoration-break:clone]',
                 '[&_[data-cm]]:bg-yellow-100 [&_[data-on][data-cm]]:bg-amber-200/70',
+                // The words Dan is on (11/20): a pale blue, under the voice's band.
+                '[&_[data-dan]]:bg-sky-100 [&_[data-cm][data-dan]]:bg-sky-100 [&_[data-on][data-dan]]:bg-amber-200/70',
               )}
             />
+            {bars.map((b, i) => (
+              <button
+                key={b.n}
+                type="button"
+                data-testid="dan-bar"
+                aria-label="ダンの作業の様子を見る"
+                title="ダンがここを直しています（押すと作業の様子）"
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => openJob(b.job)}
+                style={{ top: b.top, height: Math.max(b.height, 14) }}
+                className="absolute -left-2 w-1.5 rounded-full bg-sky-500 shadow-[0_0_8px_rgb(14_165_233/0.7)] motion-safe:animate-pulse sm:-left-3.5"
+              >
+                {i === 0 && gutter >= 64 && (
+                  <span className="pointer-events-none absolute right-3 top-0 whitespace-nowrap rounded-full bg-sky-600 px-1.5 py-0.5 text-[10.5px] font-semibold text-white shadow">ダン</span>
+                )}
+              </button>
+            ))}
             {unplaced.length > 0 && (
               <div className="mt-10 border-t border-stone-300 pt-3">
                 <div className="mb-2 text-[13px] font-semibold text-stone-600">本文の場所が分からないコメント</div>
@@ -1565,6 +1713,18 @@ export function ListenScreen({ docId }: { docId: string }) {
         </div>
       )}
       </div>
+
+      {glow && (
+        <button
+          type="button"
+          data-testid="dan-glow"
+          aria-label="ダンが直している所へ"
+          onClick={() => focusUnit(glow.n)}
+          style={{ left: glow.left, width: glow.width, top: glow.dir === 'up' ? glow.y : glow.y - 28 }}
+          className={cn('fixed z-20 h-7 motion-safe:animate-pulse', glow.dir === 'up'
+            ? 'bg-gradient-to-b from-sky-400/45 to-transparent' : 'bg-gradient-to-t from-sky-400/45 to-transparent')}
+        />
+      )}
 
       {selBtn && (
         <button
@@ -1620,6 +1780,10 @@ export function ListenScreen({ docId }: { docId: string }) {
 
       <div className="shrink-0 border-t border-stone-200 bg-white/95 px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 backdrop-blur sm:px-6">
         <div className="mx-auto max-w-3xl">
+          {jobs.length > 0 && (
+            <DanMonitor jobs={jobs} threads={threads} selected={shownJob} onSelect={setJobSel}
+              open={monitorOpen} onOpen={setMonitorOpen} onGoText={goJob} />
+          )}
           <div className="flex items-center justify-between gap-2 text-[12px] text-stone-500">
             <span>{says.length ? `${cur + 1} / ${says.length}文` : '読む文がありません'}</span>
             {suggestions.length >= 2 && (
@@ -1675,5 +1839,6 @@ export function ListenScreen({ docId }: { docId: string }) {
         </div>
       </div>
     </div>
+    </DanLiveContext.Provider>
   );
 }
