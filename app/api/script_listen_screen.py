@@ -102,21 +102,24 @@ class NewComment(BaseModel):
     quote: str = ''
     start: int | None = None
     sentence: str = ''
+    suggestion: dict | None = None      # {id, ins, del}: written on a suggestion's card
 
 
 @router.post('/doc/{doc_id}/comments')
 async def add_comment(doc_id: str, body: NewComment, user: TokenData = Depends(get_current_user)):
-    try: return await run_in_threadpool(S.add_comment, S.doc_id_from(doc_id), body.quote, body.text, body.start, body.sentence)
+    try: return await run_in_threadpool(S.add_comment, S.doc_id_from(doc_id), body.quote, body.text, body.start, body.sentence,
+                                       body.suggestion)
     except Exception as exc: _fail(exc)
 
 
 class Reply(BaseModel):
     text: str
+    suggestion: dict | None = None
 
 
 @router.post('/doc/{doc_id}/comments/{comment_id}/reply')
 async def reply(doc_id: str, comment_id: str, body: Reply, user: TokenData = Depends(get_current_user)):
-    try: return await run_in_threadpool(S.reply, S.doc_id_from(doc_id), comment_id, body.text)
+    try: return await run_in_threadpool(S.reply, S.doc_id_from(doc_id), comment_id, body.text, body.suggestion)
     except Exception as exc: _fail(exc)
 
 

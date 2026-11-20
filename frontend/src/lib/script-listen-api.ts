@@ -54,6 +54,8 @@ export interface Thread {
   /** pending / running: Dan is on it. needs_room: Dan asked which room the script belongs to. */
   working: string | null;
   start: number | null;
+  /** Written on a suggestion's card: the suggestion it is about (it may be gone by now). */
+  suggestion?: string | null;
 }
 
 async function send(path: string, init: { method?: string; body?: unknown } = {}): Promise<Response> {
@@ -101,10 +103,10 @@ export const listenApi = {
   replace: (id: string, body: { para_from: number; para_to: number; old: string; new: string; old_bmask: string; new_bmask: string }) =>
     json<{ changed: boolean; revision?: string | null }>(`/doc/${encodeURIComponent(id)}/replace`, body),
   comments: (id: string) => json<{ threads: Thread[]; can_comment: boolean }>(`/doc/${encodeURIComponent(id)}/comments`),
-  addComment: (id: string, body: { text: string; quote: string; start?: number | null; sentence?: string }) =>
+  addComment: (id: string, body: { text: string; quote: string; start?: number | null; sentence?: string; suggestion?: Suggestion }) =>
     json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments`, body),
-  reply: (id: string, cid: string, text: string) =>
-    json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments/${encodeURIComponent(cid)}/reply`, { text }),
+  reply: (id: string, cid: string, text: string, suggestion?: Suggestion) =>
+    json<{ id: string }>(`/doc/${encodeURIComponent(id)}/comments/${encodeURIComponent(cid)}/reply`, { text, suggestion }),
   settle: (id: string, cid: string, reopen = false) =>
     json<{ done: boolean }>(`/doc/${encodeURIComponent(id)}/comments/${encodeURIComponent(cid)}/settle`, { reopen }),
   decide: (id: string, sid: string, accept: boolean) =>

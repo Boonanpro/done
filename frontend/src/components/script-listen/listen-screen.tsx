@@ -7,7 +7,10 @@
 // - 直す: 本文全体が Google ドキュメントのように1枚で直せる（11/19 本人「Googleドキュメントと同じくらいの使い勝手にしろ」）。
 //   文や段落ごとの枠は無く、段落をまたいで選べる。Enter で改行、Ctrl+Z で戻す、Ctrl+Shift+Z / Ctrl+Y でやり直す、Ctrl+B で太字。
 //   打つのを止めると、変わった段落だけが自動でドキュメントに入る（editor-dom.ts の diffLines → replace）。
-//   PC は文を押すとそこから鳴る。スマホは文を押すと鳴り、鳴っている文をもう一度押すと打てる。
+//   押すだけでは鳴らない。鳴らす・止めるのは文のダブルクリック（スマホは2回続けて押す）だけ（11/20 本人「編集したいだけで
+//   カーソルを合わせたときにも音が鳴るのが鬱陶しい」）。スマホは1回押すとそこで打てる。
+// - 画面は勝手に動かさない: 承認・却下やダンの直しでドキュメントを読み直しても、見ている所はそのまま（11/20 本人「承認ボタンを
+//   押すと上の方まで飛ばされる」。読み直すたびに再生位置の文へ戻していた）。鳴っている文が画面の外へ出た時だけ追いかける。
 // - コメント: 文字を選ぶと右の余白（スマホは選んだ所の下）にコメントの印が出る。ドキュメントのコメントとして入るので、ダンが
 //   返事と直しをし、学習にも入る。ダンの直しは提案（緑＝足す、赤の線＝消す）で出て、ここで承認・却下できる。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -22,7 +25,7 @@ import { cn } from '@/lib/utils';
 import { buildHtml, diffLines, extract, getPos, nodeAt, setPos, type Line, type Pos } from './editor-dom';
 import { Composer, SuggestionCard, ThreadCard } from './listen-cards';
 
-const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
 const RATE_KEY = 'script-listen-rate';
 const VOICE_KEY = 'script-listen-voice';
 const posKey = (doc: string) => `script-listen-pos-${doc}`;
@@ -35,6 +38,8 @@ const SAVE_AFTER = 900;
 type Clip = { url: string; el: HTMLAudioElement };
 type Sheet = { kind: 'threads'; ids: string[] } | { kind: 'suggestion'; id: string } | { kind: 'compose' } | { kind: 'all' } | null;
 type Draft = { quote: string; n: number; start: number | null };
+// Taps on a phone: one tap types there, two taps in a row play from there.
+const DOUBLE_TAP = 300;
 type Snap = { html: string; pos: Pos | null };
 type AfterBuild = { pos: Pos | null; focus: boolean; play: boolean };
 
@@ -100,6 +105,30 @@ const unitN = (node: Node | null) => {
   return host ? Number(host.dataset.n) : null;
 };
 
+/** The sentence under the pointer. The event's target can be the paragraph around the sentences (its margins, the gap
+ * between two sentences, the end of a line), so the letter at that point decides. */
+const unitAtPoint = (x: number, y: number, fallback: EventTarget | null) => {
+  const doc_ = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+  const r = doc_.caretRangeFromPoint?.(x, y);
+  let n = r ? unitN(r.startContainer) : null;
+  if (n == null && r && r.startContainer.nodeType === 1) {
+    const kids = r.startContainer.childNodes;
+    n = unitN(kids[Math.min(r.startOffset, kids.length - 1)] || null) ?? unitN(kids[r.startOffset - 1] || null);
+  }
+  return n ?? unitN(fallback as Node | null);
+};
+
+/** Bring a sentence into view only when it is off the screen (or behind the bars), the way a document follows a reader. */
+function revealUnit(n: number) {
+  const el = document.getElementById(`u-${n}`);
+  const box = el?.closest('[data-scroller]') as HTMLElement | null;
+  if (!el || !box) return;
+  const r = el.getBoundingClientRect();
+  const b = box.getBoundingClientRect();
+  if (r.top >= b.top + 24 && r.bottom <= b.bottom - 24) return;
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
 export function ListenScreen({ docId }: { docId: string }) {
   const [doc, setDoc] = useState<ListenDoc | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -136,6 +165,9 @@ export function ListenScreen({ docId }: { docId: string }) {
   const lastUserScroll = useRef(0);
   const playFromRef = useRef<(i: number, natural?: boolean) => void>(() => {});
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const tapTimer = useRef<number | null>(null);
+  const lastTap = useRef<{ at: number; x: number; y: number } | null>(null);
   const marginRef = useRef<HTMLDivElement | null>(null);
   // The editing surface. React never renders inside it: its HTML is put in once per reading of the doc.
   const editorRef = useRef<HTMLDivElement | null>(null);
@@ -380,8 +412,28 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
     return m;
   }, [visibleThreads, place]);
-  const unplaced = visibleThreads.filter(t => !place.has(t.id));
-  const suggestions = doc?.suggestions || [];
+  const suggestions = useMemo(() => doc?.suggestions || [], [doc]);
+  // Comments written on a suggestion's card stay with that suggestion. When Dan has put in a new suggestion for it
+  // (the old one is gone), the open talk moves on to the suggestion now at the same place.
+  const { sugTalk, talkOf } = useMemo(() => {
+    const ids = new Set(suggestions.map(x => x.id));
+    const pairs: [string, Thread, boolean][] = [];
+    for (const t of visibleThreads) if (t.suggestion && ids.has(t.suggestion)) pairs.push([t.suggestion, t, false]);
+    const taken = new Set(pairs.map(x => x[0]));
+    for (const t of visibleThreads) {
+      if (!t.suggestion || ids.has(t.suggestion) || t.resolved) continue;
+      const n = place.get(t.id);
+      const next = suggestions.find(x => x.n === n && !taken.has(x.id));
+      if (next) { pairs.push([next.id, t, true]); taken.add(next.id); }
+    }
+    const talk = new Map<string, { threads: Thread[]; earlier: boolean }>();
+    for (const sid of taken) {
+      const mine = pairs.filter(x => x[0] === sid);
+      talk.set(sid, { threads: mine.map(x => x[1]), earlier: mine.some(x => x[2]) });
+    }
+    return { sugTalk: talk, talkOf: new Map(pairs.map(x => [x[1].id, x[0]] as const)) };
+  }, [suggestions, visibleThreads, place]);
+  const unplaced = visibleThreads.filter(t => !place.has(t.id) && !talkOf.has(t.id));
   const openCount = threads.filter(t => !t.resolved).length;
 
   // ---------------------------------------------------------------- the editing surface
@@ -417,7 +469,11 @@ export function ListenScreen({ docId }: { docId: string }) {
     const root = editorRef.current;
     if (!root || !doc) return;
     if (dirtyRef.current) return;   // never throw away what is being typed
+    // Reading the doc again keeps the page where it is (11/20: approving a suggestion threw the page to the top).
+    const scroller = scrollerRef.current;
+    const keep = scroller?.scrollTop ?? 0;
     root.innerHTML = html;
+    if (scroller && scroller.scrollTop !== keep) scroller.scrollTop = keep;
     baseRef.current = extract(root);
     applyMarks();
     const after = afterBuild.current;
@@ -630,8 +686,39 @@ export function ListenScreen({ docId }: { docId: string }) {
       return;
     }
     if (e.key === 'Escape') { e.currentTarget.blur(); return; }
-    // Space before any typing still means play / pause (the caret sits in the text after a click to listen).
-    if (e.code === 'Space' && !mod && !typedRef.current && !dirtyRef.current) { e.preventDefault(); void toggle(); }
+    // Space types a space. Only while the voice plays (started by a double click) and nothing has been typed since,
+    // it stops the voice instead.
+    if (e.code === 'Space' && !mod && playingRef.current && !typedRef.current && !dirtyRef.current) { e.preventDefault(); stop(); }
+  };
+
+  /** The sentence to play for a place in the text (a heading or a note: the first sentence after it). */
+  const sayForUnit = (n: number) => {
+    const i = sayIndex.get(n);
+    if (i != null) return i;
+    return says.findIndex(s => s.n > n);
+  };
+
+  /** Double click (two taps on a phone): play from that sentence, or stop when it is the one being read. */
+  const playAt = (n: number, x: number, y: number) => {
+    const i = sayForUnit(n);
+    if (i < 0) return;
+    // The double click selected a word: put the caret back where it was clicked instead (no comment mark pops up).
+    const root = editorRef.current;
+    const doc_ = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+    const r = doc_.caretRangeFromPoint?.(x, y);
+    const sel = window.getSelection();
+    if (root && r && root.contains(r.startContainer)) { sel?.removeAllRanges(); sel?.addRange(r); }
+    else sel?.collapseToEnd();
+    setSelBtn(null);
+    if (playingRef.current && curRef.current === i) { stop(); return; }
+    typedRef.current = false;
+    if (dirtyRef.current || settling.current) {
+      // Typed before: write it, read the doc again, then play from the clicked place.
+      afterBuild.current = null;
+      void settle({ focus: !touch, play: true });
+      return;
+    }
+    void playFrom(i);
   };
 
   const onEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -639,41 +726,47 @@ export function ListenScreen({ docId }: { docId: string }) {
     const sug = t.closest('[data-sug]') as HTMLElement | null;
     if (sug?.dataset.sug) { pickSuggestion(sug.dataset.sug); return; }
     const sel = window.getSelection();
-    if (sel && !sel.isCollapsed) return;           // selecting words
-    const n = unitN(t);
+    if (sel && !sel.isCollapsed && e.detail < 2) return;     // selecting words
+    const n = unitAtPoint(e.clientX, e.clientY, t);
     if (n == null) return;
-    const u = unitByN.get(n);
-    const i = sayIndex.get(n);
-    if (touch && armed) return;                    // typing: a tap only moves the caret
-    if (touch) {
+    if (!touch) {
+      // A click only puts the caret there, like in a document. The comment on those words comes forward.
+      if (e.detail >= 2) return;                        // the double click plays (onDoubleClick)
+      const list = threadsAt.get(n);
+      if (list?.length) setActive(talkOf.get(list[0].id) || list[0].id);
+      return;
+    }
+    // Phone: two taps in a row play from there; one tap types there (or opens the comment on those words).
+    const now = e.timeStamp;
+    const prev = lastTap.current;
+    lastTap.current = { at: now, x: e.clientX, y: e.clientY };
+    if (prev && now - prev.at < DOUBLE_TAP && Math.hypot(prev.x - e.clientX, prev.y - e.clientY) < 40) {
+      if (tapTimer.current != null) { window.clearTimeout(tapTimer.current); tapTimer.current = null; }
+      lastTap.current = null;
+      if (armed) { (document.activeElement as HTMLElement | null)?.blur(); setArmed(false); }
+      playAt(n, e.clientX, e.clientY);
+      return;
+    }
+    if (armed) return;                                  // typing: a tap only moves the caret
+    const x = e.clientX, y = e.clientY;
+    if (tapTimer.current != null) window.clearTimeout(tapTimer.current);
+    tapTimer.current = window.setTimeout(() => {
+      tapTimer.current = null;
       const list = threadsAt.get(n);
       if (list?.length) { pickThreads(list); return; }
-      if (u?.kind === 'heading') {
-        const first = says.findIndex(s => s.n > n);
-        if (first >= 0) void playFrom(first);
-        return;
-      }
-      if (i != null && i !== curRef.current) { void playFrom(i); return; }
-      // The sentence that is being read (or a note / an empty line): tapping again types into it.
-      stop();
-      tapAt.current = { x: e.clientX, y: e.clientY };
+      if (playingRef.current) stop();
+      tapAt.current = { x, y };
       setArmed(true);
-      return;
-    }
-    typedRef.current = false;
-    const list = threadsAt.get(n);
-    if (list?.length) setActive(list[0].id);
-    if (dirtyRef.current || settling.current) {
-      // Typed before: write it, read the doc again, then play from the clicked place.
-      void settle({ focus: true, play: true });
-      return;
-    }
-    if (u?.kind === 'heading') {
-      const first = says.findIndex(s => s.n > n);
-      if (first >= 0) void playFrom(first);
-      return;
-    }
-    if (i != null && !(playingRef.current && curRef.current === i)) void playFrom(i);
+    }, DOUBLE_TAP);
+  };
+
+  const onEditorDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (touch) return;                                  // phones count their own taps (onEditorClick)
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-sug]')) return;
+    const n = unitAtPoint(e.clientX, e.clientY, t);
+    if (n == null) return;
+    playAt(n, e.clientX, e.clientY);
   };
 
   // Touch: after the second tap, put the caret where the finger was and open the keyboard.
@@ -711,10 +804,13 @@ export function ListenScreen({ docId }: { docId: string }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [playFrom, toggle, undo, redo]);
 
+  // Follow the voice only while it plays, and only when the sentence has gone off the screen. Reading the doc again
+  // (approving a suggestion, Dan's fix) changes `says` and `cur` too, and that must not move the page (11/20).
   useEffect(() => {
-    if (!says[cur] || Date.now() - lastUserScroll.current < 5000 || editing()) return;
-    document.getElementById(`u-${says[cur].n}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }, [cur, says]);
+    if (!playingRef.current || !says[cur] || Date.now() - lastUserScroll.current < 5000 || editing()) return;
+    revealUnit(says[cur].n);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cur]);
 
   const changeVoice = (v: string) => {
     stop();
@@ -750,6 +846,25 @@ export function ListenScreen({ docId }: { docId: string }) {
   const sendReply = (t: Thread) => async (text: string) => {
     try { await listenApi.reply(docId, t.id, text); await loadComments(); } catch (e) { toast.error(errorText(e)); throw e; }
   };
+  /** A comment on a suggestion's card: the thread already talking about it goes on, or a new one starts. */
+  const commentOnSuggestion = (sg: Suggestion) => async (text: string) => {
+    if (!canComment) { toast.error('お客さんも開けるドキュメントなので、ここからはコメントできません。作業用の台本で書いてください。'); throw new Error('no comment'); }
+    try {
+      const open = sugTalk.get(sg.id)?.threads.filter(t => !t.resolved) || [];
+      const last = open[open.length - 1];
+      if (last) await listenApi.reply(docId, last.id, text, sg);
+      else {
+        const at = unitByN.get(sg.n);
+        await listenApi.addComment(docId, {
+          text, quote: (sg.ins || sg.del).trim().slice(0, 400),
+          start: at?.kind === 'say' ? at.start : null, sentence: at && 'text' in at ? at.text : '', suggestion: sg,
+        });
+      }
+      await loadComments();
+      setActive(sg.id);
+      toast('コメントしました。ダンが返事をします');
+    } catch (e) { toast.error(errorText(e)); throw e; }
+  };
   const settleThread = (t: Thread) => async (reopen: boolean) => {
     try { await listenApi.settle(docId, t.id, reopen); await loadComments(); } catch (e) { toast.error(errorText(e)); }
   };
@@ -770,13 +885,15 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   const focusUnit = useCallback((n: number) => {
     lastUserScroll.current = Date.now();
-    document.getElementById(`u-${n}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    revealUnit(n);
   }, []);
   function pickSuggestion(id: string) {
     setActive(id);
     if (!wide) setSheet({ kind: 'suggestion', id });
   }
   function pickThreads(list: Thread[]) {
+    const sid = list.map(t => talkOf.get(t.id)).find(Boolean);
+    if (sid && list.every(t => talkOf.has(t.id))) { pickSuggestion(sid); return; }
     setActive(list[0]?.id || null);
     if (!wide) setSheet({ kind: 'threads', ids: list.map(t => t.id) });
   }
@@ -824,7 +941,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     return <div className="flex items-center gap-2 p-6 text-sm text-stone-500"><Loader2 className="h-4 w-4 animate-spin" />台本を読んでいます…</div>;
   }
 
-  const sheetThreads = sheet?.kind === 'threads' ? threads.filter(t => sheet.ids.includes(t.id)) : sheet?.kind === 'all' ? visibleThreads : [];
+  const sheetThreads = sheet?.kind === 'threads' ? threads.filter(t => sheet.ids.includes(t.id)) : sheet?.kind === 'all' ? visibleThreads.filter(t => !talkOf.has(t.id)) : [];
   const sheetSuggestion = sheet?.kind === 'suggestion' ? suggestions.find(s => s.id === sheet.id) : undefined;
 
   return (
@@ -864,6 +981,8 @@ export function ListenScreen({ docId }: { docId: string }) {
       </header>
 
       <div
+        ref={scrollerRef}
+        data-scroller
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         onWheel={() => { lastUserScroll.current = Date.now(); }}
         onTouchMove={() => { lastUserScroll.current = Date.now(); }}
@@ -879,6 +998,7 @@ export function ListenScreen({ docId }: { docId: string }) {
               onInput={() => changed()}
               onKeyDown={onEditorKey}
               onClick={onEditorClick}
+              onDoubleClick={onEditorDoubleClick}
               onCompositionStart={() => { composingRef.current = true; remember('compose'); }}
               onCompositionEnd={() => { composingRef.current = false; changed(); }}
               onPaste={e => {
@@ -911,8 +1031,8 @@ export function ListenScreen({ docId }: { docId: string }) {
             )}
             {(
               <div className="mt-8 text-center text-[12px] text-stone-400">
-                {touch ? '文を押すとそこから聞けます。鳴っている文をもう一度押すと直せます。' : '文を押すとそこから聞けます。Google ドキュメントと同じように直せて、打つのを止めると自動でドキュメントに入ります。'}
-                文字を選ぶとコメントできます。
+                {touch ? '文を2回続けて押すと、そこから聞けます（もう一度2回押すと止まります）。1回押すとそこで直せます。' : '文をダブルクリックすると、そこから聞けます（鳴っている文をもう一度ダブルクリックすると止まります）。Google ドキュメントと同じように直せて、打つのを止めると自動でドキュメントに入ります。'}
+                文字を選ぶとコメントできます。提案にもコメントできます。
               </div>
             )}
           </div>
@@ -925,7 +1045,7 @@ export function ListenScreen({ docId }: { docId: string }) {
                   <Composer quote={draft.quote} onSend={sendComment} onCancel={() => setDraft(null)} />
                 </div>
               )}
-              {visibleThreads.filter(t => place.has(t.id)).map(t => (
+              {visibleThreads.filter(t => place.has(t.id) && !talkOf.has(t.id)).map(t => (
                 <div key={t.id} ref={el => { if (el) cardRefs.current.set(t.id, el); else cardRefs.current.delete(t.id); }}
                   data-anchor={place.get(t.id)} className={cn('absolute inset-x-0', active === t.id && 'z-10')}>
                   <ThreadCard thread={t} active={active === t.id} onFocus={() => { setActive(t.id); focusUnit(place.get(t.id)!); }}
@@ -935,7 +1055,8 @@ export function ListenScreen({ docId }: { docId: string }) {
               {suggestions.map(s => (
                 <div key={s.id} ref={el => { if (el) cardRefs.current.set(s.id, el); else cardRefs.current.delete(s.id); }}
                   data-anchor={s.n} className={cn('absolute inset-x-0', active === s.id && 'z-10')}>
-                  <SuggestionCard s={s} active={active === s.id} onFocus={() => { setActive(s.id); focusUnit(s.n); }} onDecide={a => decide(s, a)} />
+                  <SuggestionCard s={s} active={active === s.id} onFocus={() => { setActive(s.id); focusUnit(s.n); }} onDecide={a => decide(s, a)}
+                    threads={sugTalk.get(s.id)?.threads} earlier={sugTalk.get(s.id)?.earlier} canComment={canComment} onComment={commentOnSuggestion(s)} />
                 </div>
               ))}
             </div>
@@ -970,7 +1091,9 @@ export function ListenScreen({ docId }: { docId: string }) {
             </button>
           </div>
           {sheet.kind === 'compose' && draft && <Composer quote={draft.quote} onSend={sendComment} onCancel={() => { setDraft(null); setSheet(null); }} />}
-          {sheetSuggestion && <SuggestionCard s={sheetSuggestion} active onDecide={a => decide(sheetSuggestion, a)} />}
+          {sheetSuggestion && <SuggestionCard s={sheetSuggestion} active onDecide={a => decide(sheetSuggestion, a)}
+            threads={sugTalk.get(sheetSuggestion.id)?.threads} earlier={sugTalk.get(sheetSuggestion.id)?.earlier}
+            canComment={canComment} onComment={commentOnSuggestion(sheetSuggestion)} />}
           {sheet.kind === 'all' && (
             <label className="mb-2 flex items-center gap-1.5 text-[12px] text-stone-600">
               <input type="checkbox" checked={showResolved} onChange={e => setShowResolved(e.target.checked)} />解決済みも見る
@@ -978,7 +1101,8 @@ export function ListenScreen({ docId }: { docId: string }) {
           )}
           {sheet.kind === 'all' && suggestions.length > 0 && (
             <div className="mb-3 space-y-2">
-              {suggestions.map(s => <SuggestionCard key={s.id} s={s} onFocus={() => { focusUnit(s.n); }} onDecide={a => decide(s, a)} />)}
+              {suggestions.map(s => <SuggestionCard key={s.id} s={s} onFocus={() => { focusUnit(s.n); }} onDecide={a => decide(s, a)}
+                threads={sugTalk.get(s.id)?.threads} earlier={sugTalk.get(s.id)?.earlier} canComment={canComment} onComment={commentOnSuggestion(s)} />)}
             </div>
           )}
           <div className="space-y-2">
@@ -1019,14 +1143,15 @@ export function ListenScreen({ docId }: { docId: string }) {
               <SkipForward className="h-6 w-6" />
             </button>
           </div>
-          <div className="mt-2 flex items-center justify-center gap-1 overflow-x-auto">
+          {/* All speeds on one screen: on a phone they wrap to a second line instead of hiding off the side (11/20 4倍). */}
+          <div className="mt-2 flex flex-wrap items-center justify-center gap-1">
             {RATES.map(r => (
               <button
                 key={r}
                 type="button"
                 onClick={() => setRate(r)}
                 className={cn(
-                  'shrink-0 rounded-full border px-2.5 py-1 text-[13px] tabular-nums',
+                  'shrink-0 rounded-full border px-2 py-1 text-[13px] tabular-nums sm:px-2.5',
                   r === rate ? 'border-amber-600 bg-amber-600 text-white' : 'border-stone-300 bg-white text-stone-700',
                 )}
               >
