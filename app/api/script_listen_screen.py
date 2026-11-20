@@ -247,3 +247,23 @@ async def screen_state(doc_id: str, body: ScreenState, user: TokenData = Depends
     from app.services import script_rooms
     await run_in_threadpool(script_rooms.put_state, S.doc_id_from(doc_id), body.model_dump())
     return {'ok': True}
+
+
+# ── 相手に送る共有用のリンク（app/services/script_share.py）──
+
+@router.get('/doc/{doc_id}/share')
+async def share_state(doc_id: str, user: TokenData = Depends(get_current_user)):
+    from app.services import script_share
+    try: return await run_in_threadpool(script_share.state, S.doc_id_from(doc_id))
+    except Exception as exc: _fail(exc)
+
+
+class ShareBody(BaseModel):
+    update: bool = False
+
+
+@router.post('/doc/{doc_id}/share')
+async def share(doc_id: str, body: ShareBody, user: TokenData = Depends(get_current_user)):
+    from app.services import script_share
+    try: return await run_in_threadpool(script_share.share, S.doc_id_from(doc_id), body.update)
+    except Exception as exc: _fail(exc)

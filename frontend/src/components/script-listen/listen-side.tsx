@@ -56,7 +56,7 @@ export function ListenChat({ docId, lead }: { docId: string; lead?: ReactNode })
     return () => { live = false; };
   }, [docId]);
   return (
-    <div data-testid="script-chat" className="flex h-full min-h-0 flex-col bg-background">
+    <div data-testid="script-chat" className="theme-light flex h-full min-h-0 flex-col bg-background text-foreground">
       {projectId ? (
         <ProjectChatPanel key={projectId} projectId={projectId} editorChat editorHeaderLead={lead}
           emptyHint="この台本のことを、ここに書くか上の「話す」で話してください。カーソルのある文や選んだ文字は、ダンにも見えています。" />

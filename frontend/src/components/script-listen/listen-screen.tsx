@@ -27,6 +27,7 @@ import { buildHtml, diffLines, extract, getPos, isOwnSuggestion, leaves, nodeAt,
 import { Composer, SuggestionCard, ThreadCard } from './listen-cards';
 import { DanLiveContext, isLive } from './listen-dan';
 import { RefsPanel, type SectionHead } from './listen-refs';
+import { ListenShare } from './listen-share';
 import { ListenChat, ListenThumb, type ThumbTarget } from './listen-side';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
@@ -1761,6 +1762,7 @@ export function ListenScreen({ docId }: { docId: string }) {
           >
             {doc.voices.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
           </select>
+          <ListenShare docId={doc.doc_id} />
           {(
             <a
               href={`https://docs.google.com/document/d/${doc.doc_id}/edit`}

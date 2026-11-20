@@ -132,6 +132,9 @@ export function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** url null: no copy made yet. behind: the working doc moved on since the copy was last updated. */
+export interface ShareState { url: string | null; behind: boolean; pending: number; updated_at?: string | null }
+
 /** A thumbnail of the doc tied to a work made of parts (app/services/script_listen_thumbs.py). */
 export interface ThumbItem { order: number; object: string; content_id: string; synced_rev: number; rev: number; stale: boolean }
 
@@ -140,6 +143,9 @@ export const listenApi = {
     json<{ room_id: string; content_id: string }>(`/doc/${encodeURIComponent(id)}/thumb/open`, { object, order }),
   thumbs: (id: string) => json<{ items: ThumbItem[] }>(`/doc/${encodeURIComponent(id)}/thumbs`),
   thumbSync: (id: string, contentId?: string) => json<{ changed?: number; busy?: boolean }>(`/doc/${encodeURIComponent(id)}/thumb/sync`, { content_id: contentId || null }),
+  /** The link to send to the other side: the customer's copy, anyone with it can edit and comment (app/services/script_share.py). */
+  shareState: (id: string) => json<ShareState>(`/doc/${encodeURIComponent(id)}/share`),
+  share: (id: string, update = false) => json<ShareState & { made?: boolean; updated?: boolean }>(`/doc/${encodeURIComponent(id)}/share`, { update }),
   /** The room of the chat at the side of the screen (app/services/script_rooms.py). */
   room: (id: string) => json<{ project_id: string; room_id: string; title: string }>(`/doc/${encodeURIComponent(id)}/room`, {}),
   state: (id: string, body: { para?: number | null; sentence?: string; selection?: string; playing?: boolean; thumb?: string }) =>
