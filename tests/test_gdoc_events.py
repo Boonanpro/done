@@ -442,3 +442,31 @@ def test_mail_for_unclaimed_document_is_taken(store, monkeypatch):
 
 def test_documents_settle_quickly(store):
     assert E.SETTLE <= 20
+
+
+def test_worker_notices_newer_code(tmp_path):
+    import os, time
+    from app.services import gdoc_events as E
+    t0 = time.time()
+    assert not E.code_changed(t0 + 5)
+    st = os.stat(E.__file__)
+    os.utime(E.__file__, (st.st_atime, t0 + 10))
+    try:
+        assert E.code_changed(t0 + 5)
+    finally:
+        os.utime(E.__file__, (st.st_atime, st.st_mtime))
+
+
+def test_worker_leaves_when_code_changed(tmp_path, monkeypatch):
+    import asyncio, time
+    from app.services import gdoc_events as E, script_learning
+    monkeypatch.setattr(E, 'ROOT', tmp_path)
+    monkeypatch.setattr(E, 'RELOAD_CHECK', 0.2)
+    monkeypatch.setattr(E, 'accounts', lambda: [])
+    monkeypatch.setattr(E, 'adopt_new_docs', lambda: False)
+    async def tick(docs, tasks): return [time.time() + 3600]
+    monkeypatch.setattr(script_learning, 'tick', tick)
+    calls = []
+    monkeypatch.setattr(E, 'code_changed', lambda since: calls.append(since) or len(calls) >= 2)
+    asyncio.run(asyncio.wait_for(E.serve(), 10))
+    assert len(calls) == 2
