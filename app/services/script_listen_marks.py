@@ -11,10 +11,10 @@ Two things live here, both pure (no Google calls), so they can be tested:
   suggested insertion that has no place in the doc yet (``_virtual``). Each one is found again by its words and the
   words around it, so changes elsewhere in the doc do not lose it. Their ids start with ``o-``.
 - Typing over a suggestion. The screen sends「these paragraphs read X, now read Y」. Every character of X is known as
-  plain, a doc suggestion (Dan's), or the owner's. Changing the words of a suggestion settles it first, the way the
-  owner means it: changing the words it adds = taking it with the change (accept), typing into the struck words =
-  keeping the old words with the change (reject). Dan's suggestions are settled in the doc (``decide``) before the
-  change is written; the owner's are settled here in the same write.
+  plain, a doc suggestion (Dan's), or the owner's. Changing the words of a suggestion changes the suggestion and it
+  stays one, in either mode (11/21 本人「承認や却下せずそのまま書き換えると、勝手に承認されて文字が本文に入ってしまう」):
+  only 承認 / 却下 decide it. Dan's suggestion is first made the owner's with the same words (``Adopt``; the doc's
+  suggestion is taken back and the screen keeps it, with what Dan had suggested for the learning).
 """
 from __future__ import annotations
 
