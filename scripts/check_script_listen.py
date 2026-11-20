@@ -8,7 +8,7 @@
   2. 3倍 → 鳴っている音の速さが3倍で、声の高さを保つ設定のまま。
   3. 直す（--edit-doc の時だけ。本人の台本は直さない）: 本文は1枚の編集面で、押した文に枠が出ない。その場で打つと、
      打つのを止めた後に自動でドキュメントに入る。Ctrl+Z / Ctrl+Shift+Z、Ctrl+B（太字）、Enter（段落を分ける）がドキュメントに入る。
-     段落をまたいで選べて、右の余白にコメントの印が出る。スマホ（--phone）は鳴っている文をもう一度押して打つ。
+     段落をまたいで選べて、右の余白にコメントの印が出る。押すだけでは鳴らず、ダブルクリックで鳴る（11/20）。
   4. ドキュメントが別に直された時（--edit-doc の時だけ）: 25秒以内に画面が読み直して新しい文を出す。
   5. 提案（--edit-doc に提案がある時だけ）: 提案の札の「却下」→ ドキュメントからその提案が消える。
   6. コメント（--comment の時だけ。ダンが返事をしに動くので、写しに対してだけ使う）: 言葉を選ぶ →「コメント」→ 送る →
@@ -136,9 +136,8 @@ def run(a, result, out_dir, stamp, tok, sync_playwright):
             target = says[3]
             span = page.locator(f'span[data-n="{target["n"]}"]').first
             span.scroll_into_view_if_needed()
-            tap(span)
-            if a.phone: page.wait_for_timeout(300); tap(span)      # the second tap on the sentence being read lets the owner type
-            page.wait_for_timeout(300)
+            tap(span)                                       # one tap / click: the caret goes there, nothing plays
+            page.wait_for_timeout(700 if a.phone else 300)  # a phone waits to see whether a second tap follows
             look = span.evaluate("""el => { const c = getComputedStyle(el); return {outline: c.outlineStyle, shadow: c.boxShadow,
                                      border: c.borderTopWidth, editable_parts: document.querySelectorAll('[contenteditable=true]').length,
                                      focus_in_text: document.activeElement === el.closest('[data-testid=script-editor]')}; }""")
@@ -245,23 +244,22 @@ def run(a, result, out_dir, stamp, tok, sync_playwright):
                 page.locator('body').click(position={'x': 5, 'y': 300})
                 page.wait_for_timeout(2500)
 
-            # 3g. after typing, a click on a sentence writes it, reads the doc again and plays from there
+            # 3g. a click only puts the caret (no sound, 11/20); a double click plays from that sentence
             if not a.phone:
                 quiet = says[5]
                 sp = page.locator(f'span[data-n="{quiet["n"]}"]').first
-                sp.scroll_into_view_if_needed(); sp.click()
-                page.wait_for_timeout(1500)
-                page.keyboard.press('Space')
-                page.wait_for_timeout(800)
-                paused = page.get_by_role('button', name='聞く', exact=True).is_visible()
-                page.locator('body').click(position={'x': 5, 'y': 300})
-                page.wait_for_timeout(2500)
-                result['space_after_click'] = {'paused': paused, 'doc_unchanged': quiet['text'] in doc_says()}
+                sp.scroll_into_view_if_needed()
                 page.evaluate('window.__log = []')
-                t1 = time.time()
                 sp.click()
+                page.wait_for_timeout(1500)
+                result['click_is_silent'] = page.evaluate('window.__log.length') == 0
+                page.locator('body').click(position={'x': 5, 'y': 300})
+                page.wait_for_timeout(1000)
+                t1 = time.time()
+                q = sp.evaluate("el => { const r = el.getClientRects()[0]; return {x: r.x + Math.min(20, r.width / 2), y: r.y + r.height / 2}; }")
+                page.mouse.dblclick(q['x'], q['y'])
                 page.wait_for_function("window.__log.some(x=>x.t1)", timeout=60000)
-                result['click_plays_s'] = round(time.time() - t1, 1)
+                result['double_click_plays_s'] = round(time.time() - t1, 1)
                 page.get_by_role('button', name='止める', exact=True).click()
 
             # 4. someone else changes the doc

@@ -105,6 +105,19 @@ const unitN = (node: Node | null) => {
   return host ? Number(host.dataset.n) : null;
 };
 
+/** The sentence under the pointer. The event's target can be the paragraph around the sentences (its margins, the gap
+ * between two sentences, the end of a line), so the letter at that point decides. */
+const unitAtPoint = (x: number, y: number, fallback: EventTarget | null) => {
+  const doc_ = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+  const r = doc_.caretRangeFromPoint?.(x, y);
+  let n = r ? unitN(r.startContainer) : null;
+  if (n == null && r && r.startContainer.nodeType === 1) {
+    const kids = r.startContainer.childNodes;
+    n = unitN(kids[Math.min(r.startOffset, kids.length - 1)] || null) ?? unitN(kids[r.startOffset - 1] || null);
+  }
+  return n ?? unitN(fallback as Node | null);
+};
+
 /** Bring a sentence into view only when it is off the screen (or behind the bars), the way a document follows a reader. */
 function revealUnit(n: number) {
   const el = document.getElementById(`u-${n}`);
@@ -714,7 +727,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     if (sug?.dataset.sug) { pickSuggestion(sug.dataset.sug); return; }
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed && e.detail < 2) return;     // selecting words
-    const n = unitN(t);
+    const n = unitAtPoint(e.clientX, e.clientY, t);
     if (n == null) return;
     if (!touch) {
       // A click only puts the caret there, like in a document. The comment on those words comes forward.
@@ -751,7 +764,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     if (touch) return;                                  // phones count their own taps (onEditorClick)
     const t = e.target as HTMLElement;
     if (t.closest('[data-sug]')) return;
-    const n = unitN(t);
+    const n = unitAtPoint(e.clientX, e.clientY, t);
     if (n == null) return;
     playAt(n, e.clientX, e.clientY);
   };
@@ -1130,14 +1143,15 @@ export function ListenScreen({ docId }: { docId: string }) {
               <SkipForward className="h-6 w-6" />
             </button>
           </div>
-          <div className="mt-2 flex items-center justify-center gap-1 overflow-x-auto">
+          {/* All speeds on one screen: on a phone they wrap to a second line instead of hiding off the side (11/20 4倍). */}
+          <div className="mt-2 flex flex-wrap items-center justify-center gap-1">
             {RATES.map(r => (
               <button
                 key={r}
                 type="button"
                 onClick={() => setRate(r)}
                 className={cn(
-                  'shrink-0 rounded-full border px-2.5 py-1 text-[13px] tabular-nums',
+                  'shrink-0 rounded-full border px-2 py-1 text-[13px] tabular-nums sm:px-2.5',
                   r === rate ? 'border-amber-600 bg-amber-600 text-white' : 'border-stone-300 bg-white text-stone-700',
                 )}
               >
