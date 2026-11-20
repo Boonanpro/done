@@ -967,7 +967,9 @@ def activity(doc_id):
         results = {(e.get('text') or '').strip() for e in state.get('events') or [] if e.get('kind') == 'result'}
         for e in state.get('events') or []:
             if e.get('kind') not in _JOB_KINDS: continue
-            if e['kind'] == 'progress' and (e.get('text') or '').strip() in results: continue   # the answer, once
+            # The answer, once: the step line before it is the same words, cut short.
+            head = (e.get('text') or '').strip()[:200]
+            if e['kind'] == 'progress' and head and any(r.startswith(head) for r in results): continue
             text = (e.get('label') if e.get('kind') == 'tool' and e.get('label') else e.get('text')) or ''
             # The text Dan writes between steps is sometimes an English note to himself: not a line for the owner.
             if e['kind'] == 'progress' and len(_JP.findall(text)) * 2 < len(re.findall(r'[A-Za-z]', text)): continue
