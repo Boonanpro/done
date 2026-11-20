@@ -21,7 +21,7 @@ def _event_for(job_id):
     from app.services import command_job_state as state
     from app.services.voice_parts import status_line
     s = state.read(job_id)
-    if not s:
+    if not s or s.get('internal_check'):
         return None, None
     room = s.get('origin_room_id') or s.get('room_id')
     line = status_line(state.list_owned(s['user_id'], room)) if room else None

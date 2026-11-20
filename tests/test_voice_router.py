@@ -98,8 +98,8 @@ async def test_status_is_answered_at_once_from_the_job_files_as_the_one_thing_sa
 @pytest.mark.asyncio
 async def test_site_work_goes_to_chat_dan_with_the_calls_transcript(monkeypatch):
     started = []
-    async def execute(params, room_id, user_id, voice_handoff=False):
-        started.append((params, voice_handoff))
+    async def execute(params, room_id, user_id, voice_handoff=False, internal_check=False):
+        started.append((params, voice_handoff, internal_check))
         return {'accepted': True, 'receipt': {'id': 'job-1'}}
     monkeypatch.setattr('app.services.command_center.execute', execute)
     monkeypatch.setattr('app.services.parallel_job_runner.room_model', lambda room: 'opus')
@@ -107,7 +107,8 @@ async def test_site_work_goes_to_chat_dan_with_the_calls_transcript(monkeypatch)
                           said=['しゅんさんとみひろさんなんですけど', '六日までに両方空いてる時間を、続けて入れられる所で'])
     created = time.monotonic()
     await r.answer('del_2', created)
-    params, handoff = started[0]
+    params, handoff, internal_check = started[0]
+    assert not internal_check
     assert params['engine'] == 'make' and params['model'] == 'opus' and handoff
     head, transcript = params['task'].split(voice_router.TRANSCRIPT, 1)
     assert 'しゅんさんとみひろさんなんですけど' in head and '六日までに' in head   # the request said over two turns
@@ -118,7 +119,7 @@ async def test_site_work_goes_to_chat_dan_with_the_calls_transcript(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_past_the_acknowledgement_a_notice_of_work_begun_is_silent(monkeypatch):
-    async def execute(params, room_id, user_id, voice_handoff=False): return {'accepted': True, 'receipt': {'id': 'job-2'}}
+    async def execute(params, room_id, user_id, voice_handoff=False, internal_check=False): return {'accepted': True, 'receipt': {'id': 'job-2'}}
     monkeypatch.setattr('app.services.command_center.execute', execute)
     monkeypatch.setattr('app.services.parallel_job_runner.room_model', lambda room: 'opus')
     r, sent, log = router(monkeypatch, Judge({'route': answer('app', .9), 'calendar': answer('other', .9)}), said=['LINEでこすもすさんに送っておいて'])
@@ -390,7 +391,7 @@ async def test_a_client_delegation_on_the_real_sideband_is_answered_with_its_id(
 async def test_words_said_on_after_a_request_are_judged_alone(monkeypatch):
     """No words of Dan between the request and 「今どういう状況？」: the transcript keeps them as one turn. Judged as one,
     the request was started again (backend run 2026-11-05 salon2)."""
-    async def execute(params, room_id, user_id, voice_handoff=False): return {'accepted': True, 'receipt': {'id': 'job-1'}}
+    async def execute(params, room_id, user_id, voice_handoff=False, internal_check=False): return {'accepted': True, 'receipt': {'id': 'job-1'}}
     monkeypatch.setattr('app.services.command_center.execute', execute)
     monkeypatch.setattr('app.services.parallel_job_runner.room_model', lambda room: 'astra')
     judge = Judge({'route': answer('site', .9), 'calendar': answer('other', .9)},

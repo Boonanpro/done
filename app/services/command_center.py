@@ -106,7 +106,7 @@ async def _approves(user_id, room_id, job_id, spoken):
     return bool(decision.get('available')) and answer.get('choice') == 'approve' and (answer.get('probabilities') or {}).get('approve', 0) >= .85
 
 
-async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_message_id: str | None = None, voice_handoff: bool = False) -> dict:
+async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_message_id: str | None = None, voice_handoff: bool = False, internal_check: bool = False) -> dict:
     """Never accept user identity from model arguments; validate both room ends."""
     if not user_id or not room_id:
         raise ValueError("利用者と会話の部屋が必要です")
@@ -283,6 +283,8 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
             extra['receiver'] = True   # the room's receiver of notices while the owner's work runs (room_receiver)
     elif engine == 'api' and params.get('model'):
         extra = {'model': str(params['model'])[:60]}
+    if internal_check:
+        extra['internal_check'] = True
     from app.core.generations import read as generation_read
     queue_owner = 'process' if generation_read('active') else 'core'
     command_job_state.create(job_id,user_id=user_id,room_id=target_room,origin_room_id=room_id,

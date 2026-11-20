@@ -701,7 +701,7 @@ SUMMON_REPLY_S = 600   # a reply this long after a summons was said still answer
 # CALL_JOB_NOTE: the text is ~/.dan/workspace/prompts/call/call-job-note.md (seed app/prompts/seed/), read at each use (prompt_store).
 
 
-async def start_chat_dan(user_id, room_id, dialogue, words, carried=''):
+async def start_chat_dan(user_id, room_id, dialogue, words, carried='', *, internal_check=False):
     """Chat Dan takes the work: a parallel job of the room on the room's model (engine 'make', the same harness as the
     chat), with the owner's words and the call's transcript. Nothing in between rewrites the request."""
     from app.services.command_center import execute
@@ -730,7 +730,7 @@ async def start_chat_dan(user_id, room_id, dialogue, words, carried=''):
     try:
         model = await asyncio.to_thread(room_model, room_id)
         return await execute({'action': 'work', 'task': task + voice_parts.VOICE_TASK, 'engine': 'make', 'model': model},
-                             room_id, user_id, voice_handoff=True)
+                             room_id, user_id, voice_handoff=True, internal_check=internal_check)
     except Exception as exc:
         return {'accepted': False, 'error': type(exc).__name__}
 

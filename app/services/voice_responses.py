@@ -350,7 +350,7 @@ def search_output(found, query):
     return {'pages': pages, 'found': found['answer'][:3000], 'source': {'what': 'ウェブ検索', 'query': query}}
 
 
-async def run_function(name, args, user_id, room_id, dialogue, speak=None):
+async def run_function(name, args, user_id, room_id, dialogue, speak=None, *, internal_check=False):
     """Execute one of the functions above with Dan's own parts. Returns a JSON-able dict the backend model reads.
     `speak(text)` (from the sideband) delivers a later result to the call as spoken commentary: a function must return
     within about a second, because the speech model answers nothing while a delegation is in flight (2026-09-22 18:48:
@@ -432,7 +432,8 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         running = [s for s in await asyncio.to_thread(list_owned, user_id, room_id) if s['state'] not in ('completed', 'failed', 'cancelled')]
         from app.services import voice_router
         if voice_router.enabled():   # work asked on a routed call is chat Dan's, with the call's transcript (voice_router)
-            out = await voice_router.start_chat_dan(user_id, room_id, dialogue, str(args.get('task') or ''))
+            out = await voice_router.start_chat_dan(user_id, room_id, dialogue, str(args.get('task') or ''),
+                                                    internal_check=internal_check)
             if not out.get('accepted'):
                 return {'accepted': False, 'error': '作業を開始できませんでした。', 'note': '実行中とは言わない。'}
             return {'accepted': True, 'job_id': (out.get('receipt') or {}).get('id'),
@@ -450,7 +451,7 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         from app.services.parallel_job_runner import room_model
         model_params = {'model': await asyncio.to_thread(room_model, room_id)} if making else {}
         out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': 'make' if making else WORK_ENGINE,
-                             **model_params}, room_id, user_id, voice_handoff=True)
+                             **model_params}, room_id, user_id, voice_handoff=True, internal_check=internal_check)
         if not out.get('accepted'):
             return {'accepted': False, 'error': '作業を開始できませんでした。', 'note': '実行中とは言わない。再送前に job_status で受付状況を確認する。'}
         # It used to say 「本人に今言うことはない」: after reading two mails and handing the EX check over, the call was silent
