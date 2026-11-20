@@ -736,7 +736,9 @@ def comments(doc_id):
         sug = a.get('suggestion') if isinstance(a, dict) and isinstance(a.get('suggestion'), dict) else None
         out.append({'id': t['id'], 'quote': quote, 'resolved': bool(t.get('resolved')), 'messages': msgs,
                     'at': t.get('createdTime'), 'working': busy.get(t['id']), 'start': anchor_start(a),
-                    'suggestion': sug.get('id') if sug else None})
+                    'suggestion': sug.get('id') if sug else None,
+                    # Its words, so the screen can tell which suggestion Dan put in for it once it is gone (11/20).
+                    'suggestion_words': {'ins': sug.get('ins') or '', 'del': sug.get('del') or ''} if sug else None})
     out.sort(key=lambda x: x['at'] or '')
     return {'threads': out, 'can_comment': private}
 
