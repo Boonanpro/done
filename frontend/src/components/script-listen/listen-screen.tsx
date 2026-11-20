@@ -14,22 +14,24 @@
 // - コメント: 文字を選ぶと右の余白（スマホは選んだ所の下）にコメントの印が出る。ドキュメントのコメントとして入るので、ダンが
 //   返事と直しをし、学習にも入る。ダンの直しは提案（緑＝足す、赤の線＝消す）で出て、ここで承認・却下できる。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { CheckCheck, ExternalLink, Loader2, MessageSquare, MessageSquarePlus, Pause, PenLine, Pencil, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
+import { CheckCheck, Columns2, ExternalLink, Loader2, MessageSquare, MessageSquarePlus, Pause, PenLine, Pencil, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { get as idbGet, set as idbSet } from 'idb-keyval';
 
 import {
-  errorText, listenApi, type EditMode, type ListenDoc, type ListenUnit, type SayUnit, type Suggestion, type Thread,
+  errorText, listenApi, type EditMode, type ListenDoc, type ListenUnit, type Reference, type SayUnit, type Suggestion, type Thread,
 } from '@/lib/script-listen-api';
 import { cn } from '@/lib/utils';
 
 import { buildHtml, diffLines, extract, getPos, isOwnSuggestion, leaves, nodeAt, OWN_DEL, OWN_INS, setPos, type Line, type Pos } from './editor-dom';
 import { Composer, SuggestionCard, ThreadCard } from './listen-cards';
+import { RefsPanel, type SectionHead } from './listen-refs';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
 const RATE_KEY = 'script-listen-rate';
 const VOICE_KEY = 'script-listen-voice';
 const MODE_KEY = 'script-listen-mode';
+const COMPARE_KEY = 'script-listen-compare';
 const posKey = (doc: string) => `script-listen-pos-${doc}`;
 const cacheKey = (doc: string, voice: string) => `script-listen-doc-${doc}-${voice}`;
 // Every clip ends with 0.16 s of silence (+0.03 s kept after the voice). The next clip starts this many seconds of the
@@ -345,7 +347,14 @@ export function ListenScreen({ docId }: { docId: string }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
   const [selBtn, setSelBtn] = useState<(Draft & { x: number; y: number }) | null>(null);
-  const [wide, setWide] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches);
+  const [screenWide, setWide] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches);
+  // 比べる: the scripts of the videos this one was modelled on, beside it (PC) or under it (phone). While comparing, the
+  // reference takes the right margin, so comment and suggestion cards open in the sheet as on a phone.
+  const [refs, setRefs] = useState<Reference[]>([]);
+  const [compare, setCompare] = useState(() => typeof window !== 'undefined' && localStorage.getItem(COMPARE_KEY) === '1');
+  const [hereHead, setHereHead] = useState<number | null>(null);
+  const comparing = compare && refs.length > 0;
+  const wide = screenWide && !comparing;
   const [touch, setTouch] = useState(() => typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches);
   const [build, setBuild] = useState(0);        // bumps to put the doc's text into the surface again
   // Edit (into the doc) or suggest (the owner's suggestion), like the mode switch in Google Docs.
@@ -1319,6 +1328,48 @@ export function ListenScreen({ docId }: { docId: string }) {
     return () => ro.disconnect();
   }, [wide, layoutCards, doc]);
 
+  // ---------------------------------------------------------------- 見本の台本と比べる (11/20)
+  useEffect(() => {
+    let live = true;
+    listenApi.references(docId).then(r => { if (live) setRefs(r.refs || []); }).catch(() => {});
+    return () => { live = false; };
+  }, [docId]);
+  useEffect(() => { localStorage.setItem(COMPARE_KEY, compare ? '1' : '0'); }, [compare]);
+  /** The sections of the spoken part: the read headings under ◎台本 (▼ / 【】). */
+  const heads = useMemo<SectionHead[]>(() => {
+    const hs = units.filter(u => u.kind === 'heading' && u.read) as Extract<ListenUnit, { kind: 'heading' }>[];
+    const top = Math.min(...hs.map(h => h.level));
+    const inner = hs.filter(h => h.level > top);
+    return (inner.length ? inner : hs).map(h => ({ n: h.n, text: h.text }));
+  }, [units]);
+  // Where the owner is in the script: the last section heading above a third of the way down the script's box.
+  useEffect(() => {
+    const box = scrollerRef.current;
+    if (!comparing || !box || !heads.length) return;
+    let raf = 0;
+    const find = () => {
+      raf = 0;
+      const line = box.getBoundingClientRect().top + box.clientHeight * 0.33;
+      let at: number | null = heads[0].n;
+      for (const h of heads) {
+        const el = document.getElementById(`u-${h.n}`);
+        if (el && el.getBoundingClientRect().top <= line) at = h.n;
+      }
+      setHereHead(at);
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(find); };
+    find();
+    box.addEventListener('scroll', on, { passive: true });
+    window.addEventListener('resize', on);
+    return () => { box.removeEventListener('scroll', on); window.removeEventListener('resize', on); if (raf) cancelAnimationFrame(raf); };
+  }, [comparing, heads, doc]);
+  const goHead = useCallback((n: number) => {
+    const el = document.getElementById(`u-${n}`), box = scrollerRef.current;
+    if (!el || !box) return;
+    lastUserScroll.current = Date.now();
+    box.scrollTo({ top: el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - 12, behavior: 'smooth' });
+  }, []);
+
   const remaining = useMemo(() => {
     let sec = 0;
     for (let i = cur; i < says.length; i++) sec += Math.max(0.1, (says[i].seconds ?? says[i].speak.length * 0.14 + 0.25) - LEAD);
@@ -1359,6 +1410,19 @@ export function ListenScreen({ docId }: { docId: string }) {
               </button>
             ))}
           </div>
+          {refs.length > 0 && (
+            <button
+              type="button"
+              data-testid="compare-toggle"
+              aria-pressed={compare}
+              title="参考にした動画の台本を横に並べて比べます"
+              onClick={() => setCompare(v => !v)}
+              className={cn('flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[12px]', compare
+                ? 'border-sky-700 bg-sky-700 text-white' : 'border-stone-300 bg-white text-stone-700')}
+            >
+              <Columns2 className="h-3.5 w-3.5" /><span>見本<span className="hidden sm:inline">と比べる</span></span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => (wide ? setShowResolved(v => !v) : setSheet({ kind: 'all' }))}
@@ -1389,6 +1453,7 @@ export function ListenScreen({ docId }: { docId: string }) {
         </div>
       </header>
 
+      <div className={cn('flex min-h-0 flex-1', screenWide ? 'flex-row' : 'flex-col')}>
       <div
         ref={scrollerRef}
         data-scroller
@@ -1494,6 +1559,12 @@ export function ListenScreen({ docId }: { docId: string }) {
             </div>
           )}
         </div>
+      </div>
+      {comparing && (
+        <div data-testid="ref-panel" className={cn('flex shrink-0', screenWide ? 'w-[46%] max-w-[760px]' : 'h-[42dvh]')}>
+          <RefsPanel refs={refs} heads={heads} here={hereHead} onGo={goHead} side={screenWide} />
+        </div>
+      )}
       </div>
 
       {selBtn && (

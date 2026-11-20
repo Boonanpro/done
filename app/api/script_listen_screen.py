@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.api.chat_routes import TokenData, get_current_user
 from app.services import script_listen as S
+from app.services import script_listen_refs as R
 
 router = APIRouter(prefix='/script-listen', tags=['script-listen'])
 
@@ -21,6 +22,13 @@ def _fail(exc):
 async def get_doc(doc_id: str, voice: str = S.DEFAULT_VOICE, user: TokenData = Depends(get_current_user)):
     try: return await run_in_threadpool(S.read, S.doc_id_from(doc_id), voice)
     except Exception as exc: _fail(exc)
+
+
+@router.get('/doc/{doc_id}/references')
+async def get_references(doc_id: str, user: TokenData = Depends(get_current_user)):
+    """The scripts of the videos this script was modelled on (app/services/script_listen_refs.py)."""
+    try: return await run_in_threadpool(R.read, S.doc_id_from(doc_id))
+    except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get('/doc/{doc_id}/version')
