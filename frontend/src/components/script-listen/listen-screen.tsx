@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, Loader2, MessageSquare, MessageSquarePlus, Pause, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
 import { toast } from 'sonner';
+import { get as idbGet, set as idbSet } from 'idb-keyval';
 
 import {
   errorText, listenApi, type ListenDoc, type ListenUnit, type SayUnit, type Suggestion, type Thread,
@@ -29,6 +30,7 @@ const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍�
 const RATE_KEY = 'script-listen-rate';
 const VOICE_KEY = 'script-listen-voice';
 const posKey = (doc: string) => `script-listen-pos-${doc}`;
+const cacheKey = (doc: string, voice: string) => `script-listen-doc-${doc}-${voice}`;
 // Every clip ends with 0.16 s of silence (+0.03 s kept after the voice). The next clip starts this many seconds of the
 // clip before its end, so only silence is cut and the switch to the next clip happens inside the pause.
 const LEAD = 0.17;
@@ -37,7 +39,7 @@ const SAVE_AFTER = 900;
 
 type Clip = { url: string; el: HTMLAudioElement };
 type Sheet = { kind: 'threads'; ids: string[] } | { kind: 'suggestion'; id: string } | { kind: 'compose' } | { kind: 'all' } | null;
-type Draft = { quote: string; n: number; start: number | null };
+type Draft = { quote: string; n: number; start: number | null; from?: Pos | null; to?: Pos | null };
 // Taps on a phone: one tap types there, two taps in a row play from there.
 const DOUBLE_TAP = 300;
 type Snap = { html: string; pos: Pos | null };
@@ -132,6 +134,10 @@ function revealUnit(n: number) {
 export function ListenScreen({ docId }: { docId: string }) {
   const [doc, setDoc] = useState<ListenDoc | null>(null);
   const [loadError, setLoadError] = useState('');
+  // The doc as it was last time, shown at once while the doc is read again (11/20 本人「速くできる余地があるなら早く」).
+  // It can be read and played but not typed in: a change must be measured against the doc as it is now.
+  const [stale, setStale] = useState(false);
+  const staleRef = useRef(false);
   const [voice, setVoice] = useState<string>(() => (typeof window !== 'undefined' && localStorage.getItem(VOICE_KEY)) || 'aida-calm');
   const [rate, setRate] = useState<number>(() => Number((typeof window !== 'undefined' && localStorage.getItem(RATE_KEY)) || 1.5));
   const [cur, setCur] = useState(0);            // index into says
@@ -310,9 +316,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   useEffect(() => { playFromRef.current = (i: number, natural?: boolean) => void playFrom(i, natural); }, [playFrom]);
 
   // ---------------------------------------------------------------- doc and comments
-  const load = useCallback(async (keepText?: { start: number; text: string }) => {
-    try {
-      const d = await listenApi.doc(docId, voiceRef.current);
+  const show = useCallback((d: ListenDoc, keepText?: { start: number; text: string }) => {
       setDoc(d);
       setLoadError('');
       const list = d.units.filter(u => u.kind === 'say') as SayUnit[];
@@ -329,14 +333,35 @@ export function ListenScreen({ docId }: { docId: string }) {
       curRef.current = Math.max(0, at);
       setCur(curRef.current);
       sendAhead(curRef.current);
+  }, [docId, sendAhead]);
+
+  const load = useCallback(async (keepText?: { start: number; text: string }) => {
+    try {
+      const d = await listenApi.doc(docId, voiceRef.current);
+      // Coming from last time's copy: stay on the sentence that is showing (or playing).
+      const here = staleRef.current && !keepText ? saysRef.current[curRef.current] : undefined;
+      show(d, keepText || (here ? { start: here.start, text: here.text } : undefined));
+      staleRef.current = false;
+      setStale(false);
+      void idbSet(cacheKey(docId, d.voice || voiceRef.current), d).catch(() => undefined);
       return d;
     } catch (e) {
       setLoadError(errorText(e));
       return null;
     }
-  }, [docId, sendAhead]);
+  }, [docId, show]);
 
-  useEffect(() => { void load(); }, [load, voice]);
+  useEffect(() => {
+    let fresh = false;
+    void idbGet<ListenDoc>(cacheKey(docId, voiceRef.current)).then(d => {
+      if (!d || fresh || saysRef.current.length) return;
+      staleRef.current = true;
+      setStale(true);
+      show(d);
+    }).catch(() => undefined);
+    void load().then(() => { fresh = true; });
+    return () => { fresh = true; };
+  }, [load, show, voice, docId]);
 
   const loadComments = useCallback(async () => {
     try {
@@ -440,6 +465,31 @@ export function ListenScreen({ docId }: { docId: string }) {
   const html = useMemo(() => buildHtml(units), [units]);
   const hasDoc = !!doc;
 
+  // The words being commented on stay marked from the moment the comment button is pressed, while the comment is
+  // written (11/20 本人「入力中にどこにコメントしてるのか見失う」). A CSS highlight: nothing is added to the text.
+  const draftRef = useRef<Draft | null>(null);
+  const paintDraft = useCallback(() => {
+    const hl = (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
+    const H = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+    if (!hl || !H) return;
+    const root = editorRef.current;
+    const d = draftRef.current;
+    if (!root || !d?.from || !d.to) { hl.delete('cm-draft'); return; }
+    const a = nodeAt(root, d.from), b = nodeAt(root, d.to);
+    if (!a || !b) { hl.delete('cm-draft'); return; }
+    try {
+      const r = document.createRange();
+      r.setStart(a.node, a.off);
+      r.setEnd(b.node, b.off);
+      hl.set('cm-draft', new H(r));
+    } catch { hl.delete('cm-draft'); }
+  }, []);
+  useEffect(() => {
+    draftRef.current = draft;
+    paintDraft();
+  }, [draft, paintDraft]);
+  useEffect(() => () => { (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights?.delete('cm-draft'); }, []);
+
   // Where the voice is and which words have comments: marks on the elements, so the text and the caret stay put.
   const applyMarks = useCallback(() => {
     const root = editorRef.current;
@@ -476,6 +526,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     if (scroller && scroller.scrollTop !== keep) scroller.scrollTop = keep;
     baseRef.current = extract(root);
     applyMarks();
+    paintDraft();
     const after = afterBuild.current;
     afterBuild.current = null;
     if (after?.pos) {
@@ -615,11 +666,13 @@ export function ListenScreen({ docId }: { docId: string }) {
   const openDraft = useCallback((d: Draft) => {
     if (!canComment) { toast.error('お客さんも開けるドキュメントなので、ここからはコメントできません。作業用の台本で書いてください。'); return; }
     stop();
+    draftRef.current = d;
+    paintDraft();
     setDraft(d);
     setSelBtn(null);
     window.getSelection()?.removeAllRanges();
     if (!wide) setSheet({ kind: 'compose' });
-  }, [canComment, stop, wide]);
+  }, [canComment, paintDraft, stop, wide]);
 
   const selectionDraft = useCallback((): (Draft & { x: number; y: number }) | null => {
     const root = editorRef.current;
@@ -637,6 +690,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     const lastRect = rects.length ? rects[rects.length - 1] : rect;
     return {
       quote: text.slice(0, 400), n, start: u?.kind === 'say' ? u.start : null,
+      from: getPos(root, range.startContainer, range.startOffset), to: getPos(root, range.endContainer, range.endOffset),
       x: wide ? (marginRef.current?.getBoundingClientRect().left ?? rect.right) : Math.min(lastRect.right, window.innerWidth - 56),
       y: wide ? rect.top : lastRect.bottom,
     };
@@ -834,9 +888,9 @@ export function ListenScreen({ docId }: { docId: string }) {
       const at = units.find(u => u.n === draft.n);
       const sentence = at && 'text' in at ? at.text : '';
       await listenApi.addComment(docId, { text, quote: draft.quote, start: draft.start, sentence });
+      const list = await loadComments();   // the mark stays until the comment itself shows there
       setDraft(null);
       setSheet(null);
-      const list = await loadComments();
       const made = list?.slice().reverse().find(t => t.quote === draft.quote);
       if (made) setActive(made.id);
       toast('コメントしました。ダンが返事をします');
@@ -946,6 +1000,7 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   return (
     <div className="flex h-dvh flex-col bg-[#faf8f4] text-stone-900">
+      <style>{'::highlight(cm-draft){background-color:rgb(252 211 77 / 0.75)}'}</style>
       <header className="shrink-0 border-b border-stone-200 bg-white/90 px-3 py-2 backdrop-blur sm:px-6">
         <div className="mx-auto flex max-w-6xl items-center gap-2">
           <Volume2 className="h-4 w-4 shrink-0 text-amber-700" />
@@ -992,7 +1047,7 @@ export function ListenScreen({ docId }: { docId: string }) {
             <div
               ref={editorRef}
               data-testid="script-editor"
-              contentEditable={!touch || armed}
+              contentEditable={(!touch || armed) && !stale}
               suppressContentEditableWarning
               spellCheck={false}
               onInput={() => changed()}
@@ -1070,7 +1125,7 @@ export function ListenScreen({ docId }: { docId: string }) {
           aria-label="コメントを追加"
           title="コメントを追加（Ctrl+Alt+M）"
           onMouseDown={e => e.preventDefault()}
-          onClick={() => openDraft({ quote: selBtn.quote, n: selBtn.n, start: selBtn.start })}
+          onClick={() => openDraft({ quote: selBtn.quote, n: selBtn.n, start: selBtn.start, from: selBtn.from, to: selBtn.to })}
           style={wide
             ? { left: selBtn.x - 28, top: Math.max(selBtn.y - 4, 56) }
             : { left: Math.max(8, selBtn.x - 40), top: Math.min(selBtn.y + 10, window.innerHeight - 190) }}
