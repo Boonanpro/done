@@ -65,7 +65,11 @@ export function buildHtml(units: ListenUnit[]) {
         ? `<span class="pointer-events-none mb-0.5 block text-[11px] font-semibold ${u.ins ? 'text-emerald-700' : 'text-red-600'}">${u.ins ? '提案で入る画像' : '提案で消える画像'}</span>`
         : u.id ? `<button type="button" data-img-del="${esc(u.id)}" aria-label="画像を消す" title="画像をドキュメントから消す" class="absolute right-1.5 top-1.5 hidden rounded bg-stone-900/70 px-1.5 py-0.5 text-[11px] text-white group-hover:block">消す</button>` : '';
       const w = inScript ? 'max-w-xl' : 'max-w-md';
-      out.push(`<div data-skip data-img="${esc(u.id || '')}"${u.para != null ? ` data-img-para="${u.para}"` : ''} contenteditable="false"${sug ? ` data-sug="${esc(sug)}"` : ''} class="group relative my-2 w-fit ${w}">${sug ? tag : ''}<img src="${esc(u.src)}" alt="${inScript ? '画像' : 'サムネ'}" referrerpolicy="no-referrer" draggable="false" class="block w-full rounded-md ${frame}">${sug ? '' : tag}</div>`);
+      // A thumbnail of the top part opens the thumbnail editor (parts, pen, finish) right here (11/20 本人「ダンと一緒に
+      // サムネ編集して仕上げたりしたい…この読み上げ画面の中で」).
+      const thumb = !inScript && !sug && u.thumb_order != null
+        ? `<button type="button" data-thumb-edit="${u.thumb_order}" data-thumb-object="${esc(u.id || '')}" class="absolute bottom-2 right-2 flex items-center gap-1 rounded-full bg-stone-900/80 px-2.5 py-1 text-[12px] font-semibold text-white shadow active:bg-stone-900">✎ サムネを直す</button>` : '';
+      out.push(`<div data-skip data-img="${esc(u.id || '')}"${u.para != null ? ` data-img-para="${u.para}"` : ''} contenteditable="false"${sug ? ` data-sug="${esc(sug)}"` : ''} class="group relative my-2 w-fit ${w}">${sug ? tag : ''}<img src="${esc(u.src)}" alt="${inScript ? '画像' : 'サムネ'}" referrerpolicy="no-referrer" draggable="false" class="block w-full rounded-md ${frame}${thumb ? ' cursor-pointer' : ''}"${thumb ? ` data-thumb-img="${u.thumb_order}"` : ''}>${sug ? '' : tag}${thumb}</div>`);
       i++; continue;
     }
     const para = (u as { para?: number }).para;

@@ -26,6 +26,9 @@ function TextPart({ p, onMeasure }: { p: ThumbTextPart; onMeasure?: (id: string,
   const ls = lines(p);
   const lh = textLineHeight(p);
   const sw = Math.max(0, p.stroke_width || 0);
+  // 外の縁（二重の縁の外側。11/20 中村さんのサムネ「白と黒の二重の縁」）。内の縁より太い時だけ見える
+  const ow = Math.max(0, p.outline_width || 0);
+  const pad = Math.max(sw, ow);
   const key = `${p.text}|${p.font}|${p.size}|${p.letter_spacing}|${lh}`;
   // 文字の幅（背景の札の大きさと、選んだ時の枠に使う）。書体が読み終わった時にも測り直す
   useLayoutEffect(() => {
@@ -38,7 +41,6 @@ function TextPart({ p, onMeasure }: { p: ThumbTextPart; onMeasure?: (id: string,
       if (onMeasure) {
         try {
           const b = el.getBBox();
-          const pad = sw;
           let x0 = b.x - pad, y0 = b.y - pad, x1 = b.x + b.width + pad, y1 = b.y + b.height + pad;
           if (p.bg) {
             const mw = Math.max(0, ...ws);
@@ -56,7 +58,7 @@ function TextPart({ p, onMeasure }: { p: ThumbTextPart; onMeasure?: (id: string,
     document.fonts?.addEventListener?.('loadingdone', onFonts);
     return () => { stop = true; document.fonts?.removeEventListener?.('loadingdone', onFonts); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, p.x, p.y, sw, p.id, p.bg?.left, p.bg?.right, p.bg?.top, p.bg?.bottom]);
+  }, [key, p.x, p.y, pad, p.id, p.bg?.left, p.bg?.right, p.bg?.top, p.bg?.bottom]);
 
   const shadow = p.shadow;
   const filterId = shadow ? `ts_${p.id}` : undefined;
@@ -84,6 +86,28 @@ function TextPart({ p, onMeasure }: { p: ThumbTextPart; onMeasure?: (id: string,
           fill={p.bg.color}
         />
       ) : null}
+      {ow > 0 ? (
+        <text
+          aria-hidden
+          x={p.x}
+          y={p.y}
+          fontFamily={`"${f.family}", "NotoSansJP", sans-serif`}
+          fontWeight={f.weight}
+          fontSize={p.size}
+          fill={p.outline || '#000'}
+          stroke={p.outline || '#000'}
+          strokeWidth={ow * 2}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          paintOrder="stroke"
+          filter={filterId ? `url(#${filterId})` : undefined}
+          style={{ letterSpacing: `${p.letter_spacing || 0}px`, fontKerning: 'none', whiteSpace: 'pre', userSelect: 'none' }}
+        >
+          {ls.map((t, i) => (
+            <tspan key={i} x={p.x} y={p.y + i * lh}>{t || ' '}</tspan>
+          ))}
+        </text>
+      ) : null}
       <text
         ref={ref}
         x={p.x}
@@ -97,7 +121,7 @@ function TextPart({ p, onMeasure }: { p: ThumbTextPart; onMeasure?: (id: string,
         strokeLinejoin="round"
         strokeLinecap="round"
         paintOrder="stroke"
-        filter={filterId ? `url(#${filterId})` : undefined}
+        filter={filterId && ow <= 0 ? `url(#${filterId})` : undefined}
         style={{ letterSpacing: `${p.letter_spacing || 0}px`, fontKerning: 'none', whiteSpace: 'pre', userSelect: 'none' }}
       >
         {ls.map((t, i) => (

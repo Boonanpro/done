@@ -14,7 +14,7 @@
 // - コメント: 文字を選ぶと右の余白（スマホは選んだ所の下）にコメントの印が出る。ドキュメントのコメントとして入るので、ダンが
 //   返事と直しをし、学習にも入る。ダンの直しは提案（緑＝足す、赤の線＝消す）で出て、ここで承認・却下できる。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { CheckCheck, Columns2, ExternalLink, ImagePlus, Loader2, MessageSquare, MessageSquarePlus, Pause, PenLine, Pencil, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
+import { Bot, CheckCheck, Columns2, ExternalLink, ImagePlus, Loader2, MessageSquare, MessageSquarePlus, Pause, PenLine, Pencil, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { get as idbGet, set as idbSet } from 'idb-keyval';
 
@@ -27,12 +27,14 @@ import { buildHtml, diffLines, extract, getPos, isOwnSuggestion, leaves, nodeAt,
 import { Composer, SuggestionCard, ThreadCard } from './listen-cards';
 import { DanLiveContext, isLive } from './listen-dan';
 import { RefsPanel, type SectionHead } from './listen-refs';
+import { ListenChat, ListenThumb, type ThumbTarget } from './listen-side';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
 const RATE_KEY = 'script-listen-rate';
 const VOICE_KEY = 'script-listen-voice';
 const MODE_KEY = 'script-listen-mode';
 const COMPARE_KEY = 'script-listen-compare';
+const CHAT_KEY = 'script-listen-chat';
 const posKey = (doc: string) => `script-listen-pos-${doc}`;
 const cacheKey = (doc: string, voice: string) => `script-listen-doc-${doc}-${voice}`;
 // Every clip ends with 0.16 s of silence (+0.03 s kept after the voice). The next clip starts this many seconds of the
@@ -367,6 +369,11 @@ export function ListenScreen({ docId }: { docId: string }) {
   const modeRef = useRef<EditMode>(mode);
   const compStart = useRef<Pos | null>(null);
   const [acceptingAll, setAcceptingAll] = useState(false);
+  // 右の「ダンと台本」（PC は横の欄、スマホは下から開く欄）と、上のサムネの編集（11/20 本人）
+  const [chatOpen, setChatOpen] = useState(() => typeof window === 'undefined' || localStorage.getItem(CHAT_KEY) !== '0');
+  const [phoneChat, setPhoneChat] = useState(false);
+  const [thumb, setThumb] = useState<ThumbTarget | null>(null);
+  const chatSide = screenWide && chatOpen;
 
   const says = useMemo(() => (doc?.units.filter(u => u.kind === 'say') as SayUnit[]) || [], [doc]);
   const sayIndex = useMemo(() => new Map(says.map((u, i) => [u.n, i])), [says]);
@@ -1204,6 +1211,16 @@ export function ListenScreen({ docId }: { docId: string }) {
     const t = e.target as HTMLElement;
     const del = (t.closest('[data-img-del]') as HTMLElement | null)?.dataset.imgDel;
     if (del) { e.preventDefault(); void dropImage(del); return; }
+    // A thumbnail: open it in the thumbnail editor (its button, or the picture itself).
+    const th = t.closest('[data-thumb-edit],[data-thumb-img]') as HTMLElement | null;
+    if (th) {
+      e.preventDefault();
+      const order = Number(th.dataset.thumbEdit ?? th.dataset.thumbImg);
+      const object = (th.closest('[data-img]') as HTMLElement | null)?.dataset.img || null;
+      if (playingRef.current) stop();
+      setThumb({ order, object });
+      return;
+    }
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed && e.detail < 2) return;     // selecting words
     // Words of a suggestion: the caret goes there (they can be typed in) and its card comes forward, glowing a
@@ -1583,6 +1600,43 @@ export function ListenScreen({ docId }: { docId: string }) {
     return sec / rate;
   }, [cur, rate, says]);
 
+  // Where the owner is, for the chat's 「ここ」 (app/services/script_rooms.py): the sentence at the caret, the words
+  // picked, whether it plays, whether a thumbnail is open. Sent a moment after it changes.
+  const stateTimer = useRef<number | null>(null);
+  const lastState = useRef('');
+  const tellState = useCallback(() => {
+    if (stateTimer.current) window.clearTimeout(stateTimer.current);
+    stateTimer.current = window.setTimeout(() => {
+      const root = editorRef.current, sel = window.getSelection();
+      let para: number | null = null, sentence = '', selection = '';
+      if (root && sel?.rangeCount && root.contains(sel.anchorNode)) {
+        const n = unitN(sel.anchorNode);
+        const u = n != null ? units.find(x => x.n === n) : undefined;
+        if (u && 'text' in u) { sentence = u.text; para = (u as { para?: number }).para ?? null; }
+        selection = sel.toString().slice(0, 4000);
+      } else if (playingRef.current && says[curRef.current]) {
+        sentence = says[curRef.current].text; para = says[curRef.current].para;
+      }
+      const body = { para, sentence, selection, playing: playingRef.current, thumb: thumb ? `${thumb.order + 1}枚目` : '' };
+      const key = JSON.stringify(body);
+      if (key === lastState.current) return;
+      lastState.current = key;
+      void listenApi.state(docId, body).catch(() => {});
+    }, 1200);
+  }, [docId, units, says, thumb]);
+  useEffect(() => {
+    document.addEventListener('selectionchange', tellState);
+    return () => document.removeEventListener('selectionchange', tellState);
+  }, [tellState]);
+  useEffect(() => { tellState(); }, [playing, cur, thumb, tellState]);
+
+  // A thumbnail work Dan (or another screen) changed goes into the doc's picture: the server does it when asked.
+  useEffect(() => {
+    if (thumb) return;
+    const t = window.setInterval(() => { if (document.visibilityState === 'visible') void listenApi.thumbs(docId).catch(() => {}); }, 15000);
+    return () => window.clearInterval(t);
+  }, [docId, thumb]);
+
   if (loadError && !doc) {
     return <div className="p-6 text-[15px] text-red-700">{loadError}</div>;
   }
@@ -1592,6 +1646,12 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   const sheetThreads = sheet?.kind === 'threads' ? threads.filter(t => sheet.ids.includes(t.id)) : sheet?.kind === 'all' ? visibleThreads.filter(t => !talkOf.has(t.id)) : [];
   const sheetSuggestion = sheet?.kind === 'suggestion' ? suggestions.find(s => s.id === sheet.id) : undefined;
+
+  const toggleChat = () => {
+    if (!screenWide) { setPhoneChat(v => !v); return; }
+    setChatOpen(v => { localStorage.setItem(CHAT_KEY, v ? '0' : '1'); return !v; });
+  };
+  const thumbTitle = thumb ? `${doc.title.replace(/\s*台本.*$/, '')} サムネ${thumb.order + 1}` : '';
 
   return (
     <DanLiveContext.Provider value={danLiveValue}>
@@ -1618,6 +1678,18 @@ export function ListenScreen({ docId }: { docId: string }) {
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            data-testid="chat-toggle"
+            aria-pressed={screenWide ? chatOpen : phoneChat}
+            title="ダンと話す（台本の相談・作り直し・サムネ）"
+            onMouseDown={e => e.preventDefault()}
+            onClick={toggleChat}
+            className={cn('flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[12px]', (screenWide ? chatOpen : phoneChat)
+              ? 'border-sky-700 bg-sky-700 text-white' : 'border-stone-300 bg-white text-stone-700')}
+          >
+            <Bot className="h-3.5 w-3.5" /><span>ダン</span>
+          </button>
           {refs.length > 0 && (
             <button
               type="button"
@@ -1685,6 +1757,8 @@ export function ListenScreen({ docId }: { docId: string }) {
         </div>
       </header>
 
+      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <div className={cn('flex min-h-0 flex-1', screenWide ? 'flex-row' : 'flex-col')}>
       <div
         ref={scrollerRef}
@@ -1831,6 +1905,96 @@ export function ListenScreen({ docId }: { docId: string }) {
         </div>
       )}
       </div>
+      <div className="shrink-0 border-t border-stone-200 bg-white/95 px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 backdrop-blur sm:px-6">
+        <div className="mx-auto max-w-3xl">
+          {/* One row: where it is on the left, the player in the middle, 提案をすべて承認 on the right — nothing stacked
+              above the player, so the script keeps its height (11/20 本人「上下に重ねるんじゃなくて右側に」). */}
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1">
+            <div className="min-w-0 text-[11.5px] leading-tight text-stone-500 sm:text-[12px]">
+              <div className="tabular-nums">{says.length ? `${cur + 1} / ${says.length}文` : '読む文がありません'}</div>
+              <div className="flex items-center gap-1">
+                {saving && <><Loader2 className="h-3 w-3 shrink-0 animate-spin" /><span className="truncate">ドキュメントに入れています</span></>}
+                {!saving && waiting && <><Loader2 className="h-3 w-3 shrink-0 animate-spin" /><span className="truncate">声を作っています</span></>}
+                {!saving && !waiting && says.length > 0 && `残り約${fmtMinutes(remaining)}`}
+              </div>
+            </div>
+            <div className="flex items-center justify-center gap-1 sm:gap-3">
+              <button type="button" aria-label="前の文" onClick={() => void playFrom(Math.max(0, cur - 1))} className="rounded-full p-2 text-stone-700 active:bg-stone-200 sm:p-2.5">
+                <SkipBack className="h-6 w-6" />
+              </button>
+              <button
+                type="button"
+                aria-label={playing ? '止める' : '聞く'}
+                onClick={() => void toggle()}
+                disabled={!says.length}
+                className="flex h-14 w-14 items-center justify-center rounded-full bg-amber-600 text-white shadow active:bg-amber-700 disabled:opacity-40"
+              >
+                {playing ? <Pause className="h-7 w-7" /> : <Play className="ml-0.5 h-7 w-7" />}
+              </button>
+              <button type="button" aria-label="次の文" onClick={() => void playFrom(cur + 1)} className="rounded-full p-2 text-stone-700 active:bg-stone-200 sm:p-2.5">
+                <SkipForward className="h-6 w-6" />
+              </button>
+            </div>
+            <div className="flex justify-end">
+              {suggestions.length >= 2 && (
+                <button
+                  type="button"
+                  disabled={acceptingAll}
+                  onClick={() => void acceptAll()}
+                  aria-label={`提案をすべて承認（${suggestions.length}）`}
+                  className="flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-[12px] font-semibold text-white shadow-sm active:bg-emerald-700 disabled:opacity-50"
+                >
+                  {acceptingAll ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5 shrink-0" />}
+                  <span className="whitespace-nowrap"><span className="hidden sm:inline">提案を</span>すべて承認（{suggestions.length}）</span>
+                </button>
+              )}
+            </div>
+          </div>
+          {/* All speeds on one screen: on a phone they wrap to a second line instead of hiding off the side (11/20 4倍). */}
+          <div className="mt-2 flex flex-wrap items-center justify-center gap-1">
+            {RATES.map(r => (
+              <button
+                key={r}
+                type="button"
+                onClick={() => setRate(r)}
+                className={cn(
+                  'shrink-0 rounded-full border px-2 py-1 text-[13px] tabular-nums sm:px-2.5',
+                  r === rate ? 'border-amber-600 bg-amber-600 text-white' : 'border-stone-300 bg-white text-stone-700',
+                )}
+              >
+                {r}倍
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      {thumb && (
+        <div data-testid="listen-thumb" className={cn('z-40 bg-background text-foreground', screenWide ? 'absolute inset-0' : 'fixed inset-0')}>
+          <ListenThumb
+            docId={docId}
+            target={thumb}
+            title={thumbTitle}
+            compact={!screenWide}
+            phoneChat={screenWide ? null : (lead => <ListenChat docId={docId} lead={lead} />)}
+            onClose={() => setThumb(null)}
+          />
+        </div>
+      )}
+      </div>
+      {chatSide && (
+        <aside aria-label="ダンと台本" className="w-[400px] shrink-0 border-l border-stone-200 bg-background text-foreground">
+          <ListenChat docId={docId} />
+        </aside>
+      )}
+      </div>
+      {!screenWide && phoneChat && (
+        <div className="fixed inset-x-0 bottom-0 top-12 z-40 flex flex-col overflow-hidden rounded-t-2xl border-t border-stone-200 bg-background text-foreground shadow-2xl">
+          <ListenChat docId={docId} lead={
+            <button type="button" aria-label="閉じる" onClick={() => setPhoneChat(false)} className="rounded-full p-1 text-stone-500 active:bg-stone-200">
+              <X className="h-5 w-5" />
+            </button>} />
+        </div>
+      )}
 
       {glow && (
         <button
@@ -1896,69 +2060,6 @@ export function ListenScreen({ docId }: { docId: string }) {
         </div>
       )}
 
-      <div className="shrink-0 border-t border-stone-200 bg-white/95 px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 backdrop-blur sm:px-6">
-        <div className="mx-auto max-w-3xl">
-          {/* One row: where it is on the left, the player in the middle, 提案をすべて承認 on the right — nothing stacked
-              above the player, so the script keeps its height (11/20 本人「上下に重ねるんじゃなくて右側に」). */}
-          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1">
-            <div className="min-w-0 text-[11.5px] leading-tight text-stone-500 sm:text-[12px]">
-              <div className="tabular-nums">{says.length ? `${cur + 1} / ${says.length}文` : '読む文がありません'}</div>
-              <div className="flex items-center gap-1">
-                {saving && <><Loader2 className="h-3 w-3 shrink-0 animate-spin" /><span className="truncate">ドキュメントに入れています</span></>}
-                {!saving && waiting && <><Loader2 className="h-3 w-3 shrink-0 animate-spin" /><span className="truncate">声を作っています</span></>}
-                {!saving && !waiting && says.length > 0 && `残り約${fmtMinutes(remaining)}`}
-              </div>
-            </div>
-            <div className="flex items-center justify-center gap-1 sm:gap-3">
-              <button type="button" aria-label="前の文" onClick={() => void playFrom(Math.max(0, cur - 1))} className="rounded-full p-2 text-stone-700 active:bg-stone-200 sm:p-2.5">
-                <SkipBack className="h-6 w-6" />
-              </button>
-              <button
-                type="button"
-                aria-label={playing ? '止める' : '聞く'}
-                onClick={() => void toggle()}
-                disabled={!says.length}
-                className="flex h-14 w-14 items-center justify-center rounded-full bg-amber-600 text-white shadow active:bg-amber-700 disabled:opacity-40"
-              >
-                {playing ? <Pause className="h-7 w-7" /> : <Play className="ml-0.5 h-7 w-7" />}
-              </button>
-              <button type="button" aria-label="次の文" onClick={() => void playFrom(cur + 1)} className="rounded-full p-2 text-stone-700 active:bg-stone-200 sm:p-2.5">
-                <SkipForward className="h-6 w-6" />
-              </button>
-            </div>
-            <div className="flex justify-end">
-              {suggestions.length >= 2 && (
-                <button
-                  type="button"
-                  disabled={acceptingAll}
-                  onClick={() => void acceptAll()}
-                  aria-label={`提案をすべて承認（${suggestions.length}）`}
-                  className="flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-[12px] font-semibold text-white shadow-sm active:bg-emerald-700 disabled:opacity-50"
-                >
-                  {acceptingAll ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5 shrink-0" />}
-                  <span className="whitespace-nowrap"><span className="hidden sm:inline">提案を</span>すべて承認（{suggestions.length}）</span>
-                </button>
-              )}
-            </div>
-          </div>
-          {/* All speeds on one screen: on a phone they wrap to a second line instead of hiding off the side (11/20 4倍). */}
-          <div className="mt-2 flex flex-wrap items-center justify-center gap-1">
-            {RATES.map(r => (
-              <button
-                key={r}
-                type="button"
-                onClick={() => setRate(r)}
-                className={cn(
-                  'shrink-0 rounded-full border px-2 py-1 text-[13px] tabular-nums sm:px-2.5',
-                  r === rate ? 'border-amber-600 bg-amber-600 text-white' : 'border-stone-300 bg-white text-stone-700',
-                )}
-              >
-                {r}倍
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
     </div>
     </DanLiveContext.Provider>
   );

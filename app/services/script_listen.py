@@ -358,6 +358,11 @@ def read(doc_id, voice=DEFAULT_VOICE):
             u['key'] = clip_key(u['speak'], voice, u['gap'])
             u['ready'] = (CACHE / f"{u['key']}.mp3").exists()
             u['seconds'] = _meta(u['key']).get('seconds')
+    try:
+        from app.services import script_listen_thumbs as T
+        T.annotate(doc_id, units)
+    except Exception:
+        pass
     _inline_images(units)
     title = doc.get('title', '')
     watch_soon(doc_id)

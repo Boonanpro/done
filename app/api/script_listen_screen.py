@@ -180,3 +180,64 @@ class DropImage(BaseModel):
 async def remove_image(doc_id: str, body: DropImage, user: TokenData = Depends(get_current_user)):
     try: return await run_in_threadpool(S.remove_image, S.doc_id_from(doc_id), body.id)
     except Exception as exc: _fail(exc)
+
+
+# ── サムネ（上の部分の絵）を部品で直す（app/services/script_listen_thumbs.py）──
+
+class ThumbOpen(BaseModel):
+    object: str | None = Field(None, max_length=200)
+    order: int | None = None
+
+
+@router.post('/doc/{doc_id}/thumb/open')
+async def thumb_open(doc_id: str, body: ThumbOpen, user: TokenData = Depends(get_current_user)):
+    from app.services import script_listen_thumbs as T
+    try: return await run_in_threadpool(T.open_work, S.doc_id_from(doc_id), body.object, body.order)
+    except Exception as exc: _fail(exc)
+
+
+@router.get('/doc/{doc_id}/thumbs')
+async def thumbs(doc_id: str, user: TokenData = Depends(get_current_user)):
+    """The doc's thumbnail works; a work changed since its picture was made is put into the doc in the background."""
+    from app.services import script_listen_thumbs as T
+    d = S.doc_id_from(doc_id)
+    items = await run_in_threadpool(T.status, d)
+    if any(i['stale'] for i in items):
+        await run_in_threadpool(T.sync_soon, d)
+    return {'items': items}
+
+
+class ThumbSync(BaseModel):
+    content_id: str | None = Field(None, max_length=100)
+
+
+@router.post('/doc/{doc_id}/thumb/sync')
+async def thumb_sync(doc_id: str, body: ThumbSync, user: TokenData = Depends(get_current_user)):
+    from app.services import script_listen_thumbs as T
+    try: return await run_in_threadpool(T.sync, S.doc_id_from(doc_id), body.content_id)
+    except Exception as exc: _fail(exc)
+
+
+# ── 右の「ダンと台本」の会話（app/services/script_rooms.py）──
+
+@router.post('/doc/{doc_id}/room')
+async def chat_room(doc_id: str, user: TokenData = Depends(get_current_user)):
+    from app.services import script_rooms
+    try: return await script_rooms.ensure_room(user.user_id, S.doc_id_from(doc_id))
+    except Exception as exc: _fail(exc)
+
+
+class ScreenState(BaseModel):
+    para: int | None = None
+    sentence: str = Field('', max_length=2000)
+    selection: str = Field('', max_length=4000)
+    playing: bool = False
+    thumb: str = Field('', max_length=200)
+
+
+@router.post('/doc/{doc_id}/state')
+async def screen_state(doc_id: str, body: ScreenState, user: TokenData = Depends(get_current_user)):
+    """Where the owner is on the screen, for the chat's 「ここ」."""
+    from app.services import script_rooms
+    await run_in_threadpool(script_rooms.put_state, S.doc_id_from(doc_id), body.model_dump())
+    return {'ok': True}

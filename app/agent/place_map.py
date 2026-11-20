@@ -381,6 +381,8 @@ def identify_place(room_id: str, project_id: Optional[str] = None, sb=None) -> d
     origin = proj.get("origin_room_id")
     if origin and isinstance(meta, dict) and isinstance(meta.get("editor"), dict):
         place.update(kind="editor-room")   # エディターの中の「ダンと制作」（app/services/editor_rooms.py）
+    elif origin and isinstance(meta, dict) and isinstance(meta.get("script"), dict):
+        place.update(kind="script-room")   # 台本を聞く画面の「ダンと台本」（app/services/script_rooms.py）
     elif origin and isinstance(meta, dict) and meta.get("hidden"):
         rows = (sb.table("chat_artifact").select("slug").eq("room_id", origin).execute()).data or []
         if any(r.get("slug") == "dev-lead" for r in rows):
@@ -445,6 +447,11 @@ def place_context(room_id: str, project_id: Optional[str] = None, sb=None) -> st
     try:   # 制作の部屋と本体の部屋のつながり（どちらからも相手の進みが読める）
         from app.services.editor_rooms import context_lines
         lines.extend(context_lines(room_id))
+    except Exception:
+        pass
+    try:   # 台本の部屋と本体の部屋のつながり
+        from app.services.script_rooms import context_lines as script_lines
+        lines.extend(script_lines(room_id))
     except Exception:
         pass
     lines.append("地図の全文: " + " / ".join(maps))
