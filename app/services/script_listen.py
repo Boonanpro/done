@@ -319,27 +319,100 @@ def _small(data):
     return out.getvalue()
 
 
+IMAGES = STATE / 'img'
+_image_links: dict = {}         # picture name -> the doc's link to it (to fetch it when the browser first asks)
+_image_locks: dict = {}       # one per picture: several pictures are fetched at the same time
+_IMAGE_EXTS = ('jpg', 'png', 'gif', 'webp')
+
+
+def _image_name(key):
+    """The name a picture is kept under: from the picture's Google link and a secret of this machine, so the name
+    cannot be guessed (an <img> opens it without the sign-in mark, like the dev-lead pictures)."""
+    import hashlib, secrets
+    IMAGES.mkdir(parents=True, exist_ok=True)
+    salt_file = IMAGES / '.salt'
+    if not salt_file.exists():
+        salt_file.write_text(secrets.token_hex(16))
+    return hashlib.sha256((salt_file.read_text().strip() + '|' + key).encode()).hexdigest()[:40]
+
+
+def _kept_image(name):
+    return next((p for p in (IMAGES / f'{name}.{e}' for e in _IMAGE_EXTS) if p.exists()), None)
+
+
+def image_path(name):
+    """The picture called ``name`` (from _inline_images), fetched from the doc and made small the first time it is
+    asked for; None when there is no such picture."""
+    if not re.fullmatch(r'[0-9a-f]{40}', name or ''):
+        return None
+    have = _kept_image(name)
+    if have:
+        return have
+    src = _image_links.get(name)
+    if not src:
+        links = IMAGES / 'links.json'
+        try: src = json.loads(links.read_text()).get(name) if links.exists() else None
+        except Exception: src = None
+    if not src:
+        return None
+    with _image_locks.setdefault(name, threading.Lock()):
+        have = _kept_image(name)
+        if have:
+            return have
+        r = httpx.get(src, timeout=20, follow_redirects=True)
+        r.raise_for_status()
+        if len(r.content) > 20_000_000:
+            return None
+        try:
+            data, ext = _small(r.content), 'jpg'
+        except Exception:
+            kind = r.headers.get('content-type', 'image/jpeg').split(';')[0]
+            data, ext = r.content, {'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp'}.get(kind, 'jpg')
+        out = IMAGES / f'{name}.{ext}'
+        tmp = IMAGES / f'{name}.{ext}.part'
+        tmp.write_bytes(data)
+        tmp.replace(out)
+        return out
+
+
 def _inline_images(units, most=40):
     """The doc's picture links only open from a server (a browser signed in to Google gets refused, 11/19), so the
-    pictures travel inside the answer, made small."""
-    import base64
+    answer gives each picture an address of ours (/api/v1/script-listen/img/<name>); the server fetches the picture
+    from the doc, makes it small and keeps it when the browser first asks. 11/21 本人「台本読み上げページも遅い」: the
+    pictures used to travel inside the answer as data (620 kB of the 690 kB the screen waited for on every opening) and
+    the answer waited for Google to send them (4–5 s whenever they were not in memory)."""
+    fresh = {}
     for u in [x for x in units if x['kind'] == 'image'][:most]:
-        src = u['src']
-        key = src.split('?')[0]
-        if key not in _image_cache:
-            try:
-                r = httpx.get(src, timeout=15, follow_redirects=True)
-                r.raise_for_status()
-                if len(r.content) > 20_000_000: continue
-                try:
-                    data, kind = _small(r.content), 'image/jpeg'
-                except Exception:
-                    data, kind = r.content, r.headers.get('content-type', 'image/jpeg').split(';')[0]
-                _image_cache[key] = f'data:{kind};base64,' + base64.b64encode(data).decode()
-                if len(_image_cache) > 80: _image_cache.pop(next(iter(_image_cache)))
-            except Exception:
-                continue
-        u['src'] = _image_cache[key]
+        key = u['src'].split('?')[0]
+        name = _image_cache.get(key)
+        if not name:
+            name = _image_cache[key] = _image_name(key)
+            if len(_image_cache) > 400: _image_cache.pop(next(iter(_image_cache)))
+        if _image_links.get(name) != u['src']:
+            fresh[name] = u['src']
+        u['src'] = f'/api/v1/script-listen/img/{name}'
+    if fresh:
+        _image_links.update(fresh)
+        # Kept on disk too (the doc's links change their query part but last for days), so an address handed out
+        # before a restart still opens.
+        try:
+            links = IMAGES / 'links.json'
+            have = json.loads(links.read_text()) if links.exists() else {}
+            have.update(fresh)
+            if len(have) > 2000: have = dict(list(have.items())[-2000:])
+            tmp = IMAGES / 'links.json.part'
+            tmp.write_text(json.dumps(have))
+            tmp.replace(links)
+        except Exception:
+            pass
+        for name in fresh:   # fetch them now, so the browser rarely waits
+            if not _kept_image(name):
+                threading.Thread(target=_fetch_quietly, args=(name,), daemon=True).start()
+
+
+def _fetch_quietly(name):
+    try: image_path(name)
+    except Exception: pass
 
 
 def suggestions_of(units, kept=()):
