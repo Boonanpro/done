@@ -54,10 +54,60 @@ def test_typing_over_dans_suggestion_keeps_it_a_suggestion():
     assert _apply(_body(back), S.replace_requests(pos + [end], a_, b_, abm, bbm, ops)) == '◎台本\n一括なら36万円です。\n'
 
 
-def test_a_suggestion_of_dans_across_paragraphs_is_not_rewritten():
-    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), [('前の文。', {}, {}), ('足す\n', {}, {'suggestedInsertionIds': ['s']}), ('後の文。\n', {}, {})]))
-    with pytest.raises(S.ListenError):
-        S.adopt_pieces(doc, {'s'})
+INS = {'suggestedInsertionIds': ['s']}
+
+
+def _multi(*before):
+    # Dan's suggestion adds two whole paragraphs (most of his suggestions in the 11/21 doc did)
+    return _ends(_doc(('◎台本\n', 'HEADING_2'), *before, '前の文。\n', [('足す文です。\n', {}, INS)], [('二つ目です。\n', {}, INS)],
+                      '後の文。\n'))
+
+
+def test_typing_into_one_paragraph_of_dans_suggestion_across_paragraphs(tmp_path, monkeypatch):
+    # 11/21 本人「提案モードの文章を編集できない…今は拒否される」(「この提案は段落をまたいでいるので…」)
+    doc = _multi()
+    toks, _ = _toks(doc, 3)
+    with pytest.raises(M.Adopt):
+        M.plan(toks, '二つX目です。', '0' * 7, 'edit')
+    # only the paragraph being written becomes the owner's; the paragraph ends and the other paragraph stay his
+    pieces = S.adopt_pieces(doc, {'s'}, paras={3})
+    assert [(x['para'], x['pre'], x['del'], x['ins'], x['post'], x.get('above'), x.get('gap')) for x in pieces] == \
+        [(3, '', '', '二つ目です。', '', '足す文です。', 0)]
+    _, positions = S.adopt_plan(doc, {'s'}, paras={3}); reqs, _ = S.take_back_requests(doc, positions, [3])
+    assert _apply(_body(doc), reqs) == '◎台本\n前の文。\n足す文です。\n\n後の文。\n'
+    back = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n', [('足す文です。\n', {}, INS)], [('\n', {}, INS)], '後の文。\n'))
+    for mode in ('edit', 'suggest'):
+        body, fresh, settled = _run(back, 3, '二つX目です。', mode, sugs=pieces)
+        assert body == _body(back) and not settled
+        assert [(f['id'], f['del'], f['ins']) for f in fresh] == [(pieces[0]['id'], '', '二つX目です。')]
+    # paragraphs coming before it do not move it into another empty paragraph
+    shifted = _ends(_doc(('◎台本\n', 'HEADING_2'), '\n', '\n', '前の文。\n', [('足す文です。\n', {}, INS)], [('\n', {}, INS)],
+                         '後の文。\n'))
+    _, placed = M.overlay(shifted, pieces)
+    assert placed == {pieces[0]['id']: 5}
+
+
+def test_replace_into_dans_suggestion_across_paragraphs(tmp_path, monkeypatch):
+    doc = _multi()
+    doc['revisionId'], doc['_account'] = 'r1', 'a'
+    back = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n', [('足す文です。\n', {}, INS)], [('\n', {}, INS)], '後の文。\n'))
+    back['revisionId'], back['_account'] = 'r2', 'a'
+    now = {'doc': doc}
+    monkeypatch.setattr(S, 'OWNER_SUGS', tmp_path / 'sugs.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: now['doc'])
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    sent = []
+    def docs(m, path, acc, body=None, params=None):
+        sent.append(body); now['doc'] = back; return {}
+    monkeypatch.setattr(S, '_docs', docs)
+    r = S.replace('d', 3, 3, '二つ目です。', '二つX目です。', '0' * 6, '0' * 7, 'edit')
+    assert r['changed'] and len(sent) == 1                # the words taken back once; the change itself is a suggestion
+    assert _apply(_body(doc), sent[0]['requests']) == _body(back)
+    sugs = M.load(tmp_path / 'sugs.json', 'd')
+    assert [(x['ins'], x['from']['suggestion']) for x in sugs] == [('二つX目です。', 's')]
+    view, placed = S.view('d', back)[0], S.view('d', back)[2]
+    assert M.text_of(_toks(view, 3)[0]) == '二つX目です。' and M.text_of(_toks(view, 2)[0]) == '足す文です。'
 
 
 def test_typing_next_to_a_suggestion_does_not_settle_it():
@@ -243,3 +293,68 @@ def test_a_rewritten_suggestion_of_dans_is_kept_for_the_learning(tmp_path):
     out = L.owner_actions('d', 0, 2e9, path=log)
     got = [a for a in out if a['action'] == 'revised_suggestion']
     assert len(got) == 1 and got[0]['dan'] == dan and got[0]['owner_wording'] == {'before': 'aすぐ', 'after': 'aXZY'} and got[0]['accepted'] is True
+
+
+def test_typing_into_dans_suggestion_inside_another_of_his():
+    # 11/21 the doc's 「そして2つ目です。」: 「2」 suggested for 「5」 inside a suggested paragraph
+    a, ab, a_b = {'suggestedInsertionIds': ['a']}, {'suggestedInsertionIds': ['b', 'a']}, {'suggestedInsertionIds': ['a'], 'suggestedDeletionIds': ['b']}
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n',
+                     [('そして', {}, a), ('2', {}, ab), ('5', {}, a_b), ('つ目です。\n', {}, a)], '後の文。\n'))
+    toks, _ = _toks(doc, 2)
+    assert M.text_of(toks) == 'そして25つ目です。'
+    with pytest.raises(M.Adopt):
+        M.plan(toks, 'そして25つ目ですね。', '0' * 11, 'edit')
+    pieces, positions = S.adopt_plan(doc, {'a'}, paras={2})
+    assert [(x['pre'], x['del'], x['ins'], x['post'], x['above'], sorted(x['from']['suggestions'])) for x in pieces] == \
+        [('', '', 'そして2つ目です。', '', '前の文。', ['a', 'b'])]
+    reqs, _ = S.take_back_requests(doc, positions, [2])
+    assert _apply(_body(doc), reqs) == '◎台本\n前の文。\n\n後の文。\n'
+    back = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n', [('\n', {}, a)], '後の文。\n'))
+    body, fresh, _ = _run(back, 2, 'そして2つ目ですね。', 'edit', sugs=pieces)
+    assert body == _body(back) and [(f['del'], f['ins']) for f in fresh] == [('', 'そして2つ目ですね。')]
+
+
+@pytest.mark.parametrize('typed,want', [
+    ('そして25Xつ目です。', 'そして2Xつ目です。'),     # next to 「5」, which goes with the adoption (11/21 on the screen: X was lost)
+    ('そしてX25つ目です。', 'そしてX2つ目です。'),
+    ('そして2つ目です。', 'そして2つ目です。'),         # 「5」 taken out: nothing more to change
+])
+def test_typing_next_to_words_that_go_with_the_adoption(tmp_path, monkeypatch, typed, want):
+    a, ab, a_b = {'suggestedInsertionIds': ['a']}, {'suggestedInsertionIds': ['b', 'a']}, {'suggestedInsertionIds': ['a'], 'suggestedDeletionIds': ['b']}
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n',
+                     [('そして', {}, a), ('2', {}, ab), ('5', {}, a_b), ('つ目です。\n', {}, a)], '後の文。\n'))
+    doc['revisionId'], doc['_account'] = 'r1', 'x'
+    back = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n', [('\n', {}, a)], '後の文。\n'))
+    back['revisionId'], back['_account'] = 'r2', 'x'
+    now = {'doc': doc}
+    monkeypatch.setattr(S, 'OWNER_SUGS', tmp_path / 'sugs.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: now['doc'])
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    def docs(m, path, acc, body=None, params=None):
+        now['doc'] = back; return {}
+    monkeypatch.setattr(S, '_docs', docs)
+    S.replace('d', 2, 2, 'そして25つ目です。', typed, '0' * 10, '0' * len(typed), 'edit')
+    assert [x['ins'] for x in M.load(tmp_path / 'sugs.json', 'd')] == [want]
+
+
+def test_typed_words_follow_dans_words_when_struck_ones_come_first():
+    # Docs keeps 「なら」 (added) before 「で」 (struck); as the owner's suggestion it reads 「で」 then 「なら」
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'),
+                     [('一括', {}, {}), ('なら', {}, {'suggestedInsertionIds': ['s']}), ('で', {}, {'suggestedDeletionIds': ['s']}),
+                      ('36万円です。\n', {}, {})]))
+    toks, _ = _toks(doc, 1)
+    order = S.adopt_order(doc, {'s'}, 1, 1)
+    assert ''.join(toks[k]['ch'] for k in order) == '一括でなら36万円です。'
+    assert S.carry_change(toks, order, '一括ならX で36万円です。'.replace(' ', ''), '0' * 12)[0] == '一括でならX36万円です。'
+
+
+def test_owners_words_of_two_sentences_are_drawn_once():
+    # 11/21: a whole paragraph of the owner's words (two sentences) showed both in the first sentence and the second
+    # one again as plain text
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n', [('\n', {}, {'suggestedInsertionIds': ['a']})], '後の文。\n'))
+    sug = {'id': 'o-1', 'para': 2, 'pre': '', 'del': '', 'ins': '一つ目です。二つ目です。', 'bm': '', 'post': '', 'above': '前の文。', 'gap': 0}
+    view, placed = M.overlay(doc, [sug])
+    assert placed == {'o-1': 2}
+    says = [u for u in S.outline(view) if u.get('para') == 2]
+    assert [[(s['t'], s.get('ins')) for s in u['segs']] for u in says] == [[('一つ目です。', 'o-1')], [('二つ目です。', 'o-1')]]

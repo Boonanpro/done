@@ -267,7 +267,9 @@ def outline(doc):
         visible = [c for c in chars if not c[2]['del']]
         if all(c[2]['blue'] or not c[1].strip() for c in visible) or text.startswith('［'):
             units.append({'kind': 'note', 'text': text, 'para': pi, 'segs': _segs(chars)}); continue
-        mine = []      # (unit, end) of this paragraph, to hand every character (deleted ones too) to a unit
+        mine = []      # (unit, place of its last character) of this paragraph, to hand every character to a unit
+        place = {id(c): p for p, c in enumerate(chars)}
+        last = lambda part: place[id(part[-1])]
         for part in _split(chars):
             while part and not part[0][1].strip(): part = part[1:]
             while part and not part[-1][1].strip(): part = part[:-1]
@@ -276,18 +278,20 @@ def outline(doc):
             end = part[-1][0] + _units16(part[-1][1])
             if not speak or not re.search(r'[\w぀-ヿ一-鿿]', speak):
                 u = {'kind': 'note', 'text': _raw(part).strip(), 'para': pi}
-                units.append(u); mine.append((u, end)); continue
+                units.append(u); mine.append((u, last(part))); continue
             start = part[0][0]
             inside = [c for c in chars if start <= c[0] < end]
             u = {'kind': 'say', 'text': _raw(part).strip(), 'speak': speak, 'para': pi, 'start': start, 'end': end,
                  'bmask': ''.join('1' if c[2]['bold'] else '0' for c in part),
                  'bold': all(c[2]['bold'] for c in part if c[1].strip()),
                  'locked': any(c[2]['ins'] or c[2]['del'] for c in inside), 'section': section, 'gap': 's'}
-            units.append(u); mine.append((u, end))
-        # Characters between sentences (spaces, a deleted sentence) go to the sentence after them.
+            units.append(u); mine.append((u, last(part)))
+        # Characters between sentences (spaces, a deleted sentence) go to the sentence after them. By their place in
+        # the paragraph, not their doc index: the owner's added words all sit at one index (11/21: a suggestion of two
+        # sentences drew both in the first one, and the second one again as plain text).
         own = [[] for _ in mine]
-        for c in chars:
-            k = next((i for i, (_, end) in enumerate(mine) if c[0] < end), len(mine) - 1)
+        for p, c in enumerate(chars):
+            k = next((i for i, (_, end) in enumerate(mine) if p <= end), len(mine) - 1)
             if k >= 0: own[k].append(c)
         for (u, _), cs in zip(mine, own):
             u['segs'] = _segs(cs)
@@ -660,8 +664,14 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
             # Typing into Dan's suggestion: it becomes the owner's suggestion with the same words first, then the
             # change is made to it like to any owner suggestion (it stays a suggestion until 承認 / 却下).
             if _depth >= 2: raise ListenError(GONE_HERE, 409)
-            _adopt(doc_id, doc, shown, sugs, need.sids)
-            out = replace(doc_id, para_from, para_to, old, new, old_bmask, new_bmask, mode, new_dmask, _depth + 1)
+            paras = range(para_from, para_to + 1)
+            # What the screen reads once those words are the owner's (struck words first, then added ones; words his
+            # suggestions both add and take out are gone), with the same change made to it.
+            order = adopt_order(shown, need.sids, para_from, para_to)
+            o2, ob2 = ''.join(toks[k]['ch'] for k in order), ''.join('1' if toks[k]['b'] else '0' for k in order)
+            n2, nb2 = carry_change(toks, order, new, new_bmask)
+            _adopt(doc_id, doc, shown, sugs, need.sids, paras)
+            out = replace(doc_id, para_from, para_to, o2, n2, ob2, nb2, mode, '', _depth + 1)
             return {**out, 'changed': True, 'reload': True}
         except M.Settle as need:
             # Dan's suggestion is being typed over: decide it in the doc the way the owner means it, then the rest.
@@ -694,7 +704,7 @@ def _write(doc_id, doc, sugs, placed, para_from, para_to, toks, end, new_toks, m
     for f in fresh:                        # an owner suggestion keeps when it was first written, and whose it was first
         if f['id'] in old_here:
             f['at'] = old_here[f['id']].get('at') or now
-            for key in ('from', 'by'):
+            for key in ('from', 'by', 'above', 'gap'):
                 if old_here[f['id']].get(key): f[key] = old_here[f['id']][key]
     after = M.store_after(sugs, placed, para_from, para_to, b.count('\n') - a.count('\n'), fresh)
     if after != sugs: M.save(OWNER_SUGS, doc_id, after)
@@ -917,62 +927,198 @@ def _decide_owner(doc_id, sid, accept):
     return {'done': True}
 
 
-def adopt_pieces(shown, sids, now=''):
+def _dan_stretches(shown, pi, sids):
+    """Paragraph ``pi`` of ``shown`` as characters, with the stretches of Dan's suggested words in it: (tokens, chars,
+    [(i, j, taken)]) where ``taken`` = the stretch has words of ``sids``. Suggestions that overlap (one of his inside
+    another, 11/21 「そして2つ目です」 = 「2」 suggested for 「5」 inside a suggested paragraph) are one stretch."""
+    got = M.tokens(shown, pi, pi, _chars)
+    if not got: return None
+    toks = got[0]
+    chars = _chars(shown['body']['content'][pi]['paragraph'])
+    dan = lambda c: {x for x in (*c[2]['ins'], *c[2]['del']) if not M.is_owner(x)}
+    out, i = [], 0
+    while i < len(chars):
+        if not dan(chars[i]): i += 1; continue
+        j, ids = i, set()
+        while j < len(chars) and dan(chars[j]): ids |= dan(chars[j]); j += 1
+        out.append((i, j, bool(ids & set(sids))))
+        i = j
+    return toks, chars, out
+
+
+def _dan_ins(c):
+    return any(not M.is_owner(x) for x in c[2]['ins'])
+
+
+def _dan_del(c):
+    return any(not M.is_owner(x) for x in c[2]['del'])
+
+
+def _words_after(toks, chars, stretches):
+    """Whether each character is in the doc once the taken stretches are taken back (their added words go, their struck
+    words stay; the owner's added words are not in the doc)."""
+    keep = [t['k'] != 'i' for t in toks]
+    for i, j, taken in stretches:
+        if taken:
+            for k in range(i, j): keep[k] = not _dan_ins(chars[k])
+    return keep
+
+
+def adopt_plan(shown, sids, now='', paras=None):
     """Dan's suggestions ``sids`` as the owner's suggestions, read from the doc laid over with the owner's (``shown``):
-    one per stretch of their words (its struck words then its added words), with the words around it as they read once
-    his suggestion is taken back in the doc. Raises ListenError when one cannot be (it crosses a paragraph end)."""
+    one per stretch of his suggested words, the words as they read without it (struck) and with it (added), with the
+    words around it as they read once it is taken back in the doc. ``paras``: only these paragraphs (the ones being
+    written). A paragraph end of his suggestion is not a word: it stays his suggestion in the doc (11/21 本人「提案モード
+    の文章を編集できない」— most of Dan's suggestions add whole paragraphs, and those were refused). Returns (pieces, the
+    doc positions of the characters to take back)."""
     import uuid
     content = shown.get('body', {}).get('content', [])
-    out = []
+    out, positions = [], set()
     for pi, el in enumerate(content):
-        p = el.get('paragraph')
-        if p is None: continue
-        for e in p.get('elements', []):
-            r = e.get('textRun')
-            if r and '\n' in r.get('content', '') and set((r.get('suggestedInsertionIds') or []) + (r.get('suggestedDeletionIds') or [])) & sids:
-                raise ListenError('この提案は段落をまたいでいるので、ここでは書き換えられません。承認か却下を決めてから直してください。', 409)
-        got = M.tokens(shown, pi, pi, _chars)
+        if el.get('paragraph') is None or (paras is not None and pi not in paras): continue
+        got = _dan_stretches(shown, pi, sids)
         if not got: continue
-        toks = got[0]
-        # The paragraph as it reads once those suggestions are taken back: their added words go, struck words stay.
-        mine = lambda t: t['k'] == 'x' and t['sid'] in sids
-        raw = lambda t: t['k'] in ('p', 'd') or (t['k'] == 'x' and not (mine(t) and t['xk'] == 'i'))
-        # What Dan suggested here, whole (Docs puts the added words before the struck ones, so one suggestion can be
-        # two stretches): kept on every piece for the learning.
-        whole = {}
-        for t in toks:
-            if mine(t):
-                w = whole.setdefault(t['sid'], {'by': 'dan', 'suggestion': t['sid'], 'del': '', 'ins': ''})
-                w['del' if t['xk'] == 'd' else 'ins'] += t['ch']
-        i = 0
-        while i < len(toks):
-            if not mine(toks[i]): i += 1; continue
-            j, seen_ins = i, False
-            while j < len(toks) and mine(toks[j]) and toks[j]['sid'] == toks[i]['sid']:
-                if toks[j]['xk'] == 'i': seen_ins = True
-                elif seen_ins: break           # struck words after added ones: the next stretch
-                j += 1
-            run = toks[i:j]
-            pre = ''.join(t['ch'] for t in toks[:i] if raw(t))
-            post = ''.join(t['ch'] for t in toks[j:] if raw(t))
-            dele = ''.join(t['ch'] for t in run if t['xk'] == 'd')
-            ins = [t for t in run if t['xk'] == 'i']
-            out.append({'id': M.OWNER + uuid.uuid4().hex[:12], 'para': pi, 'pre': pre[-M.CONTEXT:], 'del': dele,
-                        'ins': ''.join(t['ch'] for t in ins), 'bm': ''.join('1' if t['b'] else '0' for t in ins),
-                        'post': post[:M.CONTEXT], 'at': now,
-                        'from': dict(whole[toks[i]['sid']])})
-            i = j
-    return out
+        toks, chars, stretches = got
+        keep = _words_after(toks, chars, stretches)
+        for i, j, taken in stretches:
+            if not taken: continue
+            positions |= {chars[k][0] for k in range(i, j)}
+            pre = ''.join(t['ch'] for k, t in enumerate(toks[:i]) if keep[k])
+            post = ''.join(t['ch'] for k, t in enumerate(toks[j:], j) if keep[k])
+            dele = ''.join(toks[k]['ch'] for k in range(i, j) if not _dan_ins(chars[k]))
+            ins = [toks[k] for k in range(i, j) if not _dan_del(chars[k])]
+            ins_text = ''.join(t['ch'] for t in ins)
+            if dele == ins_text: continue              # nothing left to suggest (words added and struck again)
+            ids = sorted({x for k in range(i, j) for x in (*chars[k][2]['ins'], *chars[k][2]['del']) if not M.is_owner(x)})
+            first = next((x for k in range(i, j) for x in (*chars[k][2]['ins'], *chars[k][2]['del']) if x in sids), ids[0])
+            frm = {'by': 'dan', 'suggestion': first, 'del': dele, 'ins': ins_text}
+            if len(ids) > 1: frm['suggestions'] = ids
+            piece = {'id': M.OWNER + uuid.uuid4().hex[:12], 'para': pi, 'pre': pre[-M.CONTEXT:], 'del': dele,
+                     'ins': ins_text, 'bm': ''.join('1' if t['b'] else '0' for t in ins),
+                     'post': post[:M.CONTEXT], 'at': now, 'from': frm}
+            if not pre and not post and not dele:
+                piece.update(_above(shown, pi, sids, paras))
+            out.append(piece)
+    return out, positions
 
 
-def _adopt(doc_id, doc, shown, sugs, sids):
+def adopt_order(shown, sids, para_from, para_to):
+    """The characters of paragraphs ``para_from``..``para_to`` (indices into their tokens) in the order the screen shows
+    them once Dan's suggestions ``sids`` there are the owner's (adopt_plan): in each taken stretch its struck words,
+    then its added words; words both added and taken out by his suggestions are gone."""
+    order, base = [], 0
+    for pi in range(para_from, para_to + 1):
+        if pi > para_from:
+            order.append(base); base += 1             # the paragraph end
+        got = _dan_stretches(shown, pi, sids)
+        if not got: continue
+        toks, chars, stretches = got
+        taken = {}
+        for i, j, t in stretches:
+            if t: taken[i] = j
+        k = 0
+        while k < len(toks):
+            if k not in taken:
+                order.append(base + k); k += 1; continue
+            j = taken[k]
+            dele = [x for x in range(k, j) if not _dan_ins(chars[x])]
+            ins = [x for x in range(k, j) if not _dan_del(chars[x])]
+            same = ''.join(toks[x]['ch'] for x in dele) == ''.join(toks[x]['ch'] for x in ins)
+            order += [base + x for x in (dele if same else dele + ins)]
+            k = j
+        base += len(toks)
+    return order
+
+
+def carry_change(old_toks, order, new, new_bmask):
+    """The owner's change (``old_toks`` -> ``new``) made to the same characters put in ``order`` (adopt_order).
+    Words typed next to characters that are gone go after the nearest one before them that is still there."""
+    ops = M.ops_for(old_toks, new)
+    gone = set()
+    at = {}                                           # old index -> [(text, bold)] typed just before it
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == 'equal': continue
+        gone |= set(range(i1, i2))
+        if j2 > j1: at.setdefault(i1, []).append((new[j1:j2], new_bmask[j1:j2].ljust(j2 - j1, '0')))
+    where = {k: n for n, k in enumerate(order)}
+    after = {}                                        # position in order -> typed text after it (-1 = at the start)
+    for i, typed in at.items():
+        p = next((where[q] for q in range(i - 1, -1, -1) if q in where), None)
+        if p is None:
+            nxt = next((where[q] for q in range(i, len(old_toks)) if q in where), None)
+            p = -1 if nxt is None else nxt - 1
+        after.setdefault(p, []).extend(typed)
+    bold = {}
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == 'equal':
+            for d in range(i2 - i1): bold[i1 + d] = new_bmask[j1 + d] if j1 + d < len(new_bmask) else '0'
+    text, bm = [], []
+    for t, b in after.get(-1, []): text.append(t); bm.append(b)
+    for n, k in enumerate(order):
+        if k not in gone:
+            text.append(old_toks[k]['ch']); bm.append(bold.get(k, '1' if old_toks[k]['b'] else '0'))
+        for t, b in after.get(n, []): text.append(t); bm.append(b)
+    return ''.join(text), ''.join(bm)
+
+
+def adopt_pieces(shown, sids, now='', paras=None):
+    return adopt_plan(shown, sids, now, paras)[0]
+
+
+def _above(shown, pi, sids, paras):
+    """For words that will be a whole paragraph of their own: the end of the nearest paragraph above that keeps words
+    in the doc, and how many empty ones are between (script_listen_marks.overlay finds the place by it)."""
+    for gap, pj in enumerate(range(pi - 1, -1, -1)):
+        got = _dan_stretches(shown, pj, sids if (paras is None or pj in paras) else ())
+        if not got: return {}
+        toks, chars, stretches = got
+        keep = _words_after(toks, chars, stretches)
+        words = ''.join(t['ch'] for k, t in enumerate(toks) if keep[k])
+        if words: return {'above': words[-M.CONTEXT:], 'gap': gap}
+    return {}
+
+
+def take_back_requests(doc, positions, paras):
+    """Docs API requests that take back Dan's suggested words at doc ``positions`` in paragraphs ``paras``: added words
+    go, struck words are written again plainly. Not the paragraph ends (those stay his suggestion, so the paragraphs
+    stay where they are and 却下 still takes them out). Returns (text requests, style requests)."""
+    content = doc.get('body', {}).get('content', [])
+    body_end = content[-1].get('endIndex') if content else None
+    runs = []
+    for pi in paras:
+        if not (0 <= pi < len(content)) or not content[pi].get('paragraph'): continue
+        pstyle = (content[pi]['paragraph'].get('paragraphStyle') or {}).get('namedStyleType', 'NORMAL_TEXT')
+        for e in content[pi]['paragraph'].get('elements', []):
+            r = e.get('textRun')
+            if not r or e['startIndex'] not in positions: continue
+            ins = [x for x in (r.get('suggestedInsertionIds') or []) if not M.is_owner(x)]
+            text = r['content']
+            end = e.get('endIndex', e['startIndex'] + sum(_units16(c) for c in text))
+            while text.endswith('\n'):        # the paragraph end stays his
+                text, end = text[:-1], end - 1
+            if not text: continue
+            runs.append((e['startIndex'], end, 'ins' if ins else 'del', text, r.get('textStyle') or {}, pstyle, None))
+    if not runs: return [], []
+    return decide_requests(runs, False, body_end)
+
+
+def _adopt(doc_id, doc, shown, sugs, sids, paras=None):
     """Take Dan's suggestions ``sids`` back in the doc and keep the same words as the owner's suggestions, so the
-    owner can go on writing them as suggestions (11/21). The doc then no longer shows them in Google Docs; the screen
-    does, and 承認 writes them like the owner's own."""
+    owner can go on writing them as suggestions (11/21). Only in ``paras`` (the paragraphs being written): the rest of
+    a suggestion that goes over several paragraphs stays his. The doc then no longer shows those words in Google
+    Docs; the screen does, and 承認 writes them like the owner's own."""
     now = time.strftime('%Y-%m-%dT%H:%M:%S%z')
-    pieces = adopt_pieces(shown, set(sids), now)
-    if not pieces: raise ListenError(GONE_HERE, 409)
-    for sid in sids: decide(doc_id, sid, False, by_edit=True, log=False)
+    paras = set(paras) if paras is not None else None
+    pieces, positions = adopt_plan(shown, set(sids), now, paras)
+    if not positions: raise ListenError(GONE_HERE, 409)
+    if paras is None:
+        paras = set(range(len(shown.get('body', {}).get('content', []))))
+    text_reqs, style_reqs = take_back_requests(doc, positions, sorted(paras))
+    if text_reqs:
+        _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
+              body={'requests': text_reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+    if style_reqs:
+        _docs('POST', f'{doc_id}:batchUpdate', doc['_account'], body={'requests': style_reqs})
     M.save(OWNER_SUGS, doc_id, list(sugs) + pieces)
     for piece in pieces:
         _log_owner_action(doc_id, doc.get('title', ''), action='adopt', suggestion=piece['id'], dan_suggestion=piece['from']['suggestion'],
