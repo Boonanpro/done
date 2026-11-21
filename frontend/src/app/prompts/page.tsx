@@ -19,10 +19,8 @@ function PromptsInner() {
     router.replace(`/prompts?${q.toString()}`, { scroll: false });
   };
   return (
-    <div className="h-dvh overflow-y-auto overscroll-contain bg-[#faf8f4] text-stone-900">
-      <div className="mx-auto max-w-7xl px-3 py-4 sm:px-6">
-        <PromptsScreen place={params.get('place') || ''} id={params.get('id') || ''} onGo={go} />
-      </div>
+    <div className="h-dvh overflow-y-auto overscroll-contain bg-[#faf8f4] text-stone-900 lg:overflow-hidden">
+      <PromptsScreen place={params.get('place') || ''} id={params.get('id') || ''} onGo={go} />
     </div>
   );
 }

@@ -292,12 +292,6 @@ export function PromptsChat({ ctx, onClearSelection, onPulse, onBusy, header }: 
         ) : null}
         {!room && !error ? <p className="flex items-center gap-2 text-sm text-stone-500"><Loader2 className="h-4 w-4 animate-spin" />会話を開いています</p> : null}
         {error ? <p className="rounded-md bg-rose-50 p-2 text-sm text-rose-800">{error}</p> : null}
-        {room && !messages.length ? (
-          <div className="rounded-lg bg-stone-50 p-3 text-[13px] leading-relaxed text-stone-600">
-            指示文を見ながら、ダンと話して一緒に直せます。全文の気になる所を選んでから書くと、「ここ」で通じます。
-            <br />例：「ここ何のため？」「この行を消したらどうなる？」「もっと短くして」
-          </div>
-        ) : null}
         {messages.map(m => {
           if (isDan(m)) {
             return (
