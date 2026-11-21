@@ -110,6 +110,65 @@ def check(
     return {"ok": True, "basis": "owner_message", "reason": "本人の最新の発言に送る許可がある"}
 
 
+# 許可の後の発言にこれがあれば、前の許可は使わない（止める・保留・取り消しの言葉）
+_HOLD_WORDS = re.compile(r"(保留|撤回|取り消|取消|中止|やめて|やめよう|やっぱり|待って|ストップ|送信停止|送信中止)")
+# 前の発言の許可を探す範囲（本人の発言の件数・時間）
+PRIOR_WINDOW_MESSAGES = 10
+PRIOR_WINDOW_HOURS = 6
+
+
+def check_recent(
+    *,
+    approval: str,
+    owner_messages: list[Dict[str, Any]],
+    watch_notes: list[str],
+    proposal: Optional[Dict[str, Any]],
+    collab_autonomy: Optional[str] = None,
+    used_elsewhere: bool = False,
+) -> Dict[str, Any]:
+    """本人の最近の発言（新しい順）から、approval を含む許可の発言を探して確かめる。
+
+    2026-11-21 本人の定義: 明確に承認していて、その後に条件が変わっていないなら、もう一度聞くのは二重確認でダメ。
+    「送って」の2秒後に別の質問が来ただけで、許可が無いと断っていた（最新の1件しか見ていなかった）。
+    承認が効かなくなるのは、条件が変わった時だけ:
+    - 許可の後に、下書きの中身が変わった（check の updated_at の比べ）
+    - 許可の後の本人の発言に、止める・待つ・取り消す言葉がある
+    - その許可で、もう別の送信をした（1つの許可は1つの送信にだけ効く）
+    別の話題の質問・指摘が後に続いても、許可はそのまま効く。
+    """
+    latest = owner_messages[0] if owner_messages else None
+    first = check(approval=approval, latest_owner_message=latest, watch_notes=watch_notes,
+                  proposal=proposal, collab_autonomy=collab_autonomy)
+    if first["ok"]:
+        return first
+    quote = _norm(approval)
+    if len(quote) < 2:
+        return first
+    newest_at = _ts((latest or {}).get("created_at"))
+    for i, m in enumerate(owner_messages[1:PRIOR_WINDOW_MESSAGES], start=1):
+        if quote not in _norm(m.get("content") or ""):
+            continue
+        at = _ts(m.get("created_at"))
+        if not at or (newest_at and (newest_at - at).total_seconds() > PRIOR_WINDOW_HOURS * 3600):
+            return first
+        r = check(approval=approval, latest_owner_message=m, watch_notes=[], proposal=proposal)
+        if not r["ok"]:
+            return r
+        for later in owner_messages[:i]:
+            words = later.get("content") or ""
+            if _NEG_WORDS.search(words) or _HOLD_WORDS.search(words):
+                return {"ok": False, "basis": "", "reason": (
+                    "本人が送ってよいと言った後の発言に、止める・待つ・取り消す意味の言葉があります。"
+                    "送らずに、本人に送ってよいか聞くこと。")}
+        if used_elsewhere:
+            return {"ok": False, "basis": "", "reason": (
+                "その「送って」の後に、ダンがもう別の送信をしています。1つの許可は1つの送信にだけ効きます。"
+                "送らずに、本人に送ってよいか聞くこと。")}
+        return {"ok": True, "basis": "owner_message_earlier", "message_id": m.get("id"),
+                "reason": "本人の許可の後に、中身も条件も変わっていない（後の発言は別の話）"}
+    return first
+
+
 def review_prior(approval, proposal, owner, context, later, receipt):
     """Revalidate an identified instruction against the draft visible at the time."""
     denied = {"ok": False, "basis": "", "reason": "この返信案への元の指示、または承認時の条件を照合できません。"}
@@ -173,6 +232,23 @@ def _prior(sb, room_id, user_id, proposal, owner_id, approval, receipt):
     return review_prior(approval, proposal, owner, context, later, receipt)
 
 
+def _used_elsewhere(sb, room_id, user_id, proposal, rows, approval) -> bool:
+    """前の発言の許可を使う時だけ: その発言の後に、ダンが別の送信案を送った（送信中にした）か。"""
+    quote = _norm(approval)
+    if not rows or len(quote) < 2 or quote in _norm(rows[0].get("content") or ""):
+        return False
+    m = next((r for r in rows[1:] if quote in _norm(r.get("content") or "")), None)
+    if not m:
+        return False
+    others = (sb.table("dan_proposals").select("id,status,action_data,updated_at")
+              .eq("source_room_id", room_id).eq("type", "outbound").eq("user_id", user_id)
+              .in_("status", ["sent", "sending"]).gt("updated_at", m["created_at"])
+              .limit(20).execute()).data or []
+    pid = (proposal or {}).get("id")
+    return any(o["id"] != pid and (o["status"] == "sending" or (o.get("action_data") or {}).get("sent_by") == "dan")
+               for o in others)
+
+
 async def authorize(
     *, approval: str, room_id: str, user_id: str, proposal: Optional[Dict[str, Any]],
     owner_message_id: str = "", review_token: str = "",
@@ -186,17 +262,17 @@ async def authorize(
         sb = get_supabase_client().client
         if owner_message_id:
             return _prior(sb, room_id, user_id, proposal, owner_message_id, approval, review_token)
-        rows = (sb.table("chat_messages").select("content,created_at")
+        rows = (sb.table("chat_messages").select("id,content,created_at")
                 .eq("room_id", room_id).eq("sender_type", "human").eq("sender_id", user_id)
-                .order("created_at", desc=True).limit(1).execute()).data or []
+                .order("created_at", desc=True).limit(PRIOR_WINDOW_MESSAGES).execute()).data or []
         notes = [w.get("plain_note") or "" for w in followups.list_watches(room_id)]
-        return (rows[0] if rows else None), notes
+        return rows, notes, _used_elsewhere(sb, room_id, user_id, proposal, rows, approval)
 
     try:
         loaded = await asyncio.to_thread(_load)
         if owner_message_id:
             return loaded
-        latest, notes = loaded
+        recent, notes, used = loaded
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "basis": "", "reason": f"本人の発言を読めず、送る許可を確かめられません（{e}）。送らないこと。"}
 
@@ -210,5 +286,5 @@ async def authorize(
             autonomy = ((room or {}).get("ai_assist_config") or {}).get("autonomy")
         except Exception:
             autonomy = None
-    return check(approval=approval, latest_owner_message=latest, watch_notes=notes,
-                 proposal=proposal, collab_autonomy=autonomy)
+    return check_recent(approval=approval, owner_messages=recent, watch_notes=notes,
+                        proposal=proposal, collab_autonomy=autonomy, used_elsewhere=used)
