@@ -3,7 +3,9 @@
 // エディターの中のサムネの画面（2026-11-18 本人「サムネの微調整の往復に時間がかかりすぎる」→「部品に分けたサムネ」
 // 「描き込んで直す」）。背景・人物・文字・矢印を別々の部品で持ち、
 // - 選ぶ: 部品をつかんで動かす・角で大きさ・上の丸で回す・右の欄で文字を打ち直す／色・縁・書体を変える
-// - 書き込む: ペンで丸や矢印を描いて一言添えて送ると、ダンが直す（結果はこの欄にだけ出し、チャットには出さない）
+// - 書き込む: ペンで丸や矢印を描いて一言添えて送ると、ダンが直す（結果はこの欄にだけ出し、チャットには出さない）。
+//   会話の横で開いた時（chatLink、台本を聞く画面）は、選んだ部品とペンの書き込みを会話の入力欄に添え、ダンとはその会話で話す
+//   （2026-11-21 本人「要素クリックしてもそれがチャットに添付されない」「このサムネとかって言っても通じるのか？」）
 // - 一覧で見る: YouTube の一覧と同じ小さい大きさで、ほかのサムネと並べて見る
 // 保存は手を離した時に自動。ダンが直した形は1.5秒ごとに読み直して、目の前で変わる。
 
@@ -15,6 +17,7 @@ import {
 import { toast } from 'sonner';
 
 import { ThumbCanvas, partCenter, type PartBox } from './thumb-canvas';
+import { useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
 import {
   THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, newPartId, removeFinish,
   type ThumbDoc, type ThumbFinishJob, type ThumbFontId, type ThumbInstruction, type ThumbMark, type ThumbPart, type ThumbTextPart,
@@ -29,7 +32,20 @@ type Props = {
   onBack: () => void;
   /** 戻るボタンの説明（既定はエディターのライブラリへ。台本を聞く画面では「台本に戻る」） */
   backLabel?: string;
+  /** 横の会話につなぐ（台本を聞く画面）。選んだ部品・ペンの書き込みをその会話の入力欄に添える */
+  chatLink?: ChatLink | null;
 };
+
+export type ChatLink = {
+  /** 会話の部屋（ProjectChatPanel の projectId） */
+  projectId: string;
+  /** 今の形にペンの線・部品の枠を重ねた絵を作り、会話に添えられる URL を返す */
+  snapshot: (body: { marks?: ThumbMark[]; box?: number[] | null }) => Promise<string | null>;
+  /** 選んでいる部品が変わった時（ダンの「この文字」のため。選んでいなければ空） */
+  onContext?: (part: string) => void;
+};
+
+const r0 = (v: number) => Math.round(v);
 
 type JobState = { job_id: string; state: string; label: string; active: boolean; progress?: string | null; result?: string | null };
 
@@ -80,7 +96,17 @@ function partLabel(p: ThumbPart) {
   return '絵';
 }
 
-export function ThumbnailEditor({ roomId, contentId, title, compact = false, phoneChat, onBack, backLabel }: Props) {
+/** ダンに渡す部品の中身（種類・名前・位置・文字・色） */
+function partDetail(p: ThumbPart, b: PartBox): string {
+  const where = `位置 x=${r0(b.x)} y=${r0(b.y)} 幅${r0(b.w)} 高さ${r0(b.h)}`;
+  const hid = p.hidden ? '・今は隠してある' : '';
+  if (p.type === 'text') {
+    return `部品 ${p.id}（文字「${p.text.replace(/\n/g, ' / ')}」・名前「${p.name || ''}」・${where}・大きさ${r0(p.size)}・書体 ${p.font}・色 ${p.fill}${p.stroke ? `・縁 ${p.stroke}/${p.stroke_width ?? ''}` : ''}${p.rotation ? `・回転${p.rotation}` : ''}${hid}）`;
+  }
+  return `部品 ${p.id}（絵「${p.name || ''}」・${where}${p.rotation ? `・回転${p.rotation}` : ''}${hid}）`;
+}
+
+export function ThumbnailEditor({ roomId, contentId, title, compact = false, phoneChat, onBack, backLabel, chatLink }: Props) {
   const [doc, setDoc] = useState<ThumbDoc | null>(null);
   const docRef = useRef<ThumbDoc | null>(null);
   docRef.current = doc;
@@ -109,6 +135,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const [finishJob, setFinishJob] = useState<ThumbFinishJob | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
+  // 会話の札を×で外した部品（もう一度押すまで添えない）
+  const [dismissedPart, setDismissedPart] = useState<string | null>(null);
 
   // ── 読み込み・ダンの直しを読み直す・保存 ──
   const load = useCallback(async (force = false) => {
@@ -261,6 +289,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       ev.preventDefault();
       (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
       setSelected(part.id);
+      setDismissedPart(null);
       drag.current = { kind: 'move', id: part.id, start: pt, orig: clone(part), before: clone(doc) };
     } else {
       setSelected(null);
@@ -580,6 +609,70 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     style: { cursor: mode === 'pen' ? 'crosshair' : p.locked ? 'default' : 'move', pointerEvents: mode === 'pen' || p.locked ? 'none' : 'auto' },
   }), [mode]);
 
+  // ── 横の会話に添える（chatLink の時だけ）──
+  const putAttach = useChatAttachStore((s) => s.put);
+  const dropAttach = useChatAttachStore((s) => s.drop);
+  const attached = useChatAttachments(chatLink?.projectId || '');
+  const lastPartKey = useRef('');
+  const lastCtx = useRef<string | null>(null);
+  const linkRef = useRef(chatLink);
+  useEffect(() => { linkRef.current = chatLink; }, [chatLink]);
+  const selPart = doc && selected ? doc.parts.find((p) => p.id === selected) : undefined;
+  const selBox = selPart ? boxOf(selPart) : null;
+  const where = `サムネ「${title}」（作品 content_id=${contentId}、部屋 ${roomId}）`;
+  const partText = selPart && selBox ? partDetail(selPart, selBox) : '';
+  useEffect(() => {
+    const link = linkRef.current;
+    if (!link) return;
+    if (lastCtx.current !== partText) { lastCtx.current = partText; link.onContext?.(partText); }
+    const key = selPart && mode === 'select' && dismissedPart !== selPart.id ? `${selPart.id}|${partText}` : '';
+    if (key === lastPartKey.current) return;
+    lastPartKey.current = key;
+    if (!key || !selPart || !selBox) { dropAttach(link.projectId, 'thumb-part'); return; }
+    const box = [selBox.x, selBox.y, selBox.w, selBox.h];
+    const id = selPart.id;
+    putAttach(link.projectId, {
+      key: 'thumb-part',
+      label: `選んだ部品：${partLabel(selPart)}`,
+      preview: selPart.type === 'image' ? selPart.src : undefined,
+      detail: `- みきさんが選んだ部品（「これ」「この文字」「この絵」はこれ）: ${where} の ${partText}。添付の絵の赤い枠がこの部品。`,
+      upload: () => link.snapshot({ box }),
+      onRemove: () => setDismissedPart(id),
+    });
+  }, [partText, selPart, selBox, mode, dismissedPart, where, putAttach, dropAttach]);
+
+  const marksKey = useMemo(() => marks.map((m) => m.points.length).join(','), [marks]);
+  useEffect(() => {
+    const link = linkRef.current;
+    if (!link) return;
+    if (!marks.length || mode !== 'pen') { dropAttach(link.projectId, 'thumb-marks'); return; }
+    const d = docRef.current;
+    const xs = marks.flatMap((m) => m.points.map((p) => p[0]));
+    const ys = marks.flatMap((m) => m.points.map((p) => p[1]));
+    const bx = [Math.min(...xs), Math.min(...ys), Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)];
+    const hit = (b: PartBox) => b.x < bx[0] + bx[2] && b.x + b.w > bx[0] && b.y < bx[1] + bx[3] && b.y + b.h > bx[1];
+    const under = d ? [...d.parts].reverse().filter((p) => !p.hidden && hit(boxOf(p))).map((p) => `${p.id}（${partLabel(p)}）`) : [];
+    const snap = marks.map((m) => ({ ...m, points: m.points.map((p) => [p[0], p[1]] as [number, number]) }));
+    putAttach(link.projectId, {
+      key: 'thumb-marks',
+      label: `ペンの書き込み ${marks.length}本`,
+      detail: `- みきさんが ${where} にペンで書き込んだ（赤い線 ${marks.length}本、添付の絵）。書き込みの範囲 x=${r0(bx[0])} y=${r0(bx[1])} 幅${r0(bx[2])} 高さ${r0(bx[3])}。`
+        + (under.length ? `その下の部品（手前から）: ${under.join('、')}。` : ''),
+      upload: () => link.snapshot({ marks: snap }),
+      onSent: () => { setMarks([]); setMode('select'); },
+      onRemove: () => setMarks([]),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marksKey, mode, where, putAttach, dropAttach]);
+  // 閉じたら外す
+  useEffect(() => () => {
+    const link = linkRef.current;
+    if (!link) return;
+    dropAttach(link.projectId, 'thumb-part');
+    dropAttach(link.projectId, 'thumb-marks');
+    link.onContext?.('');
+  }, [dropAttach]);
+
   if (!doc) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -784,7 +877,23 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       onAdopt={() => void decideFinish(true)} onDiscard={() => void decideFinish(false)} onRetry={(note) => void startFinish(note)} />
   ) : null;
 
-  const penBar = mode === 'pen' ? (
+  const penBar = mode === 'pen' && chatLink ? (
+    <div className="rounded-md border border-red-300 bg-red-50/60 p-2 text-xs leading-relaxed dark:bg-red-950/30" data-thumb-penbar data-thumb-penbar-chat>
+      <div>{marks.length
+        ? `描いた線（${marks.length}本）は、${compact ? '会話' : '右の会話'}の入力欄に添えてあります。どうしたいかを会話に書いて送ってください。`
+        : 'サムネの上に丸や矢印を描くと、会話に添えられます。'}</div>
+      <div className="mt-1.5 flex gap-1.5">
+        {compact && phoneChat ? (
+          <button type="button" disabled={!marks.length} onClick={() => setPhoneChatOpen(true)}
+            className="flex h-8 flex-1 items-center justify-center gap-1 rounded-md bg-sky-600 text-xs font-semibold text-white disabled:opacity-40" data-thumb-to-chat>
+            <MessageSquare className="h-3.5 w-3.5" />会話で送る
+          </button>
+        ) : null}
+        <button type="button" onClick={() => setMarks((m) => m.slice(0, -1))} disabled={!marks.length} className="h-8 rounded-md border border-border px-2 text-xs disabled:opacity-40">1本消す</button>
+        <button type="button" onClick={() => { setMarks([]); setMode('select'); }} className="h-8 rounded-md border border-border px-2 text-xs">やめる</button>
+      </div>
+    </div>
+  ) : mode === 'pen' ? (
     <div className="rounded-md border border-red-300 bg-red-50/60 p-2 dark:bg-red-950/30" data-thumb-penbar>
       <textarea
         value={note}
@@ -859,6 +968,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           <button type="button" onClick={() => setPhoneChatOpen(true)} title="ダンと話す"
             className="absolute bottom-4 right-4 flex h-12 w-12 items-center justify-center rounded-full bg-sky-600 text-white shadow-lg" data-thumb-chat>
             <MessageSquare className="h-5 w-5" />
+            {attached.length ? (
+              <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[11px] font-bold" data-thumb-chat-badge>{attached.length}</span>
+            ) : null}
           </button>
         ) : null}
         {listPanel}

@@ -151,8 +151,14 @@ export const listenApi = {
   share: (id: string, update = false) => json<ShareState & { made?: boolean; updated?: boolean }>(`/doc/${encodeURIComponent(id)}/share`, { update }),
   /** The room of the chat at the side of the screen (app/services/script_rooms.py). */
   room: (id: string) => json<{ project_id: string; room_id: string; title: string }>(`/doc/${encodeURIComponent(id)}/room`, {}),
-  state: (id: string, body: { para?: number | null; sentence?: string; selection?: string; playing?: boolean; thumb?: string }) =>
-    json<{ ok: boolean }>(`/doc/${encodeURIComponent(id)}/state`, body),
+  state: (id: string, body: {
+    para?: number | null; sentence?: string; selection?: string; playing?: boolean; thumb?: string;
+    /** サムネを開いている時: その作品と、選んでいる部品（「このサムネ」「この文字」） */
+    thumb_room?: string; thumb_content?: string; thumb_part?: string;
+  }) => json<{ ok: boolean }>(`/doc/${encodeURIComponent(id)}/state`, body),
+  /** サムネの今の形を絵にして（ペンの線・選んだ部品の枠を重ねて）、会話に添えられる URL を返す */
+  thumbSnapshot: (id: string, body: { content_id: string; marks?: unknown[]; box?: number[] | null }) =>
+    json<{ url: string }>(`/doc/${encodeURIComponent(id)}/thumb/snapshot`, body),
   doc: (id: string, voice: string) => json<ListenDoc>(`/doc/${encodeURIComponent(id)}?voice=${encodeURIComponent(voice)}`),
   references: (id: string) => json<{ refs: Reference[] }>(`/doc/${encodeURIComponent(id)}/references`),
   version: (id: string) => json<{ version: string | null }>(`/doc/${encodeURIComponent(id)}/version`),
