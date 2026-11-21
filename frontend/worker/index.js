@@ -63,6 +63,11 @@ self.addEventListener('fetch', (event) => {
 
 // 前の版が貯めた動画・音声を消す（1本で数百MB、32本まで残る決まりだった）。
 // 前の版が貯めた問い合わせの答え（apis）と、/_live の部品を含む js の入れ替え用（static-js-assets）も消す
+// 期限の記録（workbox-expiration）も1回だけ作り直す。前の版が /api の答え1件ごとに記録を書いては消し、本人の Chrome では
+// このサイトの置き場所に約200万件・約150MBが溜まっていた。workbox は期限を見るたびにその全部をたどるので、その間は画面からの
+// 読み書き（チャットの控え・開発室・台本の画面）が5〜30秒待たされていた（2026-11-21）。消すのは待たない（数秒かかっても、
+// その間の画面の読み込みを止めない）。残っている絵などの貯めは、次に使った時に記録し直される
 self.addEventListener('activate', (event) => {
+  try { indexedDB.deleteDatabase('workbox-expiration'); } catch { /* ignore */ }
   event.waitUntil(Promise.all(['static-video-assets', 'static-audio-assets', 'apis', 'static-js-assets'].map((name) => caches.delete(name))));
 });
