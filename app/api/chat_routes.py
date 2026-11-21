@@ -3622,6 +3622,51 @@ async def get_active_session_status(
     return await _active_session_status(session_id)
 
 
+class RoomsPulseIn(BaseModel):
+    room_ids: list[str]
+    limit: int = 3
+    jobs: bool = True
+
+
+@router.post("/rooms/pulse")
+async def rooms_pulse(body: RoomsPulseIn, current_user: TokenData = Depends(get_current_user),
+                      service: ChatService = Depends(get_chat_service)):
+    """Many rooms at once: whether Dan works there (/active), the newest messages, and the room's parallel jobs.
+
+    The dev-lead board shows a mark per conversation and asked 26 rooms x 3 addresses one by one when it opened
+    (11-21 本人「開発室のページをリフレッシュした時の読み込みが遅すぎる」). A room the caller cannot read comes back
+    with "error" and no data, the same as its own address would refuse it."""
+    from app.services import parallel_job_runner as runner
+
+    ids = list(dict.fromkeys(r for r in body.room_ids if r))[:60]
+    limit = max(1, min(body.limit, 40))
+    gate = asyncio.Semaphore(6)
+
+    async def one(room_id: str) -> tuple[str, dict]:
+        async with gate:
+            try:
+                messages = await service.get_messages(room_id, current_user.user_id, limit=limit)
+            except ValueError:
+                return room_id, {"error": "forbidden"}
+            except Exception as e:  # noqa: BLE001 - one room must not fail the others
+                logger.warning("rooms_pulse messages failed (room=%s): %s", room_id, e)
+                return room_id, {"error": "temporary"}
+            out: dict = {"messages": [m.model_dump(mode="json") for m in _message_responses(messages)]}
+            try:
+                out["active"] = await _active_session_status(room_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("rooms_pulse active failed (room=%s): %s", room_id, e)
+            if body.jobs:
+                try:
+                    rows = await asyncio.to_thread(runner.room_jobs, current_user.user_id, room_id, 24, False)
+                    out["jobs"] = [runner.public(s) for s in rows]
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("rooms_pulse jobs failed (room=%s): %s", room_id, e)
+            return room_id, out
+
+    return {"rooms": dict(await asyncio.gather(*(one(r) for r in ids)))}
+
+
 class PerfEventIn(BaseModel):
     surface: str
     event: str
