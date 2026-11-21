@@ -41,6 +41,11 @@ self.addEventListener('notificationclick', (event) => {
 // 出ていた（2026-11-09、667MBの特典動画）。ここは workbox の受け口より先に登録されるので、
 // 止めると workbox は応答せず、ブラウザが普段どおり Range つきで読む。
 const MEDIA_PATH = /\.(?:mp4|m4v|mov|webm|mkv|avi|mp3|m4a|wav|ogg)$/i;
+// ダンの問い合わせ（/api/）と、成果物タブが映す開発版の部品（/_live/）も通さない。workbox の決まりは、問い合わせの答えを
+// 毎回 Cache Storage に書き（16件で入れ替え）、/_live の部品50個を32個の枠で入れ替え続けていた。その書き込みと消す記録で
+// このサイトの端末の置き場所が重くなり、本人の Chrome では開発室が端末の控えを読むだけで15秒待っていた（2026-11-21）。
+// どちらもブラウザの普段の控え（Cache-Control・ETag）がそのまま効く
+const PASS_PATH = /^\/(?:api|_live)\//;
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET') return;
@@ -50,12 +55,14 @@ self.addEventListener('fetch', (event) => {
   // 家の中の直通（dan-home.paina.info。media-route.ts）も通さない。Service Worker を通して家の中の機械へ
   // 読みに行くと、すぐに失敗した（ページから直接読む時は Chrome の許可の問いが出る。2026-11-18）
   if (host === 'dan-home.paina.info'
-      || request.destination === 'video' || request.destination === 'audio' || request.headers.has('range') || MEDIA_PATH.test(path)) {
+      || request.destination === 'video' || request.destination === 'audio' || request.headers.has('range') || MEDIA_PATH.test(path)
+      || (host === self.location.hostname && PASS_PATH.test(path))) {
     event.stopImmediatePropagation();
   }
 });
 
-// 前の版が貯めた動画・音声を消す（1本で数百MB、32本まで残る決まりだった）
+// 前の版が貯めた動画・音声を消す（1本で数百MB、32本まで残る決まりだった）。
+// 前の版が貯めた問い合わせの答え（apis）と、/_live の部品を含む js の入れ替え用（static-js-assets）も消す
 self.addEventListener('activate', (event) => {
-  event.waitUntil(Promise.all(['static-video-assets', 'static-audio-assets'].map((name) => caches.delete(name))));
+  event.waitUntil(Promise.all(['static-video-assets', 'static-audio-assets', 'apis', 'static-js-assets'].map((name) => caches.delete(name))));
 });
