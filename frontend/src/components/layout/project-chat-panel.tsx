@@ -66,6 +66,7 @@ import {
   type PendingComment,
   type SelectedElement,
 } from '@/stores/preview-store';
+import { composeAttached, useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent, ConfirmCard, parseConfirmCardMarker } from '@/components/chat/outbound-message-card';
@@ -912,6 +913,11 @@ function ChatInput({
   const isCommentMode = !!inspectorElement && previewMode === 'comment';
   const [message, setMessage] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
+  // 画面から添えた物（台本を聞く画面のサムネで選んだ部品・ペンの書き込み。stores/chat-attach-store.ts）
+  const screenItems = useChatAttachments(projectId);
+  const takeScreenItems = useChatAttachStore((s) => s.take);
+  const dropScreenItem = useChatAttachStore((s) => s.drop);
+  const [screenSending, setScreenSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [showSkillSuggestions, setShowSkillSuggestions] = useState(false);
@@ -1684,17 +1690,31 @@ function ChatInput({
   }, [queryClient, roomId, user?.id, user?.display_name]);
 
   const handleSendMessage = useCallback(async () => {
-    if (!message.trim() && attachedFiles.length === 0 && pendingComments.length === 0) return;
+    if (!message.trim() && attachedFiles.length === 0 && pendingComments.length === 0 && screenItems.length === 0) return;
+    if (screenSending) return;
 
     const isImageFile = (name: string) => /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(name);
     const imageUrls = attachedFiles.filter(f => isImageFile(f.filename)).map(f => f.url);
     const fileUrls = attachedFiles.filter(f => !isImageFile(f.filename)).map(f => ({ name: f.filename, url: f.url }));
 
+    // 画面から添えた物: 絵を作って添付にし、中身を本文の後ろに足す（絵が作れなくても本文は送る）
+    const screen = screenItems.length ? takeScreenItems(projectId) : [];
+    if (screen.length) {
+      setScreenSending(true);
+      try {
+        const urls = await Promise.all(screen.map((x) => (x.upload ? x.upload().catch(() => null) : Promise.resolve(null))));
+        for (const u of urls) if (u) imageUrls.push(u);
+      } finally {
+        setScreenSending(false);
+      }
+      for (const x of screen) { try { x.onSent?.(); } catch { /* 片付けだけ */ } }
+    }
+
     // 溜めておいた要素コメントは、ここで初めて1通のメッセージに畳まれる。
     // （1件ずつ送るとその都度ダンが走り出してしまうのでこの形にしている）
-    const content = pendingComments.length
+    const content = composeAttached(pendingComments.length
       ? composeCommentsMessage(pendingComments, previewArtifactForComments, message.trim())
-      : message.trim();
+      : message.trim(), screen);
     if (pendingComments.length) clearPendingComments(projectId);
     const currentReplyTo = replyTo;
 
@@ -1750,7 +1770,7 @@ function ChatInput({
     const refs = timelineRefs;
     setTimelineRefs([]);
     await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo, refs);
-  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, projectId, replyTo, onClearReply, timelineRefs, pendingComments, clearPendingComments, previewArtifactForComments]);
+  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, projectId, replyTo, onClearReply, timelineRefs, pendingComments, clearPendingComments, previewArtifactForComments, screenItems, takeScreenItems, screenSending]);
 
   // ── 送信の控え（lib/chat-outbox.ts）の確かめと送り直し ──
   // 開いた時・つながり直した時・前に戻った時・届いたか分からない通信が終わった時に、控えに残っている文を
@@ -2182,6 +2202,19 @@ function ChatInput({
           <span>をもう一度押すと作業を停止します。</span>
         </div>
       )}
+      {screenItems.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" data-chat-attached>
+          {screenItems.map((x) => (
+            <span key={x.key} data-chat-attached-item={x.key} className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 py-1 pl-1.5 pr-2 text-xs font-medium text-foreground">
+              {x.preview ? <img src={x.preview} alt="" className="h-7 w-12 shrink-0 rounded object-cover ring-1 ring-primary/30" /> : null}
+              <span className="min-w-0 truncate">{x.label}</span>
+              {screenSending ? <Loader2 className="h-3 w-3 shrink-0 animate-spin" /> : (
+                <button type="button" onClick={() => { dropScreenItem(projectId, x.key); x.onRemove?.(); }} className="shrink-0 text-muted-foreground hover:text-foreground" aria-label="添えた物を外す"><X className="h-3 w-3" /></button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
       {timelineRefs.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5 px-1">
           {timelineRefs.map((ref) => (
@@ -2241,6 +2274,8 @@ function ChatInput({
               ? '右ペインのコメント欄で入力...'
               : pendingComments.length > 0
                 ? '補足があれば入力（なくてもそのまま送れます）...'
+                : screenItems.length > 0
+                  ? 'これをどうしたいか書いてください（例: この文字を大きく）'
                 : 'メッセージを入力...'
           }
           rows={1}
@@ -2256,7 +2291,7 @@ function ChatInput({
           >
             <Plus className="h-3.5 w-3.5" />
           </Button>
-        ) : message.trim() || attachedFiles.length > 0 || pendingComments.length > 0 ? (
+        ) : message.trim() || attachedFiles.length > 0 || pendingComments.length > 0 || screenItems.length > 0 ? (
           <Button
             size="icon"
             className="h-7 w-7 shrink-0 transition-transform active:scale-90"

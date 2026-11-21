@@ -9,8 +9,9 @@ speak: |
   - 台本の Google ドキュメントを読み上げで聞き、その場で直し、コメントでダンとやり取りする画面です。
   - 撮る時に開くのは中村さんの台本（④2本目）。開くだけでは台本は変わらない。直す確かめは消してよい写しで scripts/check_script_listen.py を使う。
 shows: []
-fingerprint: 025dcc3439fd44b8
-described: bbd0a0676cb72e3e
+fingerprint: d85fadb1a6f32a86
+described: 4d0ad48a7ae45df4
+last_review: "2026-11-21 説明は変えない: main の開く速さの直しを取り込んだだけ。説明は今回のサムネの会話の分で書き直し済み"
 ---
 # 台本を聞いて直す画面
 
@@ -24,6 +25,7 @@ described: bbd0a0676cb72e3e
   - 段落をまたいで選べる。選ぶと、PC は本文と右の札の間、スマホは選んだ所の下に丸いコメントの印（「コメントを追加」）。
   - Enter で改行、Ctrl+Z で戻す、Ctrl+Shift+Z / Ctrl+Y でやり直し、Ctrl+B で太字。打つのを止めると、変わった段落が自動でドキュメントに入る。
 - 右の余白（PC）: コメントの札（返事・解決）と提案の札（承認・却下）が、その文の横に並ぶ。スマホは下から出る欄。
+- サムネ: 白い枠の中のサムネの「✎ サムネを直す」（またはサムネの絵）を押すと、本文の所にサムネの編集が開く（部品を選ぶ・書き込む・文字・仕上げ・一覧で見る）。PC は右の「ダンと台本」の会話がそのまま横に残り、スマホは右下の丸いボタンで会話が下に出る。部品を押すと会話の入力欄の上に「選んだ部品：…」、ペンで描くと「ペンの書き込み N本」の札が付き、送ると赤い枠・線を重ねたサムネの絵と一緒にダンへ届く（2026-11-21 本人「要素クリックしてもそれがチャットに添付されない」）。「台本に戻る」で閉じると、直した形がドキュメントの絵に入る。
 - 下の帯: 何文目か・残りの時間、前の文・聞く/止める・次の文、速さ（1〜3倍）。
 
 ## 行き方（みきさんから見て）
@@ -46,5 +48,5 @@ described: bbd0a0676cb72e3e
 - ボタンの字: 「開く」、「やめる」
 - 見出し: 「台本を聞く」
 
-<!-- place_map:files {"app/api/script_listen_screen.py": "2de5c7c510", "app/services/script_listen.py": "c854addf6a", "frontend/src/app/script-listen/page.tsx": "3f1dbf07f6", "frontend/src/components/script-listen/editor-dom.ts": "7101a9b8f2", "frontend/src/components/script-listen/listen-cards.tsx": "7551bb2441", "frontend/src/components/script-listen/listen-screen.tsx": "9c078e474e", "frontend/src/lib/script-listen-api.ts": "213e1cd2cb"} -->
+<!-- place_map:files {"app/api/script_listen_screen.py": "58e19a68f9", "app/services/script_listen.py": "bcf1c94c54", "frontend/src/app/script-listen/page.tsx": "3e527407c1", "frontend/src/components/script-listen/editor-dom.ts": "7101a9b8f2", "frontend/src/components/script-listen/listen-cards.tsx": "88aedbadb9", "frontend/src/components/script-listen/listen-screen.tsx": "fa93d02a3f", "frontend/src/lib/script-listen-api.ts": "8ba160d28e"} -->
 <!-- place_map:auto:end -->

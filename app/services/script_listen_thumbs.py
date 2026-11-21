@@ -141,6 +141,30 @@ def open_work(doc_id: str, object_id: str | None, order: int | None) -> dict[str
     return {'room_id': room, 'content_id': c['id']}
 
 
+def snapshot(doc_id: str, content_id: str, marks: list | None = None, box: list | None = None) -> dict[str, Any]:
+    """The work as it is now, as a PNG under /api/v1/files/ the chat can carry (2026-11-21 本人「要素クリックしても
+    それがチャットに添付されない」). ``marks`` are the owner's pen lines; ``box`` (x, y, w, h in the work's pixels) is the
+    picked part, drawn as a red frame. Only a work tied to this doc."""
+    from app.services import thumbnail_doc as td
+    from app.api import production_asset_routes as par
+    data = load(doc_id)
+    if not any(i.get('content_id') == content_id for i in data.get('items') or []):
+        raise S.ListenError('このサムネはこの台本の物ではありません。', 404)
+    room = data.get('room') or room_of(doc_id)
+    lines = [m for m in (marks or []) if isinstance(m, dict) and isinstance(m.get('points'), list)][:200]
+    if box and len(box) == 4:
+        x, y, w, h = (float(v) for v in box)
+        pad = 10
+        x, y, w, h = x - pad, y - pad, w + 2 * pad, h + 2 * pad
+        lines.append({'color': '#ff2a2a', 'width': 8, 'points': [[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]]})
+    files = getattr(par, 'UPLOADS_DIR', None)
+    if files is None:
+        raise S.ListenError('絵の置き場所が見つかりませんでした。', 500)
+    name = f"thumb-{content_id[:8]}-{int(time.time() * 1000)}.png"
+    td.render(room, content_id, Path(files) / name, marks=lines, out_w=1280)
+    return {'url': f'/api/v1/files/{name}'}
+
+
 def tie(doc_id: str, order: int, content_id: str, room: str | None = None, synced: bool = False) -> dict[str, Any]:
     """Tie the doc's top picture number ``order`` (0 = first) to an existing thumbnail work (Dan, scripts)."""
     with _lock:

@@ -8,12 +8,12 @@
 //   開く（「ダンと一緒にサムネ編集して仕上げたりしたい」）。閉じると、直した形が Google ドキュメントの絵にも入る
 //   （app/services/script_listen_thumbs.py）。
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { ProjectChatPanel } from '@/components/layout/project-chat-panel';
-import { ThumbnailEditor } from '@/components/thumbnail/thumbnail-editor';
+import { ThumbnailEditor, type ChatLink } from '@/components/thumbnail/thumbnail-editor';
 import { useRoomFeed } from '@/hooks/useRoomFeed';
 import { errorText, listenApi } from '@/lib/script-listen-api';
 
@@ -43,8 +43,22 @@ function useBearerFetch() {
 }
 
 const roomCache = new Map<string, string>();
+const roomAsk = new Map<string, Promise<string>>();
 
-export function ListenChat({ docId, lead }: { docId: string; lead?: ReactNode }) {
+/** The chat room's project of this doc (one request for every part of the screen that asks). */
+function chatProject(docId: string): Promise<string> {
+  const hit = roomCache.get(docId);
+  if (hit) return Promise.resolve(hit);
+  let p = roomAsk.get(docId);
+  if (!p) {
+    p = listenApi.room(docId).then(r => { roomCache.set(docId, r.project_id); return r.project_id; })
+      .finally(() => roomAsk.delete(docId));
+    roomAsk.set(docId, p);
+  }
+  return p;
+}
+
+export function ListenChat({ docId, lead, thumbOpen }: { docId: string; lead?: ReactNode; thumbOpen?: boolean }) {
   useBearerFetch();
   useRoomFeed(true);   // ダンの返事と作業中の表示をすぐ届ける
   const [projectId, setProjectId] = useState<string | null>(roomCache.get(docId) || null);
@@ -52,8 +66,8 @@ export function ListenChat({ docId, lead }: { docId: string; lead?: ReactNode })
   useEffect(() => {
     if (roomCache.get(docId)) return;
     let live = true;
-    listenApi.room(docId)
-      .then(r => { perfMark('room'); roomCache.set(docId, r.project_id); if (live) setProjectId(r.project_id); })
+    chatProject(docId)
+      .then(id => { perfMark('room'); if (live) setProjectId(id); })
       .catch(e => { if (live) setFailed(errorText(e)); });
     return () => { live = false; };
   }, [docId]);
@@ -61,7 +75,9 @@ export function ListenChat({ docId, lead }: { docId: string; lead?: ReactNode })
     <div data-testid="script-chat" className="theme-light flex h-full min-h-0 flex-col bg-background text-foreground">
       {projectId ? (
         <ProjectChatPanel key={projectId} projectId={projectId} editorChat editorHeaderLead={lead}
-          emptyHint="この台本のことを、ここに書くか上の「話す」で話してください。カーソルのある文や選んだ文字は、ダンにも見えています。" />
+          emptyHint={thumbOpen
+            ? 'このサムネのことを、ここに書くか上の「話す」で話してください。サムネの部品を押すかペンで書き込むと、この欄に添えられます。開いているサムネと選んだ部品は、ダンにも見えています。'
+            : 'この台本のことを、ここに書くか上の「話す」で話してください。カーソルのある文や選んだ文字は、ダンにも見えています。'} />
       ) : (
         <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
           {failed ? `ダンとの会話を開けませんでした（${failed}）` : (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />ダンを呼んでいます…</>)}
@@ -73,17 +89,41 @@ export function ListenChat({ docId, lead }: { docId: string; lead?: ReactNode })
 
 export type ThumbTarget = { order: number; object: string | null };
 
-export function ListenThumb({ docId, target, title, compact, phoneChat, onClose }: {
+export type ThumbContext = { room_id: string; content_id: string; part: string };
+
+export function ListenThumb({ docId, target, title, compact, phoneChat, onClose, onContext }: {
   docId: string;
   target: ThumbTarget;
   title: string;
   compact: boolean;
   phoneChat?: ((lead: ReactNode) => ReactNode) | null;
   onClose: (changed: boolean) => void;
+  /** Which work is open and which part is picked, for the chat's 「このサムネ」「この文字」. */
+  onContext?: (ctx: ThumbContext | null) => void;
 }) {
   useBearerFetch();
   const [work, setWork] = useState<{ room_id: string; content_id: string } | null>(null);
   const [failed, setFailed] = useState('');
+  const [projectId, setProjectId] = useState<string | null>(roomCache.get(docId) || null);
+  useEffect(() => {
+    let live = true;
+    chatProject(docId).then(id => { if (live) setProjectId(id); }).catch(() => {});
+    return () => { live = false; };
+  }, [docId]);
+  const ctxRef = useRef(onContext);
+  useEffect(() => { ctxRef.current = onContext; }, [onContext]);
+  useEffect(() => {
+    if (work) ctxRef.current?.({ room_id: work.room_id, content_id: work.content_id, part: '' });
+    return () => ctxRef.current?.(null);
+  }, [work]);
+  const chatLink = useMemo<ChatLink | null>(() => (work && projectId ? {
+    projectId,
+    snapshot: async (body) => {
+      try { return (await listenApi.thumbSnapshot(docId, { content_id: work.content_id, ...body })).url; }
+      catch (e) { toast.error(`サムネの絵を添えられませんでした（${errorText(e)}）`); return null; }
+    },
+    onContext: (part) => ctxRef.current?.({ room_id: work.room_id, content_id: work.content_id, part }),
+  } : null), [work, projectId, docId]);
   useEffect(() => {
     let live = true;
     listenApi.thumbOpen(docId, target.object, target.order)
@@ -119,6 +159,7 @@ export function ListenThumb({ docId, target, title, compact, phoneChat, onClose 
       title={title}
       compact={compact}
       phoneChat={phoneChat}
+      chatLink={chatLink}
       backLabel="台本に戻る"
       onBack={close}
     />
