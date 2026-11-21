@@ -33,15 +33,26 @@ def _path(doc_id: str) -> Path:
 
 
 def load(doc_id: str) -> dict[str, Any]:
-    try:
-        return json.loads(_path(doc_id).read_text(encoding='utf-8'))
-    except Exception:
-        return {'room': None, 'items': []}
+    """The doc's ties. A file that exists but cannot be read for a moment is read again; only a missing file is "no ties"
+    (2026-11-21 一瞬読めなかった時に「つながりが無い」と読み、1枚目を1枚絵の新しい作品へ付け替えていた)."""
+    path = _path(doc_id)
+    for attempt in range(6):
+        if not path.exists():
+            return {'room': None, 'items': []}
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        time.sleep(0.05 * (attempt + 1))
+    raise S.ListenError('サムネのつながりの記録を読めませんでした。もう一度開いてください。', 503)
 
 
 def _save(doc_id: str, data: dict[str, Any]) -> None:
     DIR.mkdir(parents=True, exist_ok=True)
-    tmp = _path(doc_id).with_suffix('.tmp')
+    # 書きかけの控えの名前を書き手ごとに分ける（同じ名前だと、別の処理が書いている途中の物が本物に入れ替わる）
+    tmp = _path(doc_id).with_name(f'.{doc_id}.{os.getpid()}.{threading.get_ident()}.tmp')
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding='utf-8')
     tmp.replace(_path(doc_id))
 
@@ -106,13 +117,17 @@ def open_work(doc_id: str, object_id: str | None, order: int | None) -> dict[str
         data = load(doc_id)
         room = data.get('room') or room_of(doc_id)
         it = _item(data, object_id, order)
-        rev = _rev(room, it['content_id']) if it else -1
-        for _ in range(3):                      # 作品が一瞬読めなくても、つないだ作品を1枚絵の新しい作品で置き換えない
-            if not it or rev >= 0:
-                break
-            time.sleep(0.2)
+        if it:
+            # つないだ作品は決して1枚絵の新しい作品で置き換えない（2026-11-21 本人「開き直したらまた全パーツが1枚板」）。
+            # 一瞬読めない時は待って読み直し、それでも読めなければ開けなかったと返す
             rev = _rev(room, it['content_id'])
-        if it and rev >= 0:
+            for _ in range(10):
+                if rev >= 0:
+                    break
+                time.sleep(0.3)
+                rev = _rev(room, it['content_id'])
+            if rev < 0:
+                raise S.ListenError('サムネの作品を読めませんでした。もう一度開いてください。', 503)
             if object_id and it.get('object') != object_id:
                 it['object'] = object_id
                 _save(doc_id, {**data, 'room': room})
@@ -141,6 +156,9 @@ def open_work(doc_id: str, object_id: str | None, order: int | None) -> dict[str
     c = td.create(room, f"{doc.get('title', '台本')} サムネ{k + 1}", tdoc, [a['id']])
     with _lock:
         data = load(doc_id)
+        held = _item(data, imgs[k]['object'], k)
+        if held and _rev(room, held['content_id']) >= 0:     # 作っている間に別の作品がつながった時は、そちらを生かす
+            return {'room_id': room, 'content_id': held['content_id']}
         items = [i for i in data.get('items') or [] if i.get('order') != k]
         items.append({'order': k, 'object': imgs[k]['object'], 'content_id': c['id'], 'synced_rev': 1})
         _save(doc_id, {'room': room, 'items': sorted(items, key=lambda i: i['order'])})
