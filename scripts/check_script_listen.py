@@ -8,7 +8,8 @@
   2. 3倍 → 鳴っている音の速さが3倍で、声の高さを保つ設定のまま。
   3. 直す（--edit-doc の時だけ。本人の台本は直さない）: 本文は1枚の編集面で、押した文に枠が出ない。その場で打つと、
      打つのを止めた後に自動でドキュメントに入る。Ctrl+Z / Ctrl+Shift+Z、Ctrl+B（太字）、Enter（段落を分ける）がドキュメントに入る。
-     段落をまたいで選べて、右の余白にコメントの印が出る。押すだけでは鳴らず、ダブルクリックで鳴る（11/20）。
+     段落をまたいで選べて、右の余白にコメントの印が出る。押すだけでは鳴らず、段落の左の再生ボタンで鳴る（11/21。ダブルクリック
+     は提案・コメントのカードへ移る）。
   4. ドキュメントが別に直された時（--edit-doc の時だけ）: 25秒以内に画面が読み直して新しい文を出す。
   5. 提案（--edit-doc に提案がある時だけ）: 提案の札の「却下」→ ドキュメントからその提案が消える。
   6. コメント（--comment の時だけ。ダンが返事をしに動くので、写しに対してだけ使う）: 言葉を選ぶ →「コメント」→ 送る →
@@ -244,7 +245,8 @@ def run(a, result, out_dir, stamp, tok, sync_playwright):
                 page.locator('body').click(position={'x': 5, 'y': 300})
                 page.wait_for_timeout(2500)
 
-            # 3g. a click only puts the caret (no sound, 11/20); a double click plays from that sentence
+            # 3g. a click only puts the caret (no sound, 11/20); the play button left of the paragraph (on hover) plays
+            # from it (11/21: a double click goes to the card of the suggestion or comment there instead)
             if not a.phone:
                 quiet = says[5]
                 sp = page.locator(f'span[data-n="{quiet["n"]}"]').first
@@ -255,12 +257,16 @@ def run(a, result, out_dir, stamp, tok, sync_playwright):
                 result['click_is_silent'] = page.evaluate('window.__log.length') == 0
                 page.locator('body').click(position={'x': 5, 'y': 300})
                 page.wait_for_timeout(1000)
-                t1 = time.time()
                 q = sp.evaluate("el => { const r = el.getClientRects()[0]; return {x: r.x + Math.min(20, r.width / 2), y: r.y + r.height / 2}; }")
                 page.mouse.dblclick(q['x'], q['y'])
+                page.wait_for_timeout(1500)
+                result['double_click_is_silent'] = page.evaluate('window.__log.length') == 0
+                page.mouse.move(q['x'] + 5, q['y'])
+                t1 = time.time()
+                page.get_by_test_id('play-para').click()
                 page.wait_for_function("window.__log.some(x=>x.t1)", timeout=60000)
-                result['double_click_plays_s'] = round(time.time() - t1, 1)
-                page.get_by_role('button', name='止める', exact=True).click()
+                result['play_button_plays_s'] = round(time.time() - t1, 1)
+                page.get_by_role('button', name='止める', exact=True).first.click()
 
             # 4. someone else changes the doc
             other = says[6]
@@ -277,10 +283,14 @@ def run(a, result, out_dir, stamp, tok, sync_playwright):
                 s0 = sug[0]
                 if a.phone:
                     seg = page.locator('span.line-through, span.underline').first
-                    seg.scroll_into_view_if_needed(); tap(seg)
-                    page.get_by_role('button', name='却下').first.wait_for(timeout=10000)
+                    # Two taps open the card of the suggestion (one tap only puts the caret there, 11/21).
+                    seg.scroll_into_view_if_needed()
+                    bb = seg.bounding_box()
+                    page.touchscreen.tap(bb['x'] + 8, bb['y'] + 8); page.wait_for_timeout(120)
+                    page.touchscreen.tap(bb['x'] + 8, bb['y'] + 8)
+                    page.get_by_role('button', name='却下', exact=True).first.wait_for(timeout=10000)
                     page.screenshot(path=str(out_dir / f'{stamp}-suggestion-sheet.png'))
-                card_btn = page.get_by_role('button', name='却下').first
+                card_btn = page.get_by_role('button', name='却下', exact=True).first   # not「すべて却下」
                 # The first card on screen, not the first in the doc's list: check the one actually pressed.
                 sid = card_btn.evaluate("el => el.closest('[data-card]')?.getAttribute('data-card')") or s0['id']
                 card_btn.scroll_into_view_if_needed()

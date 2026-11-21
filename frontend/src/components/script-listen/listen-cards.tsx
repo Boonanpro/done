@@ -200,7 +200,20 @@ export function SuggestionCard({
     try { await onDecide(accept); } finally { setBusy(''); }
   };
   const kind = s.ins && s.del ? '置き換え' : s.ins ? '足す' : '消す';
-  const own = s.by === 'owner' || s.by === 'client';   // kept by the screen (the owner's, or the other side's from their copy)
+  // Dan's suggestion the owner wrote over: his colour, with the owner's letters in theirs (11/21 本人「全部が紫になる…おかしい」).
+  const fromDan = !!s.from_dan;
+  const own = !fromDan && (s.by === 'owner' || s.by === 'client');   // kept by the screen (the owner's, or the other side's from their copy)
+  const touched = fromDan && /o/.test((s.ins_who || '') + (s.del_who || ''));
+  const byWho = (text: string, who: string | undefined, dan: string, mine: string) => {
+    if (!fromDan || !who) return text;
+    const parts: { t: string; o: boolean }[] = [];
+    for (let k = 0; k < text.length; k++) {
+      const o = who[k] === 'o';
+      if (parts.length && parts[parts.length - 1].o === o) parts[parts.length - 1].t += text[k];
+      else parts.push({ t: text[k], o });
+    }
+    return parts.map((p, k) => <span key={k} className={p.o ? mine : dan}>{p.t}</span>);
+  };
   const talking = threads.length > 0;
   const showBox = canComment && !!onComment && (writing || (active && talking));
   return (
@@ -209,9 +222,9 @@ export function SuggestionCard({
       className={cn('rounded-lg border bg-white p-2.5 text-[13px] shadow-sm',
         active ? (own ? 'border-violet-400 shadow-md' : 'border-emerald-400 shadow-md') : 'border-stone-200')}
     >
-      <div className={cn('mb-1 text-[11px] font-semibold', own ? 'text-violet-800' : 'text-emerald-800')}>{s.by === 'client' ? '相手の直し' : own ? 'みきさんの提案' : '提案'}（{kind}）</div>
-      {s.del && <div className={cn('line-clamp-3 line-through', own ? 'text-violet-700/80 decoration-violet-500' : 'text-red-700/80 decoration-red-500')}>{s.del.trim()}</div>}
-      {s.ins && <div className={cn('mt-0.5 line-clamp-4', own ? 'text-violet-800' : 'text-emerald-800')}>{s.ins.trim()}</div>}
+      <div className={cn('mb-1 text-[11px] font-semibold', own ? 'text-violet-800' : 'text-emerald-800')}>{s.by === 'client' ? '相手の直し' : own ? 'みきさんの提案' : touched ? 'ダンの提案・みきさんが直した' : '提案'}（{kind}）</div>
+      {s.del && <div className={cn('line-clamp-3 line-through', own ? 'text-violet-700/80 decoration-violet-500' : 'text-red-700/80 decoration-red-500')}>{fromDan ? byWho(s.del, s.del_who, '', 'text-violet-700/80 decoration-violet-500') : s.del.trim()}</div>}
+      {s.ins && <div className={cn('mt-0.5 line-clamp-4', own ? 'text-violet-800' : 'text-emerald-800')}>{fromDan ? byWho(s.ins, s.ins_who, '', 'text-violet-800') : s.ins.trim()}</div>}
       {talking && (
         <div className="mt-2 space-y-2 border-t border-stone-100 pt-2">
           {earlier && <div className="text-[11px] text-stone-400">前の提案からの続き</div>}

@@ -15,6 +15,12 @@ Two things live here, both pure (no Google calls), so they can be tested:
   stays one, in either mode (11/21 本人「承認や却下せずそのまま書き換えると、勝手に承認されて文字が本文に入ってしまう」):
   only 承認 / 却下 decide it. Dan's suggestion is first made the owner's with the same words (``Adopt``; the doc's
   suggestion is taken back and the screen keeps it, with what Dan had suggested for the learning).
+
+Whose each character is (11/21 本人「ダンの提案を俺が上から提案モードで書き換えてると書き換えた部分全部が紫になる。実際に書き換えた
+部分だけ一部なるのは分かるんだけど全部はおかしい」): an owner suggestion keeps ``who`` (one letter per added character) and
+``dwho`` (per struck character), 'd' = Dan's words, 'o' = the owner's; missing = all the owner's. The screen draws Dan's
+letters in his colour. ``lead``: how many of the added words stand before the struck ones (Docs puts a replacement's
+new words first; the owner may type in front of words they struck), so the words read in the same order as typed.
 """
 from __future__ import annotations
 
@@ -136,28 +142,41 @@ def _marked(elements, marks):
     where, k = [], 0
     for i, it in enumerate(items):
         if it[0] == 'c': where.append(i)
-    adds = {}
+    adds = {}                    # offset -> [(order, suggestion, part)]: the words added there
+    struck = {}                  # one meta per (run, suggestion, whose) so struck letters join into runs again
     for at, s in marks:
         sid, dele = s['id'], s.get('del') or ''
-        for off in range(at, at + len(dele)):
+        dwho = s.get('dwho') or ''
+        for k, off in enumerate(range(at, at + len(dele))):
             if off >= len(where): break
             i = where[off]
             _, ch, idx, meta = items[i]
-            m = dict(meta)
-            m['suggestedDeletionIds'] = list(meta.get('suggestedDeletionIds') or []) + [sid]
-            items[i] = ('c', ch, idx, m)
-        if s.get('ins'): adds[at + len(dele)] = s
+            w = dwho[k] if k < len(dwho) else 'o'
+            key = (id(meta), sid, w)
+            if key not in struck:
+                m = dict(meta)
+                m['suggestedDeletionIds'] = list(meta.get('suggestedDeletionIds') or []) + [sid]
+                m['_who'] = w
+                struck[key] = m
+            items[i] = ('c', ch, idx, struck[key])
+        ins = s.get('ins') or ''
+        if ins:
+            lead = max(0, min(int(s.get('lead') or 0), len(ins))) if dele else 0
+            if lead: adds.setdefault(at, []).append((1, s, 'lead'))
+            if lead < len(ins): adds.setdefault(at + len(dele), []).append((0, s, 'tail'))
     out_items = []
     off = 0
+    def put(off, idx, near):
+        for _, s, part in sorted(adds.pop(off, []), key=lambda x: x[0]):
+            out_items.extend(_virtual(s, idx, near, part))
     for i, it in enumerate(items):
         if it[0] == 'c':
-            if off in adds:
-                out_items += _virtual(adds.pop(off), it[2], it[3])
+            if off in adds: put(off, it[2], it[3])
             off += 1
         out_items.append(it)
-    for s in adds.values():      # after the last character (a paragraph without its newline)
+    if adds:                     # after the last character (a paragraph without its newline)
         last = next((x for x in reversed(items) if x[0] == 'c'), None)
-        out_items += _virtual(s, (last[2] + u16(last[1])) if last else 0, last[3] if last else {})
+        for o in sorted(adds): put(o, (last[2] + u16(last[1])) if last else 0, last[3] if last else {})
     # Put runs back together.
     out, cur = [], None
     for it in out_items:
@@ -177,21 +196,23 @@ def _marked(elements, marks):
     return out
 
 
-def _virtual(s, idx, near):
+def _virtual(s, idx, near, part='all'):
+    """The added words of ``s`` (``part``: 'lead' = the ones before its struck words, 'tail' = after, 'all') as
+    characters at ``idx``, each with its boldness and whose words they are."""
     style = dict((near or {}).get('textStyle') or {})
-    meta = {'textStyle': style, 'suggestedInsertionIds': [s['id']], '_virtual': True}
-    bm = s.get('bm') or ''
-    out = []
-    for k, ch in enumerate(s['ins']):
+    ins, bm, who = s['ins'], s.get('bm') or '', s.get('who') or ''
+    lead = max(0, min(int(s.get('lead') or 0), len(ins))) if s.get('del') else 0
+    ks = range(0, lead) if part == 'lead' else range(lead, len(ins)) if part == 'tail' else range(len(ins))
+    out, metas = [], {}
+    for k in ks:
         bold = k < len(bm) and bm[k] == '1'
-        m = meta if bool(style.get('bold')) == bold else {**meta, 'textStyle': {**style, 'bold': bold}}
-        out.append(('c', ch, idx, m))
-    # one meta object per run of the same boldness (runs are joined by identity)
-    joined, last = [], None
-    for c in out:
-        if last and last[3]['textStyle'].get('bold') == c[3]['textStyle'].get('bold'): c = (c[0], c[1], c[2], last[3])
-        joined.append(c); last = c
-    return joined
+        w = who[k] if k < len(who) else 'o'
+        key = (bold, w)
+        if key not in metas:       # one meta object per run of the same boldness and writer (runs join by identity)
+            metas[key] = {'textStyle': {**style, 'bold': bold} if bool(style.get('bold')) != bold else style,
+                          'suggestedInsertionIds': [s['id']], '_virtual': True, '_who': w}
+        out.append(('c', ins[k], idx, metas[key]))
+    return out
 
 
 # ---------------------------------------------------------------- characters of a stretch of paragraphs
@@ -216,7 +237,8 @@ def tokens(view, para_from, para_to, chars_of):
             elif own: k, sid = ('i' if own in ins else 'd'), own
             else: k, sid = 'p', None
             out.append({'ch': ch, 'pos': idx, 'b': bool(f['bold']), 'k': k, 'sid': sid,
-                        'xk': ('i' if other in ins else 'd') if other else None})
+                        'xk': ('i' if other in ins else 'd') if other else None,
+                        'who': f.get('who') or 'o'})
     return out, content[para_to]['endIndex'] - 1
 
 
@@ -303,11 +325,12 @@ def _signals(old_toks, ops):
     return sig
 
 
-def plan(old_toks, new, new_bmask, mode, force=None):
+def plan(old_toks, new, new_bmask, mode, force=None, lead_of=None):
     """The characters after the owner turned ``old_toks`` into ``new`` (with bold ``new_bmask``), in ``mode`` 'edit'
     (the doc changes) or 'suggest' (the change becomes the owner's suggestion). Returns (tokens, settled) where
     settled is {owner sid: accept} decided by this change. Raises Settle when Dan's suggestions must be decided in
-    the doc first, Refused when the change cannot be made."""
+    the doc first, Refused when the change cannot be made. ``lead_of(j1, j2)``: how many of the new words ``new[j1:j2]``
+    of a replacement stand before the words it strikes on the screen (typed in front of struck words)."""
     ops = ops_for(old_toks, new)
     force = force or {}
     sig = _signals(old_toks, ops)
@@ -338,6 +361,7 @@ def plan(old_toks, new, new_bmask, mode, force=None):
                     t['k'], t['sid'] = ('new' if t['k'] == 'i' else 'p'), None
                 out.append(t)
             continue
+        struck_here = []
         for k, t in enumerate(old_toks[i1:i2]):
             if op_mode == 'edit' or t['k'] == 'i': continue
             if t['k'] == 'n':
@@ -345,16 +369,21 @@ def plan(old_toks, new, new_bmask, mode, force=None):
                               '提案の文字と一緒に段落をつなげることはできません。提案を承認か却下してからつなげてください。')
             if t['k'] == 'x': raise Refused('ダンの提案の文字は、提案モードでは消せません。')
             t = dict(t); t['src'] = i1 + k
-            if t['k'] == 'p': t['k'], t['sid'] = 'd', None
-            out.append(t)
+            if t['k'] == 'p': t['k'], t['sid'], t['who'] = 'd', None, 'o'
+            struck_here.append(t)
+        added = []
         for j in range(j1, j2):
             ch = new[j]
             if ch == '\n':
                 if op_mode == 'suggest':
                     raise Refused('提案モードでは、段落を分けることはできません。編集モードに切り替えてください。' if mode == 'suggest' else
                                   '提案の文字の中では段落を分けられません。提案を承認か却下してから分けてください。')
-                out.append({'ch': '\n', 'k': 'n', 'sid': None, 'b': False, 'pos': None}); continue
-            out.append({'ch': ch, 'k': 'new' if op_mode == 'edit' else 'i', 'sid': None, 'b': nb(j), 'pos': None})
+                added.append({'ch': '\n', 'k': 'n', 'sid': None, 'b': False, 'pos': None}); continue
+            added.append({'ch': ch, 'k': 'new' if op_mode == 'edit' else 'i', 'sid': None, 'b': nb(j), 'pos': None, 'who': 'o'})
+        front = 0
+        if struck_here and added and op_mode == 'suggest' and lead_of:
+            front = max(0, min(int(lead_of(j1, j2) or 0), len(added)))
+        out += added[:front] + struck_here + added[front:]
     return out, settled
 
 
@@ -415,19 +444,30 @@ def regroup(new_toks, para_from, ids=None, now=''):
             run = toks[i:j]
             before = ''.join(t['ch'] for t in toks[:i] if t['k'] in ('p', 'x', 'd', 'new'))
             after = ''.join(t['ch'] for t in toks[j:] if t['k'] in ('p', 'x', 'd', 'new'))
-            dele = ''.join(t['ch'] for t in run if t['k'] == 'd')
+            dels = [t for t in run if t['k'] == 'd']
+            dele, dwho = ''.join(t['ch'] for t in dels), ''.join(t.get('who') or 'o' for t in dels)
             ins = [t for t in run if t['k'] == 'i']
             insert, bm = ''.join(t['ch'] for t in ins), ''.join('1' if t['b'] else '0' for t in ins)
-            # The same words struck and added again are no change.
-            while dele and insert and dele[0] == insert[0]:
-                before += dele[0]; dele, insert, bm = dele[1:], insert[1:], bm[1:]
-            while dele and insert and dele[-1] == insert[-1]:
-                after = dele[-1] + after; dele, insert, bm = dele[:-1], insert[:-1], bm[:-1]
+            who = ''.join(t.get('who') or 'o' for t in ins)
+            # How many added words stand before the struck ones (a replacement of Dan's reads new words first).
+            first_d = next((n for n, t in enumerate(run) if t['k'] == 'd'), None)
+            lead = sum(1 for t in run[:first_d] if t['k'] == 'i') if first_d is not None else 0
+            # The same words struck and added again are no change (struck words first; a replacement that reads its new
+            # words first is kept as it is).
+            if not (lead and dele):
+                while dele and insert and dele[0] == insert[0]:
+                    before += dele[0]; dele, insert, bm, who, dwho = dele[1:], insert[1:], bm[1:], who[1:], dwho[1:]
+                while dele and insert and dele[-1] == insert[-1]:
+                    after = dele[-1] + after; dele, insert, bm, who, dwho = dele[:-1], insert[:-1], bm[:-1], who[:-1], dwho[:-1]
             if dele or insert:
                 sid = next((t['sid'] for t in run if t['sid']), None)
                 if not sid: sid = next(ids) if ids else OWNER + uuid.uuid4().hex[:12]
-                out.append({'id': sid, 'para': para_from + k, 'pre': before[-CONTEXT:], 'del': dele, 'ins': insert,
-                            'bm': bm, 'post': after[:CONTEXT], 'at': now})
+                piece = {'id': sid, 'para': para_from + k, 'pre': before[-CONTEXT:], 'del': dele, 'ins': insert,
+                         'bm': bm, 'post': after[:CONTEXT], 'at': now}
+                if 'd' in who: piece['who'] = who
+                if 'd' in dwho: piece['dwho'] = dwho
+                if lead and dele: piece['lead'] = lead
+                out.append(piece)
             i = j
     # one suggestion keeps one id
     seen, uniq = set(), []

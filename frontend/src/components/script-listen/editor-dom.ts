@@ -26,8 +26,12 @@ function segsHtml(segs: Seg[] | undefined, text: string) {
     if (s.blue) h = `<span class="text-sky-700/80">${h}</span>`;
     // Suggestions can be typed in like any text (11/20 本人「提案モードの文字…普通に編集できるようにしてほしい」): the
     // server settles a suggestion whose words are changed (script_listen_marks).
-    if (s.ins) h = `<span data-sug="${esc(s.ins)}" data-kind="ins" class="${isOwnSuggestion(s.ins) ? OWN_INS : SUG_INS}">${h}</span>`;
-    else if (s.del) h = `<span data-sug="${esc(s.del)}" data-kind="del" class="${isOwnSuggestion(s.del) ? OWN_DEL : SUG_DEL}">${h}</span>`;
+    // Dan's words inside the owner's suggestion (they wrote over his) stay in his colour; only what they typed is
+    // theirs (11/21 本人「書き換えた部分全部が紫になる…全部はおかしい」).
+    const own = (id: string) => isOwnSuggestion(id) && s.who !== 'dan';
+    const who = s.who === 'dan' ? ' data-who="dan"' : '';
+    if (s.ins) h = `<span data-sug="${esc(s.ins)}" data-kind="ins"${who} class="${own(s.ins) ? OWN_INS : SUG_INS}">${h}</span>`;
+    else if (s.del) h = `<span data-sug="${esc(s.del)}" data-kind="del"${who} class="${own(s.del) ? OWN_DEL : SUG_DEL}">${h}</span>`;
     return h;
   }).join('');
 }
@@ -127,7 +131,8 @@ export function extract(root: HTMLElement): Line[] {
         const l = line || open(para);
         const bold = markBold(ch.parentElement, root) ? '1' : '0';
         const struck = ch.parentElement?.closest('[data-od]') ? '1' : '0';
-        for (const c of (ch as Text).data) { l.tt.push(c === ' ' ? ' ' : c); l.bb.push(bold); l.dd.push(struck); }
+        // U+200B: the place Japanese input starts in, in suggestion mode (listen-screen readyCompose); not a letter.
+        for (const c of (ch as Text).data) { if (c === '\u200b') continue; l.tt.push(c === ' ' ? ' ' : c); l.bb.push(bold); l.dd.push(struck); }
       } else if (ch.nodeType === 1) {
         const el = ch as HTMLElement;
         if (skipped(el)) continue;

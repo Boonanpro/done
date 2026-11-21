@@ -223,6 +223,23 @@ const ownAdded = (el: Element | null) => {
   return !!h && (h.hasAttribute('data-oi') || isOwnSuggestion(h.dataset.sug));
 };
 const struckHost = (el: Element | null) => el?.closest('[data-od],[data-sug][data-kind="del"]') as HTMLElement | null;
+/** Words the owner typed themselves (in their colour): more typed next to them joins them. Dan's words inside the
+ * owner's suggestion (they wrote over his) are not: typed words get their own colour there. */
+const ownTyped = (el: Element | null) => {
+  const h = el?.closest('[data-oi],[data-sug][data-kind="ins"]') as HTMLElement | null;
+  return !!h && (h.hasAttribute('data-oi') || (isOwnSuggestion(h.dataset.sug) && h.dataset.who !== 'dan'));
+};
+/** A place for Japanese input to start in (see readyCompose); taken out again when the input ends. */
+const ZW = '\u200b';
+function dropZw(root: HTMLElement) {
+  root.querySelectorAll('[data-oi]').forEach(sp => {
+    const w = document.createTreeWalker(sp, NodeFilter.SHOW_TEXT);
+    const hits: Text[] = [];
+    for (let t = w.nextNode() as Text | null; t; t = w.nextNode() as Text | null) if (t.data.includes(ZW)) hits.push(t);
+    for (const t of hits) for (let k = t.data.lastIndexOf(ZW); k >= 0; k = t.data.lastIndexOf(ZW)) t.deleteData(k, 1);
+    if (!sp.textContent) sp.remove();
+  });
+}
 const leafOf = (root: HTMLElement, n: Node) => leaves(root).find(l => l === n || l.contains(n)) || null;
 
 function textPieces(range: Range) {
@@ -270,7 +287,7 @@ function addOwn(root: HTMLElement, text: string) {
   const at = r.startContainer;
   const el = at.nodeType === 1 ? (at as Element) : at.parentElement;
   let node: Text;
-  if (at.nodeType === 3 && ownAdded(el)) {
+  if (at.nodeType === 3 && ownTyped(el)) {
     (at as Text).insertData(r.startOffset, text);
     node = at as Text;
     const c = document.createRange(); c.setStart(node, r.startOffset + text.length); c.collapse(true);
@@ -456,6 +473,12 @@ export function ListenScreen({ docId }: { docId: string }) {
   const tapAt = useRef<{ x: number; y: number } | null>(null);
   const lastInput = useRef(0);
   const ownRevisions = useRef(new Set<string>());   // revisions this screen wrote (not someone else's change)
+  // The doc's version last read, and the one the text on the screen was built from. They differ when the doc was read
+  // while the owner typed (the text is not rebuilt then): the screen reads it again at the next pause instead of
+  // writing onto words that are no longer there (11/21 本人「ダンの方から読み直したとかで編集してることが巻き戻される」).
+  const readVersion = useRef<string | null>(null);
+  const shownVersion = useRef<string | null>(null);
+  const behind = () => readVersion.current != null && shownVersion.current !== readVersion.current;
   useLayoutEffect(() => {
     saysRef.current = says;
     rateRef.current = rate;
@@ -607,6 +630,7 @@ export function ListenScreen({ docId }: { docId: string }) {
       perfMark('doc1');
       // Coming from last time's copy: stay on the sentence that is showing (or playing).
       const here = staleRef.current && !keepText ? saysRef.current[curRef.current] : undefined;
+      readVersion.current = d.version ?? null;
       show(d, keepText || (here ? { start: here.start, text: here.text } : undefined));
       staleRef.current = false;
       setStale(false);
@@ -702,7 +726,8 @@ export function ListenScreen({ docId }: { docId: string }) {
       if (Date.now() - lastInput.current < 5000 || saveTimer.current != null) return;
       try {
         const { version } = await listenApi.version(docId);
-        if (!version || !doc.version || version === doc.version || settling.current) return;
+        if (!version || !doc.version || settling.current) return;
+        if (version === doc.version && !behind()) return;
         if (Date.now() - lastInput.current < 5000 || composingRef.current) return;
         const theirs = !ownRevisions.current.has(version);
         // Someone else changed the doc: undo here would bring their change back too.
@@ -718,6 +743,7 @@ export function ListenScreen({ docId }: { docId: string }) {
         if (wasPlaying) stop();
         else if (root && document.activeElement === root) afterBuild.current = { pos: getPos(root), focus: true, play: false };
         const d = await load(here ? { start: here.start, text: here.text } : undefined);
+        setBuild(b => b + 1);          // the same text may have been read while the owner typed: build it now
         if (d && wasPlaying) void playFrom(curRef.current);
       } catch { /* next time */ }
     }, danLive ? 3000 : 8000);   // while Dan works his suggestions come in as he makes them
@@ -880,6 +906,7 @@ export function ListenScreen({ docId }: { docId: string }) {
     const scroller = scrollerRef.current;
     const keep = scroller?.scrollTop ?? 0;
     root.innerHTML = html;
+    shownVersion.current = staleRef.current ? null : readVersion.current;
     if (scroller && scroller.scrollTop !== keep) scroller.scrollTop = keep;
     baseRef.current = extract(root);
     applyMarks();
@@ -914,10 +941,10 @@ export function ListenScreen({ docId }: { docId: string }) {
       const { next, ...body } = change;
       const r = await listenApi.replace(docId, { ...body, mode: modeRef.current });
       // Put onto someone else's change: the screen is not the doc any more, so it is read again like their change.
-      if (r.revision && !r.rebased) ownRevisions.current.add(r.revision);
+      if (!r.rebased) for (const v of [...(r.revisions || []), ...(r.revision ? [r.revision] : [])]) ownRevisions.current.add(v);
       baseRef.current = next;
       const settledNow = r.settled && Object.keys(r.settled).length ? r.settled : null;
-      if (r.reload || r.rebased || settledNow) {
+      if (r.reload || r.rebased || settledNow || behind()) {
         // Read the doc again now (keeping the caret), unless more is being typed: then the next pause does it.
         window.setTimeout(() => {
           if (saveTimer.current == null && !composingRef.current) void settleRef.current({ focus: document.activeElement === editorRef.current, play: false });
@@ -952,6 +979,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   }, [flush]);
 
   const changed = useCallback(() => {
+    if (!composingRef.current && editorRef.current?.textContent?.includes(ZW)) dropZw(editorRef.current);
     dirtyRef.current = true;
     typedRef.current = true;
     lastInput.current = Date.now();
@@ -1127,13 +1155,18 @@ export function ListenScreen({ docId }: { docId: string }) {
     const root = editorRef.current, sel = window.getSelection();
     const start = compStart.current;
     compStart.current = null;
+    if (root && root.textContent?.includes(ZW)) {
+      // The input began in a place readyCompose made: the words are already the owner's added words.
+      dropZw(root);
+      return;
+    }
     if (!root || !sel?.rangeCount || !start) return;
     const end = getPos(root);
     if (!end || end.line !== start.line || end.off <= start.off) return;
     const a = nodeAt(root, start), b = nodeAt(root, end);
     if (!a || !b) return;
     const inEl = b.node.nodeType === 1 ? (b.node as Element) : b.node.parentElement;
-    if (ownAdded(inEl)) return;                      // typed inside the owner's own added words: already theirs
+    if (ownTyped(inEl)) return;                      // typed inside the owner's own added words: already theirs
     const host = struckHost(inEl);
     const r = document.createRange();
     try { r.setStart(a.node, a.off); r.setEnd(b.node, b.off); } catch { return; }
@@ -1148,12 +1181,50 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
   }
 
+  /** Suggestion mode, at the first key of Japanese input (before the words being composed appear): they go where the
+   * caret is, and beside struck words the browser puts them inside the struck words, drawn struck (11/21 本人「提案
+   * モードで削除した前後の文字は普通に追加するつもりで入力しても削除状態になる」). Selected words are struck first (the
+   * input would take them out), and the caret goes into a place of the owner's own added words. */
+  function readyCompose() {
+    const root = editorRef.current, sel = window.getSelection();
+    if (!root || !sel?.rangeCount) return;
+    if (!sel.isCollapsed) {
+      const r = sel.getRangeAt(0);
+      const start = getPos(root, r.startContainer, r.startOffset);
+      const kept = strike(root, r);
+      if (kept === 'para') return;
+      if (start) setPos(root, { line: start.line, off: start.off + kept });
+      if (!sel.rangeCount) return;
+    }
+    const r = sel.getRangeAt(0);
+    const at = r.startContainer;
+    const el = at.nodeType === 1 ? (at as Element) : at.parentElement;
+    if (!el || !root.contains(el) || ownTyped(el)) return;
+    const host = struckHost(el);
+    const inDan = el.closest('[data-sug][data-kind="ins"]') as HTMLElement | null;
+    if (!host && !(inDan && isOwnSuggestion(inDan.dataset.sug))) return;   // plain words: ownComposed colours them
+    const sp = ownSpan('ins');
+    const z = document.createTextNode(ZW);
+    sp.appendChild(z);
+    if (host && root.contains(host)) {
+      const before = document.createRange();
+      before.setStart(host, 0);
+      before.setEnd(r.startContainer, r.startOffset);
+      if (!before.toString()) host.before(sp); else host.after(sp);
+    } else {
+      r.insertNode(sp);
+    }
+    const c = document.createRange(); c.setStart(z, 1); c.collapse(true);
+    sel.removeAllRanges(); sel.addRange(c);
+  }
+
   useEffect(() => { suggestInputRef.current = suggestInput; });
 
   const onEditorKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
     if (e.nativeEvent.isComposing || composingRef.current) return;
+    if (modeRef.current === 'suggest' && (e.key === 'Process' || e.nativeEvent.keyCode === 229)) readyCompose();
     if (mod && !e.altKey && k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
     if (mod && !e.altKey && k === 'y') { e.preventDefault(); redo(); return; }
     if (mod && !e.altKey && k === 'b') {
@@ -1305,33 +1376,22 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed && e.detail < 2) return;     // selecting words
-    // Words of a suggestion: the caret goes there (they can be typed in) and its card comes forward, glowing a
-    // moment (11/20 本人「文章をクリックしてもカードの方に遷移するように」).
-    const sug = (t.closest('[data-sug]') as HTMLElement | null)?.dataset.sug;
-    if (sug && suggestions.some(x => x.id === sug)) {
-      if (!touch) { if (e.detail < 2) showCard(sug); return; }
-      if (!armed) { pickSuggestion(sug); flashLater(sug); return; }
-      setActive(sug);
-      return;
-    }
+    // One click (one tap) only puts the caret there, like in a document; two in a row bring forward the card of the
+    // suggestion or comment on those words (11/21 本人「文字を1回クリックしただけで…カードに飛ぶのだるい」「1回は何もせず、
+    // 2回で紐づいてるコメントやカードに遷移」). Playing is the button left of each paragraph (PC) or two taps on words
+    // without a card (phone).
+    if (!touch) return;                                 // the double click: onEditorDoubleClick
     const n = unitAtPoint(e.clientX, e.clientY, t);
-    if (n == null) return;
-    if (!touch) {
-      // A click only puts the caret there, like in a document. The comment on those words comes forward.
-      if (e.detail >= 2) return;                        // the double click plays (onDoubleClick)
-      const list = threadsAt.get(n);
-      if (list?.length) showCard(talkOf.get(list[0].id) || list[0].id);
-      return;
-    }
-    // Phone: two taps in a row play from there; one tap types there (or opens the comment on those words).
     const now = e.timeStamp;
     const prev = lastTap.current;
     lastTap.current = { at: now, x: e.clientX, y: e.clientY };
     if (prev && now - prev.at < DOUBLE_TAP && Math.hypot(prev.x - e.clientX, prev.y - e.clientY) < 40) {
       if (tapTimer.current != null) { window.clearTimeout(tapTimer.current); tapTimer.current = null; }
       lastTap.current = null;
-      if (armed) { (document.activeElement as HTMLElement | null)?.blur(); setArmed(false); }
-      playAt(n, e.clientX, e.clientY);
+      const link = linkedAt(t, n);
+      if (link || n != null) { if (armed) { (document.activeElement as HTMLElement | null)?.blur(); setArmed(false); } }
+      if (link) { openLinked(link); return; }
+      if (n != null) playAt(n, e.clientX, e.clientY);
       return;
     }
     if (armed) return;                                  // typing: a tap only moves the caret
@@ -1339,20 +1399,86 @@ export function ListenScreen({ docId }: { docId: string }) {
     if (tapTimer.current != null) window.clearTimeout(tapTimer.current);
     tapTimer.current = window.setTimeout(() => {
       tapTimer.current = null;
-      const list = threadsAt.get(n);
-      if (list?.length) { pickThreads(list); flashLater(talkOf.get(list[0].id) || list[0].id); return; }
       if (playingRef.current) stop();
       tapAt.current = { x, y };
       setArmed(true);
     }, DOUBLE_TAP);
   };
 
+  /** The suggestion or comment on the words at ``t`` (sentence ``n``): what two clicks bring forward. */
+  const linkedAt = (t: HTMLElement, n: number | null): { sug: string } | { threads: Thread[] } | null => {
+    const sug = (t.closest('[data-sug]') as HTMLElement | null)?.dataset.sug;
+    if (sug && suggestions.some(x => x.id === sug)) return { sug };
+    const list = n != null ? threadsAt.get(n) : undefined;
+    return list?.length ? { threads: list } : null;
+  };
+  const openLinked = (link: { sug: string } | { threads: Thread[] }) => {
+    if ('sug' in link) {
+      if (!touch) { showCard(link.sug); return; }
+      pickSuggestion(link.sug); flashLater(link.sug); return;
+    }
+    const first = link.threads[0];
+    if (!touch) { showCard(talkOf.get(first.id) || first.id); return; }
+    pickThreads(link.threads); flashLater(talkOf.get(first.id) || first.id);
+  };
+
   const onEditorDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (touch) return;                                  // phones count their own taps (onEditorClick)
     const t = e.target as HTMLElement;
-    const n = unitAtPoint(e.clientX, e.clientY, t);
-    if (n == null) return;
-    playAt(n, e.clientX, e.clientY);
+    const link = linkedAt(t, unitAtPoint(e.clientX, e.clientY, t));
+    if (!link) return;                                  // a word is selected, as in a document
+    // The double click selected a word: the caret goes back where it was clicked (no comment mark pops up).
+    const root = editorRef.current;
+    const doc_ = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+    const r = doc_.caretRangeFromPoint?.(e.clientX, e.clientY);
+    const sel = window.getSelection();
+    if (root && r && root.contains(r.startContainer)) { sel?.removeAllRanges(); sel?.addRange(r); }
+    setSelBtn(null);
+    openLinked(link);
+  };
+
+  /** The play button left of a paragraph (PC, on hover; 11/21 本人「再生ボタンは左側に段落ごとにマウスオーバーで出てくるように」). */
+  const [hoverPara, setHoverPara] = useState<{ n: number; top: number; ns: number[] } | null>(null);
+  const onContentMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (touch) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-play-para]')) return;
+    const p = t.closest('[data-testid="script-editor"] p[data-para]') as HTMLElement | null;
+    const first = p ? (p.matches('[data-n]') ? p : p.querySelector('[data-n]')) as HTMLElement | null : null;
+    const n = first ? Number(first.dataset.n) : NaN;
+    if (!p || !Number.isFinite(n) || sayForUnit(n) < 0 || !contentRef.current) {
+      setHoverPara(h => (h ? null : h));
+      return;
+    }
+    // The first line of the paragraph, so the button sits beside where it starts.
+    const box = contentRef.current.getBoundingClientRect();
+    const rect = p.getClientRects()[0] || p.getBoundingClientRect();
+    const lh = parseFloat(getComputedStyle(p).lineHeight) || 28;
+    const top = Math.round(rect.top - box.top + Math.min(lh, rect.height) / 2 - 11);
+    setHoverPara(h => (h && h.n === n && h.top === top ? h : { n, top, ns: paraNs(n) }));
+  };
+  /** The sentences of the paragraph that sentence ``n`` is in. */
+  const paraNs = (n: number) => {
+    const el = editorRef.current?.querySelector(`[data-n="${n}"]`)?.closest('p[data-para]') as HTMLElement | null;
+    if (!el) return [n];
+    return el.matches('[data-n]') ? [Number(el.dataset.n)] : Array.from(el.querySelectorAll<HTMLElement>('[data-n]')).map(x => Number(x.dataset.n));
+  };
+  const playPara = (n: number) => {
+    const i = sayForUnit(n);
+    if (i < 0) return;
+    const here = saysRef.current[curRef.current];
+    if (playingRef.current && here && paraNs(n).includes(here.n)) { stop(); return; }
+    typedRef.current = false;
+    if (dirtyRef.current || settling.current) {
+      // Typed before: write it and read the doc again, then play from the start of this paragraph.
+      const first = editorRef.current?.querySelector(`[data-n="${n}"]`);
+      const sel = window.getSelection();
+      if (first && sel) { const r = document.createRange(); r.setStart(first, 0); r.collapse(true); sel.removeAllRanges(); sel.addRange(r); }
+      afterBuild.current = null;
+      void settle({ focus: false, play: true });
+      return;
+    }
+    void playFrom(i);
   };
 
   // Touch: after the second tap, put the caret where the finger was and open the keyboard.
@@ -1857,8 +1983,27 @@ export function ListenScreen({ docId }: { docId: string }) {
         onWheel={() => { lastUserScroll.current = Date.now(); }}
         onTouchMove={() => { lastUserScroll.current = Date.now(); }}
       >
-        <div className="mx-auto flex max-w-6xl gap-6 px-3 pb-44 pt-4 sm:px-6">
-          <div ref={contentRef} className="relative min-w-0 max-w-3xl flex-1">
+        <div className="mx-auto flex max-w-6xl gap-6 px-3 pb-44 pt-4 sm:pl-10 sm:pr-6">
+          <div ref={contentRef} className="relative min-w-0 max-w-3xl flex-1" onMouseMove={onContentMove} onMouseLeave={() => setHoverPara(null)}>
+            {!touch && hoverPara && (() => {
+              const here = says[cur];
+              const on = playing && !!here && hoverPara.ns.includes(here.n);
+              return (
+                <button
+                  type="button"
+                  data-play-para={hoverPara.n}
+                  data-testid="play-para"
+                  aria-label={on ? '止める' : 'この段落から聞く'}
+                  title={on ? '止める' : 'この段落から聞く'}
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={() => playPara(hoverPara.n)}
+                  style={{ top: hoverPara.top }}
+                  className="absolute -left-[36px] z-10 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-stone-800 text-white shadow hover:bg-stone-900"
+                >
+                  {on ? <Pause className="h-3 w-3 fill-current" /> : <Play className="ml-px h-3 w-3 fill-current" />}
+                </button>
+              );
+            })()}
             <div
               ref={editorRef}
               data-testid="script-editor"
@@ -1957,7 +2102,7 @@ export function ListenScreen({ docId }: { docId: string }) {
             )}
             {(
               <div className="mt-8 text-center text-[12px] text-stone-400">
-                {touch ? '文を2回続けて押すと、そこから聞けます（もう一度2回押すと止まります）。1回押すとそこで直せます。' : '文をダブルクリックすると、そこから聞けます（鳴っている文をもう一度ダブルクリックすると止まります）。Google ドキュメントと同じように直せて、打つのを止めると自動でドキュメントに入ります。'}
+                {touch ? '1回押すとそこで直せます。提案やコメントのある所を2回続けて押すとそのカードが開き、それ以外の文を2回続けて押すとそこから聞けます（もう一度2回押すと止まります）。' : '段落の左にマウスを乗せると出る再生ボタンで、そこから聞けます。提案やコメントのある所をダブルクリックすると、そのカードに移ります。Google ドキュメントと同じように直せて、打つのを止めると自動でドキュメントに入ります。'}
                 文字を選ぶとコメントできます。提案にもコメントでき、提案の文字もそのまま直せます。上の「提案」にすると、打った直しが自分の提案になります。
               </div>
             )}

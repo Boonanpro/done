@@ -7,7 +7,7 @@ import { useAuthStore } from '@/stores/auth-store';
 const TOKEN_KEY = 'done-token';
 
 /** A piece of a unit as the doc has it: suggested insertions / deletions carry their suggestion id. */
-export type Seg = { t: string; ins?: string; del?: string; blue?: boolean; b?: boolean };
+export type Seg = { t: string; ins?: string; del?: string; blue?: boolean; b?: boolean; /** Dan's words inside the owner's suggestion. */ who?: 'dan' };
 
 export type ListenUnit =
   | { n: number; kind: 'title'; text: string }
@@ -27,13 +27,19 @@ export type ListenUnit =
 export type SayUnit = Extract<ListenUnit, { kind: 'say' }>;
 
 /** by owner: written in suggestion mode on this screen (kept by the screen; the Docs API cannot write suggestions). */
-export interface Suggestion { id: string; ins: string; del: string; n: number; by?: 'owner' | 'doc' | 'client' }
+export interface Suggestion {
+  id: string; ins: string; del: string; n: number; by?: 'owner' | 'doc' | 'client';
+  /** Dan's suggestion the owner wrote over: whose each letter of ins / del is ('d' Dan's, 'o' the owner's). */
+  from_dan?: boolean; ins_who?: string; del_who?: string;
+}
 
 export type EditMode = 'edit' | 'suggest';
 
 export interface ReplaceResult {
   changed: boolean;
   revision?: string | null;
+  /** Every revision this write made (taking Dan's suggestion back is a write of its own). */
+  revisions?: string[];
   /** The doc had changed meanwhile and the owner's change was put onto it. */
   rebased?: boolean;
   /** What the screen shows is no longer what the doc is (a suggestion was settled): read it again. */
