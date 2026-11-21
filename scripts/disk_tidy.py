@@ -243,6 +243,37 @@ def plan_releases(plan: Plan, opened: set[str]):
         plan.add('releases', d, 'ダンの古い版の控え')
 
 
+# --- browser caches ----------------------------------------------------------------------------------------------------------
+
+BROWSER_ROOT = Path(os.environ.get('DAN_BROWSER_ROOT', str(Path.home() / '.ai_secretary')))
+# 部屋ごとのブラウザの控え（表示の速さのためだけの物）。ログイン（Cookies・Local Storage）は消さない
+BROWSER_CACHE_DIRS = ('Default/Cache', 'Default/Code Cache', 'Default/Service Worker/CacheStorage',
+                      'Default/GPUCache', 'GrShaderCache', 'ShaderCache')
+BROWSER_CACHE_MIN = 50 * 1024 * 1024
+
+
+def plan_browser_caches(plan: Plan, ps: str | None = None):
+    if not BROWSER_ROOT.is_dir():
+        return
+    if ps is None:
+        try:
+            ps = subprocess.run(['ps', '-axww', '-o', 'command='], capture_output=True, text=True, timeout=30).stdout
+        except Exception:
+            plan.keep('browser-cache', BROWSER_ROOT, '動いているブラウザが分からないので、今回は消さない')
+            return
+    for prof in sorted(BROWSER_ROOT.glob('browser_data--*')):
+        if not prof.is_dir() or prof.is_symlink():
+            continue
+        if str(prof) in ps or os.path.lexists(prof / 'SingletonLock'):
+            plan.keep('browser-cache', prof, '開いているブラウザ'); continue
+        for rel in BROWSER_CACHE_DIRS:
+            c = prof / rel
+            if c.is_dir() and not c.is_symlink():
+                b = size_of(c)
+                if b >= BROWSER_CACHE_MIN:
+                    plan.add('browser-cache', c, 'ブラウザの表示の控え（ログインは残る）', bytes_=b)
+
+
 # --- worktrees ---------------------------------------------------------------------------------------------------------------
 
 def _worktrees() -> list[tuple[str, str]]:
@@ -582,6 +613,7 @@ def make_plan() -> Plan:
     prot = protected_paths()
     plan_releases(plan, opened)
     plan_worktrees(plan, opened)
+    plan_browser_caches(plan)
     plan_media(plan, opened, prot, load_clients(), ledger_archived())
     return plan
 
@@ -650,7 +682,7 @@ def summary(plan: Plan) -> str:
         n, b = by.get(k, (0, 0))
         by[k] = (n + 1, b + it['bytes'])
     names = {'releases': '古い版の控え', 'worktrees': '直し終わった作業場所', 'versions': '動画の古い版', 'scratch': '書き出しの途中の物',
-             'archive': 'NASへ写す元映像・納品物', 'archived-local': 'NASに写し済みで消すMacの物'}
+             'archive': 'NASへ写す元映像・納品物', 'archived-local': 'NASに写し済みで消すMacの物', 'browser-cache': 'ブラウザの控え'}
     return ' / '.join(f'{names.get(k, k)} {n}件 {b / GB:.1f}GB' for k, (n, b) in by.items()) or '片付ける物はありません'
 
 
