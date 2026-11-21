@@ -226,8 +226,6 @@ class OutboundMessageService:
         row = self.get(proposal_id, user_id)
         if not row:
             raise ValueError("送信案が見つかりません")
-        if expected_revision is not None and row.get("updated_at") != expected_revision:
-            raise ValueError("照合後に下書きが変更されました。")
         if row["status"] == "sending":
             raise ValueError("送信中（ダンが送信作業中）のため編集できません")
         if row["status"] != "pending":
@@ -454,6 +452,8 @@ class OutboundMessageService:
         row = self.get(proposal_id, user_id)
         if not row:
             raise ValueError("送信案が見つかりません")
+        if expected_revision is not None and row.get("updated_at") != expected_revision:
+            raise ValueError("照合後に下書きが変更されました。")
         if row["status"] == "sending":
             raise ValueError("この送信案は送信中（ロック済み）です。完了なら mark_sent、失敗なら release。")
         if row["status"] != "pending":
