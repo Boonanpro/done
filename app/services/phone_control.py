@@ -116,7 +116,8 @@ TOOL = {
                     '操作した手順は自動で記憶され、flow（host が phone: のもの）で次からモデルなしに再生できる。購入・送信・削除・確定などの取り返しのつかない押下は、'
                     '本人がその操作を承認した時だけ confirmed=true で。'
                     'LINE（トーク・請求書・支払いの確認）は、つながっている Galaxy の LINE（ログイン済み）を最初からこれで開く。'
-                    'PC の LINE を先に試さない。'),
+                    'PC の LINE を先に試さない。'
+                    'メディア（動画・音楽）の音量は毎回0にしてから操作するので、押した先で動画が再生されても音は出ない。'),
     'input_schema': {'type': 'object', 'properties': {
         'action': {'type': 'string', 'enum': ['devices', 'read', 'tap', 'type', 'scroll', 'key', 'open', 'screenshot', 'follow']},
         'query': {'type':'string','description':'read: 必要な文字を含む部品だけ返す。参照番号は全体の一覧と同じ。省略すると全体。'},
@@ -130,6 +131,8 @@ TOOL = {
         'key': {'type': 'string', 'enum': list(KEYS)},
         'package': {'type': 'string', 'description': 'open: アプリの package 名（例 com.twitter.android）'},
         'confirmed': {'type': 'boolean', 'description': '取り返しのつかない押下を本人が承認済み'},
+        'sound': {'type': 'boolean', 'description': '音を外へ出す必要がある時だけ true（本人が試聴・音の出る試しを許した時）。'
+                  'この呼び出しの間だけメディアの音量を前の大きさに戻す。省くと毎回メディアの音量を0にしてから操作する'},
     }, 'required': ['action'], 'additionalProperties': False},
 }
 
@@ -221,6 +224,40 @@ def _ensure_unlocked(serial):
             _lock_ok[serial] = time.time()
     except Exception:
         pass
+
+# ---- quiet while Dan works ---------------------------------------------------------------------------------------------
+# The owner (2026-11-21): a tap in LINE opened YouTube on the Galaxy and it played aloud; Dan reads videos from captions
+# and never needs the phone's speaker. Like the PC rule (no sound unless it must be heard), every call first turns the
+# media stream (music/video, stream 3) to 0. Ring and notification volumes are left alone. `sound: true` brings the media
+# volume back to the level it had before Dan muted it, for that call only (a listening test the owner allowed).
+MEDIA_STREAM = '3'
+_media_before = {}   # serial -> the media volume Dan found before muting it
+
+
+def _media_volume(serial):
+    m = re.search(r'volume is (\d+)', _adb(serial, 'shell', 'cmd', 'media_session', 'volume', '--stream', MEDIA_STREAM, '--get', timeout=10))
+    return int(m.group(1)) if m else None
+
+
+def _set_media(serial, level):
+    _adb(serial, 'shell', 'cmd', 'media_session', 'volume', '--stream', MEDIA_STREAM, '--set', str(level), timeout=10)
+
+
+def _quiet(serial, sound=False):
+    """Media volume 0 before Dan touches the phone (about 0.1 s). With sound=True, the level from before Dan muted it."""
+    try:
+        level = _media_volume(serial)
+        if sound:
+            back = _media_before.get(serial) or 7
+            if level != back:
+                _set_media(serial, back)
+            return
+        if level:
+            _media_before[serial] = level
+            _set_media(serial, 0)
+    except Exception:
+        pass
+
 
 def _bounds(text):
     m = re.findall(r'\d+', text or '')
@@ -365,6 +402,7 @@ def run(params):
         return '\n'.join(f"{d['serial']} {d['model']}" for d in found) or 'つながっている機器はない（USB デバッグの許可とケーブルを確かめる）'
     serial = _serial(params.get('serial'))
     _ensure_unlocked(serial)
+    _quiet(serial, bool(params.get('sound')))
     if action == 'read':
         return read(serial, params.get('query') or '')
     if action == 'screenshot':
@@ -448,6 +486,7 @@ def _find(serial, step, values):
 def _replay(flow, values):
     serial = _serial('')
     started, done, reason = time.perf_counter(), [], None
+    _quiet(serial)
     _replaying[0] = True
     try:
         for step in flow['steps']:
