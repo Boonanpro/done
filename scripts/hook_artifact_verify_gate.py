@@ -437,8 +437,9 @@ def place_needs(events: list[tuple]) -> dict[tuple[str, str], dict]:
                     span.setdefault((tree, place), [i, i])[1] = i
     out = {}
     for (tree, place), (first, last) in span.items():
-        # 作業場所に一時的に写して、もう消した成果物の写しは数えない（確かめる画面が無い。10-26 写しを消しただけで止め続けた）
-        if place.startswith("artifact:") and tree != LIVE and Path(tree).is_dir() \
+        # 作業場所に一時的に写して、もう消した成果物の写しは数えない（確かめる画面が無い。10-26 写しを消しただけで止め続けた）。
+        # 動いている木でも、試しに作ってもう消した成果物は同じ（11-21 Cloudflare の試しに作って消した裏側だけの成果物で止め続けた）
+        if place.startswith("artifact:") and Path(tree).is_dir() \
                 and not (Path(tree) / "frontend/src/app/artifacts" / place.split(":", 1)[1]).is_dir():
             continue
         here = lambda ev: ev[1] in ("*", tree)  # noqa: E731
