@@ -358,20 +358,31 @@ def _remember_paste_only(serial):
         pass
 
 
+def _input_app_ready(dev):
+    """True when uiautomator2's own input app (AdbKeyboard) is already on the phone. Its send_keys and clear_text
+    install the app when it is missing, and on the S24 that install waits on Play Protect's "blocked an unsafe app"
+    dialog for minutes (2026-11-21: one Japanese word took 240 seconds). Asking the phone first costs one adb call."""
+    try:
+        return bool(dev.is_input_ime_installed())
+    except Exception:   # noqa: BLE001 - an older uiautomator2 or a dropped connection: do not risk the install
+        return False
+
+
 def _send_text(dev, serial, text, clear=False):
     """Type any text through uiautomator2. Its send_keys falls back to installing an input app, which a phone that
     verifies apps installed over USB refuses (2026-10-28, S24 with a Google account: INSTALL_FAILED_VERIFICATION_FAILURE,
-    so no Japanese could be typed). Then the text goes through the clipboard and the paste key instead, which needs no
-    app; the phone is remembered so the failing install is not tried on every word."""
-    if serial not in _paste_only:
+    so no Japanese could be typed), or stalls on the Play Protect dialog. So send_keys is used only when that app is
+    already on the phone; otherwise the text goes through the clipboard and the paste key, which needs no app. A phone
+    where send_keys failed is remembered so it is not tried on every word."""
+    if serial not in _paste_only and _input_app_ready(dev):
         try:
             dev.send_keys(text, clear=clear)
             return
         except Exception:   # noqa: BLE001 - the install refusal surfaces as several exception types
             _remember_paste_only(serial)
     if clear:
-        try:
-            dev.clear_text()
+        try:   # the focused field's own clear; dev.clear_text() would go through the input app again
+            dev(focused=True).clear_text(timeout=2)
         except Exception:   # noqa: BLE001
             pass
     dev.set_clipboard(text)
