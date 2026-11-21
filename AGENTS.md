@@ -20,6 +20,10 @@ Preserve existing work, including uncommitted changes. Review and stage only the
 
 Verify the behavior affected by the change. For user interfaces, inspect the actual result; for instruction loaders, check the assembled context and session update behavior. Repeat or broaden checks only for a new failure, change or unresolved concern. Do not turn a local wording edit into a full deployment or account test.
 
+### Chat panes inside a screen
+
+The owner's rules for any chat with Dan placed inside a screen (2026-11-21): on PC it stays at the right, full height, visible without scrolling the page; the border between it and the left area is dragged to change its width (`frontend/src/components/ui/side-resize.tsx`, remembered per device); an empty chat shows nothing, with no title or text explaining how to use it ("ダンと話して直す", "〜を選んでから書くと…", example questions).
+
 ### Proving it works
 
 Adapted from pstack's principle-prove-it-works and principle-test-behavior-not-implementation (cursor/plugins), added 2026-11-03 after the owner refused a check that replayed a failed call.
