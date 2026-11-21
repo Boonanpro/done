@@ -9559,7 +9559,7 @@ def get_thumbnail_doc(content_id: str, room_id: str = Query(...), current_user: 
     _room_dir(room_id)
     from app.services import thumbnail_doc
     try:
-        return {"doc": thumbnail_doc.get(room_id, content_id)}
+        return {"doc": thumbnail_doc.versioned(room_id, thumbnail_doc.get(room_id, content_id))}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
