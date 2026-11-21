@@ -204,7 +204,9 @@ def context_lines(room_id: str) -> list[str]:
             lines.append(f"台本の上のサムネは部品で持つ作品（部屋 {room}）: {ws}。直すのは {cli()}（show/set/repaint/finish/render/undo、"
                          f"部屋は {room}）。直した形は画面が数秒でドキュメントの絵に入れる（すぐ入れるなら "
                          f"{PY} -m app.services.script_listen_thumbs sync {d}）。"
-                         "頼まれた所だけを部品で直す（背景の話なら背景の部品・色だけ、文字の話ならその文字だけ）。人物の絵を作り替える時は "
+                         "頼まれた所だけを部品で直す（背景の話なら背景の部品・色だけ、文字の話ならその文字だけ）。"
+                         "直す時は今の作品をそのまま直し、新しいサムネの作品を作らない（試しの案も render の PNG で見せる。"
+                         "別の案を残すと頼まれた時だけ thumb.py create --video <その動画> で同じ動画に足す）。人物の絵を作り替える時は "
                          ".claude/skills/talk-script/thumbnail.md の7節。会話にサムネの絵や部品が添えてあれば、それが話の対象。")
     except Exception:
         pass

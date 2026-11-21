@@ -112,7 +112,10 @@ def undo(room_id: str, content_id: str, actor: str = 'dan') -> dict[str, Any]:
     return doc
 
 
-def create(room_id: str, title: str, doc: dict[str, Any], asset_ids: list[str] | None = None) -> dict[str, Any]:
+def create(room_id: str, title: str, doc: dict[str, Any], asset_ids: list[str] | None = None,
+           video_id: str | None = None) -> dict[str, Any]:
+    """新しいサムネの作品。動画の作品（video_id）とひと組で作る。直す時は今の作品を save で直し、これは使わない
+    （2026-11-21 本人「今あるサムネを直しているだけなのに、なんでサムネが増えていくんだ」）。"""
     from app.services.timeline_draft import ContentsLock
     par = _par()
     now = _now()
@@ -121,11 +124,93 @@ def create(room_id: str, title: str, doc: dict[str, Any], asset_ids: list[str] |
         'asset_ids': list(asset_ids or []), 'timeline': {'thumbnail': {**doc, 'rev': 1}}, 'outputs': [],
         'created_at': now, 'updated_at': now,
     }
+    if video_id:
+        content['video_id'] = video_id
     with ContentsLock(room_id):
         contents = par._read_contents(room_id)
+        if video_id and not any(str(c.get('id')) == str(video_id) and not is_thumbnail(c) for c in contents):
+            raise ValueError('つなぐ動画の作品が見つかりません')
         contents.append(content)
         par._write_contents(room_id, contents)
     return content
+
+
+# ── 動画とひと組（2026-11-21 本人「サムネイルは必ず動画のエディター、動画とセットで基本的に作る」）──────────────
+
+def thumbnails_of(room_id: str, video_id: str, contents: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """その動画のサムネ（控えに回した物は除く）。作った順＝1枚目が表のサムネ。"""
+    rows = contents if contents is not None else _par()._read_contents(room_id)
+    out = [c for c in rows if is_thumbnail(c) and str(c.get('video_id') or '') == str(video_id) and not c.get('archived')]
+    return sorted(out, key=lambda c: (c.get('pattern_order') if isinstance(c.get('pattern_order'), int) else 99,
+                                      str(c.get('created_at') or '')))
+
+
+def _patch(room_id: str, content_id: str, fn) -> dict[str, Any]:
+    from app.services.timeline_draft import ContentsLock
+    par = _par()
+    with ContentsLock(room_id):
+        contents = par._read_contents(room_id)
+        c = next((c for c in contents if str(c.get('id')) == str(content_id)), None)
+        if not c:
+            raise ValueError('作品が見つかりません')
+        fn(c, contents)
+        c['updated_at'] = _now()
+        par._write_contents(room_id, contents)
+        return c
+
+
+def attach(room_id: str, thumb_id: str, video_id: str, order: int | None = None) -> dict[str, Any]:
+    """サムネの作品を動画の作品につなぐ（一覧から外れ、動画のエディターの「サムネ」に出る）。"""
+    def fn(c, contents):
+        if not is_thumbnail(c):
+            raise ValueError('サムネの作品ではありません')
+        if not any(str(v.get('id')) == str(video_id) and not is_thumbnail(v) for v in contents):
+            raise ValueError('つなぐ動画の作品が見つかりません')
+        c['video_id'] = video_id
+        c['archived'] = False
+        if order is not None:
+            c['pattern_order'] = int(order)
+    return _patch(room_id, thumb_id, fn)
+
+
+def archive(room_id: str, thumb_id: str, video_id: str | None = None) -> dict[str, Any]:
+    """増えてしまったサムネを消さずに控えへ回す（どの一覧にも出ない。戻すのは attach）。"""
+    def fn(c, contents):
+        if not is_thumbnail(c):
+            raise ValueError('サムネの作品ではありません')
+        c['archived'] = True
+        if video_id:
+            c['video_id'] = video_id
+    return _patch(room_id, thumb_id, fn)
+
+
+def video_for_doc(room_id: str, doc_id: str, title: str = '') -> str:
+    """台本に合う動画の作品。台本がつないである動画→同じ台本のサムネがつながっている動画→無ければ空のタイムラインの
+    動画の作品を新しく作って台本をつなぐ（撮影前の台本でも、サムネは動画とひと組にする）。"""
+    from app.services.timeline_draft import ContentsLock
+    par = _par()
+    with ContentsLock(room_id):
+        contents = par._read_contents(room_id)
+        hit = next((c for c in contents if not is_thumbnail(c) and c.get('script_doc') == doc_id), None)
+        if hit:
+            return str(hit['id'])
+        try:
+            from app.services import script_listen_thumbs as T
+            tied = {i.get('content_id') for i in (T.load(doc_id).get('items') or [])}
+        except Exception:
+            tied = set()
+        vids = [c.get('video_id') for c in contents if c.get('id') in tied and c.get('video_id')]
+        for v in vids:
+            if any(str(x.get('id')) == str(v) and not is_thumbnail(x) for x in contents):
+                return str(v)
+        now = _now()
+        video = {'id': str(uuid.uuid4()), 'room_id': room_id, 'title': title or '台本の動画', 'format': '16:9',
+                 'status': 'draft', 'asset_ids': [], 'outputs': [], 'script_doc': doc_id,
+                 'timeline': {'sequence': {'format': '16:9', 'frame_rate': 30, 'duration': 0, 'tracks': []}},
+                 'created_at': now, 'updated_at': now}
+        contents.append(video)
+        par._write_contents(room_id, contents)
+        return video['id']
 
 
 # ── 絵の素材 ─────────────────────────────────────────────────────────────────────
