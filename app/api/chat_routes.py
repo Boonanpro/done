@@ -3640,31 +3640,45 @@ async def rooms_pulse(body: RoomsPulseIn, current_user: TokenData = Depends(get_
 
     ids = list(dict.fromkeys(r for r in body.room_ids if r))[:60]
     limit = max(1, min(body.limit, 40))
-    gate = asyncio.Semaphore(6)
+    gate = asyncio.Semaphore(8)
+
+    async def active(room_id: str):
+        try:
+            return await _active_session_status(room_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("rooms_pulse active failed (room=%s): %s", room_id, e)
+            return None
 
     async def one(room_id: str) -> tuple[str, dict]:
         async with gate:
-            try:
-                messages = await service.get_messages(room_id, current_user.user_id, limit=limit)
-            except ValueError:
-                return room_id, {"error": "forbidden"}
-            except Exception as e:  # noqa: BLE001 - one room must not fail the others
-                logger.warning("rooms_pulse messages failed (room=%s): %s", room_id, e)
-                return room_id, {"error": "temporary"}
-            out: dict = {"messages": [m.model_dump(mode="json") for m in _message_responses(messages)]}
-            try:
-                out["active"] = await _active_session_status(room_id)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("rooms_pulse active failed (room=%s): %s", room_id, e)
-            if body.jobs:
-                try:
-                    rows = await asyncio.to_thread(runner.room_jobs, current_user.user_id, room_id, 24, False)
-                    out["jobs"] = [runner.public(s) for s in rows]
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("rooms_pulse jobs failed (room=%s): %s", room_id, e)
-            return room_id, out
+            got, state = await asyncio.gather(service.get_messages(room_id, current_user.user_id, limit=limit),
+                                              active(room_id), return_exceptions=True)
+        if isinstance(got, ValueError):
+            return room_id, {"error": "forbidden"}
+        if isinstance(got, BaseException):  # one room must not fail the others
+            logger.warning("rooms_pulse messages failed (room=%s): %s", room_id, got)
+            return room_id, {"error": "temporary"}
+        out: dict = {"messages": [m.model_dump(mode="json") for m in _message_responses(got)]}
+        if state is not None and not isinstance(state, BaseException):
+            out["active"] = state
+        return room_id, out
 
-    return {"rooms": dict(await asyncio.gather(*(one(r) for r in ids)))}
+    async def all_jobs() -> dict:
+        if not body.jobs:
+            return {}
+        try:
+            return await asyncio.to_thread(runner.rooms_jobs, current_user.user_id, ids, 24, False)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("rooms_pulse jobs failed: %s", e)
+            return {}
+
+    jobs, *found = await asyncio.gather(all_jobs(), *(one(r) for r in ids))
+    rooms = dict(found)
+    if body.jobs:
+        for room_id, out in rooms.items():
+            if "error" not in out:
+                out["jobs"] = [runner.public(s) for s in jobs.get(room_id, [])]
+    return {"rooms": rooms}
 
 
 class PerfEventIn(BaseModel):

@@ -511,22 +511,30 @@ def public(s):
 def room_jobs(user_id, room_id, hours=24, include_quiet=True):
     """This room's parallel jobs: all active ones and those of the last `hours`, newest first.
     Quiet jobs (asked from a site) are left out of the room's work list on screen (include_quiet=False)."""
+    return rooms_jobs(user_id, [room_id], hours, include_quiet).get(room_id, [])
+
+
+def rooms_jobs(user_id, room_ids, hours=24, include_quiet=True):
+    """room_jobs for several rooms, reading the job files once (the dev-lead board asks for 26 rooms at once, 11-21)."""
     from datetime import datetime, timedelta, timezone
+    wanted = set(room_ids)
     if not state.ROOT.exists():
-        return []
+        return {}
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    rows = []
+    found = {}
     for p in state.ROOT.glob('*.json'):
         s = state.read(p.stem)
-        if (s and s.get('user_id') == user_id and s.get('room_id') == room_id and s.get('engine') in ('parallel', 'make')
+        if (s and s.get('user_id') == user_id and s.get('room_id') in wanted and s.get('engine') in ('parallel', 'make')
                 and not s.get('internal_check') and (include_quiet or not s.get('quiet'))
                 and (s['state'] not in state.TERMINAL or (s.get('updated_at') or '') >= since)):
-            rows.append(s)
-    rows.sort(key=lambda s: (s['state'] in state.TERMINAL, s.get('created_at') or ''), reverse=False)
-    active = [s for s in rows if s['state'] not in state.TERMINAL]
-    done = [s for s in rows if s['state'] in state.TERMINAL]
-    return (sorted(active, key=lambda s: s.get('created_at') or '', reverse=True)
-            + sorted(done, key=lambda s: s.get('updated_at') or '', reverse=True))[:20]
+            found.setdefault(s['room_id'], []).append(s)
+    out = {}
+    for room_id, rows in found.items():
+        active = [s for s in rows if s['state'] not in state.TERMINAL]
+        done = [s for s in rows if s['state'] in state.TERMINAL]
+        out[room_id] = (sorted(active, key=lambda s: s.get('created_at') or '', reverse=True)
+                        + sorted(done, key=lambda s: s.get('updated_at') or '', reverse=True))[:20]
+    return out
 
 
 async def start(room_id, user_id, task, model='', title='', quiet=False, receiver=False):

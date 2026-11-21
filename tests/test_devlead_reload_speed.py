@@ -63,7 +63,7 @@ def test_rooms_pulse_answers_every_room_in_one_call(monkeypatch):
 
     monkeypatch.setattr(chat_routes, "_active_session_status", active)
     monkeypatch.setattr(chat_routes, "_message_responses", lambda rows: [SimpleNamespace(model_dump=lambda mode=None, r=r: r) for r in rows])
-    monkeypatch.setattr(runner, "room_jobs", lambda user_id, room_id, hours, quiet: [{"id": "j-" + room_id}])
+    monkeypatch.setattr(runner, "rooms_jobs", lambda user_id, room_ids, hours, quiet: {r: [{"id": "j-" + r}] for r in room_ids})
     monkeypatch.setattr(runner, "public", lambda s: {"id": s["id"], "active": True})
     app = FastAPI(); app.include_router(chat_routes.router)
     app.dependency_overrides[chat_routes.get_current_user] = TOKEN
