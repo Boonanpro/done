@@ -121,3 +121,48 @@ def test_another_recipient_uses_own_review():
     args = (owner["content"], card, owner, "/message-preview?proposal=draft-b", [msg("今何時？", T2)])
     receipt = review_prior(*args, "")["review_token"]
     assert review_prior(*args, receipt)["ok"]
+
+
+# 2026-11-21 本人「明確に承認してて条件が変わってないのに再度確認するのは二重確認でダメ」
+def _om(text, at, i):
+    return {"id": f"m{i}", "content": text, "created_at": at}
+
+
+def test_11_21_later_unrelated_question_keeps_approval():
+    from app.services.send_authorization import check_recent
+    ok_msg = _om("シュタインさんへの件、送って。日程等何か連絡来ても何も返事せず保存だけして。", "2026-11-21T09:43:58+00:00", 1)
+    q = _om("中村さんのローンチの1本目で年末訴求してる？っていう質問に答えて。", "2026-11-21T09:44:39+00:00", 2)
+    # 下書きは許可の後にダンが作った
+    p = prop(created="2026-11-21T09:44:41+00:00", updated="2026-11-21T09:44:41+00:00")
+    r = check_recent(approval="送って", owner_messages=[q, ok_msg], watch_notes=[], proposal=p)
+    assert r["ok"] and r["basis"] == "owner_message_earlier"
+    # 叱られた後の発言が続いても同じ
+    scold = _om("だから送信の道具を直せって。二重確認でありダメな行為だろ。", "2026-11-21T09:59:19+00:00", 3)
+    assert check_recent(approval="送って", owner_messages=[scold, q, ok_msg], watch_notes=[], proposal=p)["ok"]
+
+
+def test_later_hold_or_change_blocks_earlier_approval():
+    from app.services.send_authorization import check_recent
+    ok_msg = _om("送って", T1, 1)
+    for text in ("やっぱり待って", "あれ保留で", "送らないで"):
+        later = _om(text, T2, 2)
+        assert not check_recent(approval="送って", owner_messages=[later, ok_msg], watch_notes=[],
+                                proposal=prop(created=T2, updated=T2))["ok"], text
+    # 許可の後に、許可より前からあった下書きが書き換わった
+    later = _om("ところで台本どう？", T2, 2)
+    assert not check_recent(approval="送って", owner_messages=[later, ok_msg], watch_notes=[],
+                            proposal=prop(created=T0, updated=T2))["ok"]
+
+
+def test_earlier_approval_used_once_and_window():
+    from app.services.send_authorization import check_recent
+    ok_msg = _om("送って", T1, 1)
+    later = _om("ところで台本どう？", T2, 2)
+    assert not check_recent(approval="送って", owner_messages=[later, ok_msg], watch_notes=[],
+                            proposal=prop(created=T2, updated=T2), used_elsewhere=True)["ok"]
+    old = _om("送って", "2026-11-11T00:00:00+00:00", 1)
+    assert not check_recent(approval="送って", owner_messages=[later, old], watch_notes=[],
+                            proposal=prop(created=T2, updated=T2))["ok"]
+    # 前の発言に送る言葉が無ければ通さない
+    assert not check_recent(approval="いいよ", owner_messages=[later, _om("いいよ", T1, 1)], watch_notes=[],
+                            proposal=prop(created=T2, updated=T2))["ok"]
