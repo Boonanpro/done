@@ -140,7 +140,9 @@ def _chars(paragraph):
         style = run.get('textStyle') or {}
         # del / ins are the suggestion ids (a tuple, empty when none), so they still read as true / false.
         flags = {'del': tuple(run.get('suggestedDeletionIds') or ()), 'ins': tuple(run.get('suggestedInsertionIds') or ()),
-                 'blue': _is_blue(style), 'bold': bool(style.get('bold'))}
+                 'blue': _is_blue(style), 'bold': bool(style.get('bold')),
+                 # Whose words these are in the owner's suggestion (script_listen_marks: 'd' Dan's, 'o' the owner's).
+                 'who': run.get('_who')}
         # The owner's added words (script_listen_marks) have no room in the doc yet: all of them sit where they go.
         step = not run.get('_virtual')
         for ch in run['content']:
@@ -189,14 +191,19 @@ def _segs(chars):
     blue stage notes and bold are kept apart."""
     out = []
     for _, ch, f in chars:
-        key = (f['ins'][0] if f['ins'] else None, f['del'][0] if f['del'] else None, f['blue'], f['bold'])
+        ins = f['ins'][0] if f['ins'] else None
+        dele = f['del'][0] if f['del'] else None
+        # Dan's words inside the owner's suggestion (they wrote over his) are drawn as his (11/21 本人).
+        dan = bool((ins or dele) and M.is_owner(ins or dele) and f.get('who') == 'd')
+        key = (ins, dele, f['blue'], f['bold'], dan)
         if out and out[-1][0] == key: out[-1][1].append(ch)
         else: out.append((key, [ch]))
     segs = []
-    for (ins, dele, blue, bold), cs in out:
+    for (ins, dele, blue, bold, dan), cs in out:
         seg = {'t': ''.join(cs)}
         if ins: seg['ins'] = ins
         if dele: seg['del'] = dele
+        if dan: seg['who'] = 'dan'
         if blue: seg['blue'] = True
         if bold: seg['b'] = True
         segs.append(seg)
@@ -424,6 +431,7 @@ def suggestions_of(units, kept=()):
     in suggestion mode on this screen (kept here, not in the doc); client: what the other side changed in the copy
     they were sent (script_share), kept the same way. ``kept``: the screen's suggestions (for whose each is)."""
     whose = {k.get('id'): k.get('by') for k in kept or ()}
+    from_dan = {k.get('id') for k in kept or () if (k.get('from') or {}).get('by') == 'dan'}
     out = {}
     for u in units:
         if u['kind'] == 'image':
@@ -440,6 +448,10 @@ def suggestions_of(units, kept=()):
                 by = ('client' if whose.get(sid) == 'client' else 'owner') if M.is_owner(sid) else 'doc'
                 s = out.setdefault(sid, {'id': sid, 'ins': '', 'del': '', 'n': u['n'], 'by': by})
                 s[kind] += seg['t']
+                if sid in from_dan:
+                    # Dan's suggestion the owner wrote over: whose each letter is, for the card.
+                    s['from_dan'] = True
+                    s[kind + '_who'] = s.get(kind + '_who', '') + ('d' if seg.get('who') == 'dan' else 'o') * len(seg['t'])
     return list(out.values())
 
 
@@ -642,13 +654,23 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
         shown, sugs, placed = view(doc_id, doc)
         new_bmask = (new_bmask or '')[:len(new)].ljust(len(new), '0')
         screen = new
+        ins_first = None
         if mode == 'suggest' and '1' in (new_dmask or ''):
             # Letters struck on the screen are still in its text; for the change they are taken out (in suggestion
             # mode taking out = striking), so which of two same letters is struck does not hang on the comparison.
             keep = [k for k in range(len(new)) if not (k < len(new_dmask) and new_dmask[k] == '1')]
             new, new_bmask = ''.join(new[k] for k in keep), ''.join(new_bmask[k] for k in keep)
+            struck_at = [k for k in range(len(screen)) if k < len(new_dmask) and new_dmask[k] == '1']
+            def ins_first(j1, j2, keep=keep, struck_at=struck_at):
+                # Words typed in front of the words struck with them stay in front (11/21: typed before struck words,
+                # they moved behind them once written).
+                lo = keep[j1 - 1] + 1 if j1 > 0 else 0
+                hi = keep[j2] if j2 < len(keep) else len(screen)
+                here = [k for k in struck_at if lo <= k < hi]
+                return bool(here) and keep[j2 - 1] < here[0]
         para_from, para_to, toks, end, old, new, new_bmask, rebased = _locate(shown, para_from, para_to, old, new,
                                                                               old_bmask, new_bmask)
+        if rebased: ins_first = None
         # Boldness is compared on the screen's own terms (bold marks, not the heading style), so only what the owner
         # switched with Ctrl+B is written.
         if not rebased and len(old_bmask or '') == len(old):
@@ -657,7 +679,7 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
             # Nothing changes; the screen may still show words the doc does not have (struck, typed again).
             return {'changed': False, 'reload': not rebased and screen != old}
         try:
-            new_toks, settled = M.plan(toks, new, new_bmask, mode)
+            new_toks, settled = M.plan(toks, new, new_bmask, mode, ins_first=ins_first)
         except M.Refused as exc:
             raise ListenError(str(exc), 409)
         except M.Adopt as need:
@@ -670,9 +692,15 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
             order = adopt_order(shown, need.sids, para_from, para_to)
             o2, ob2 = ''.join(toks[k]['ch'] for k in order), ''.join('1' if toks[k]['b'] else '0' for k in order)
             n2, nb2 = carry_change(toks, order, new, new_bmask)
-            _adopt(doc_id, doc, shown, sugs, need.sids, paras)
+            revs = _adopt(doc_id, doc, shown, sugs, need.sids, paras)
             out = replace(doc_id, para_from, para_to, o2, n2, ob2, nb2, mode, '', _depth + 1)
-            return {**out, 'changed': True, 'reload': True}
+            revs += out.get('revisions') or ([out['revision']] if out.get('revision') else [])
+            # The screen reads it again only when it no longer shows what the doc reads (his words and the owner's keep
+            # their order, so typing on does not lose its place: 11/21 本人「編集してることが巻き戻される」).
+            again = M.tokens(view(doc_id)[0], para_from, para_to + (n2.count('\n') - o2.count('\n')), _chars)
+            same = bool(again) and not rebased and M.text_of(again[0]) == screen
+            return {**out, 'changed': True, 'reload': out.get('reload', False) or not same, 'adopted': True,
+                    'revision': revs[-1] if revs else out.get('revision'), 'revisions': revs}
         except M.Settle as need:
             # Dan's suggestion is being typed over: decide it in the doc the way the owner means it, then the rest.
             if _depth >= 2: raise ListenError(GONE_HERE, 409)
@@ -995,17 +1023,33 @@ def adopt_plan(shown, sids, now='', paras=None):
             if len(ids) > 1: frm['suggestions'] = ids
             piece = {'id': M.OWNER + uuid.uuid4().hex[:12], 'para': pi, 'pre': pre[-M.CONTEXT:], 'del': dele,
                      'ins': ins_text, 'bm': ''.join('1' if t['b'] else '0' for t in ins),
-                     'post': post[:M.CONTEXT], 'at': now, 'from': frm}
+                     'post': post[:M.CONTEXT], 'at': now, 'from': frm,
+                     # Still all Dan's words (drawn in his colour), in the order they read (his new words first).
+                     'who': 'd' * len(ins_text), 'dwho': 'd' * len(dele)}
+            lead = _lead(chars, i, j)
+            if lead and dele: piece['lead'] = lead
             if not pre and not post and not dele:
                 piece.update(_above(shown, pi, sids, paras))
             out.append(piece)
     return out, positions
 
 
+def _lead(chars, i, j):
+    """How many of the added words of Dan's stretch ``chars[i:j]`` stand before its first struck word."""
+    n = 0
+    for k in range(i, j):
+        a, d = _dan_ins(chars[k]), _dan_del(chars[k])
+        if d and not a: return n
+        if a and not d: n += 1
+    return 0
+
+
 def adopt_order(shown, sids, para_from, para_to):
     """The characters of paragraphs ``para_from``..``para_to`` (indices into their tokens) in the order the screen shows
-    them once Dan's suggestions ``sids`` there are the owner's (adopt_plan): in each taken stretch its struck words,
-    then its added words; words both added and taken out by his suggestions are gone."""
+    them once Dan's suggestions ``sids`` there are the owner's (adopt_plan): in each taken stretch the added words that
+    stood before its struck words, the struck words, then the other added words (the same order as before for a
+    replacement, so what the owner is typing does not move); words both added and taken out by his suggestions are
+    gone."""
     order, base = [], 0
     for pi in range(para_from, para_to + 1):
         if pi > para_from:
@@ -1024,7 +1068,8 @@ def adopt_order(shown, sids, para_from, para_to):
             dele = [x for x in range(k, j) if not _dan_ins(chars[x])]
             ins = [x for x in range(k, j) if not _dan_del(chars[x])]
             same = ''.join(toks[x]['ch'] for x in dele) == ''.join(toks[x]['ch'] for x in ins)
-            order += [base + x for x in (dele if same else dele + ins)]
+            lead = _lead(chars, k, j) if dele else 0
+            order += [base + x for x in (dele if same else ins[:lead] + dele + ins[lead:])]
             k = j
         base += len(toks)
     return order
@@ -1114,16 +1159,22 @@ def _adopt(doc_id, doc, shown, sugs, sids, paras=None):
     if paras is None:
         paras = set(range(len(shown.get('body', {}).get('content', []))))
     text_reqs, style_reqs = take_back_requests(doc, positions, sorted(paras))
+    revs = []
+    # The screen tells its own writes from other people's by these revisions (else it took them for someone else's
+    # change, threw away the undo steps and read the doc again while the owner typed).
     if text_reqs:
-        _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
-              body={'requests': text_reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+        done = _docs('POST', f'{doc_id}:batchUpdate', doc['_account'],
+                     body={'requests': text_reqs, 'writeControl': {'requiredRevisionId': doc['revisionId']}})
+        revs.append((done.get('writeControl') or {}).get('requiredRevisionId'))
     if style_reqs:
-        _docs('POST', f'{doc_id}:batchUpdate', doc['_account'], body={'requests': style_reqs})
+        done = _docs('POST', f'{doc_id}:batchUpdate', doc['_account'], body={'requests': style_reqs})
+        revs.append((done.get('writeControl') or {}).get('requiredRevisionId'))
     M.save(OWNER_SUGS, doc_id, list(sugs) + pieces)
     for piece in pieces:
         _log_owner_action(doc_id, doc.get('title', ''), action='adopt', suggestion=piece['id'], dan_suggestion=piece['from']['suggestion'],
                           before=piece['pre'] + piece['del'] + piece['post'], after=piece['pre'] + piece['ins'] + piece['post'],
                           revised_from=piece['from'])
+    return [r for r in revs if r]
 
 
 def accept_all(doc_id):

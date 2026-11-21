@@ -338,15 +338,55 @@ def test_typing_next_to_words_that_go_with_the_adoption(tmp_path, monkeypatch, t
     assert [x['ins'] for x in M.load(tmp_path / 'sugs.json', 'd')] == [want]
 
 
-def test_typed_words_follow_dans_words_when_struck_ones_come_first():
-    # Docs keeps 「なら」 (added) before 「で」 (struck); as the owner's suggestion it reads 「で」 then 「なら」
+def test_dans_replacement_keeps_its_order_when_it_becomes_the_owners():
+    # Docs keeps 「なら」 (added) before 「で」 (struck). As the owner's suggestion it reads the same, so what is being
+    # typed does not move and the screen's next write still fits (11/21 本人「編集してることが巻き戻される」)
     doc = _ends(_doc(('◎台本\n', 'HEADING_2'),
                      [('一括', {}, {}), ('なら', {}, {'suggestedInsertionIds': ['s']}), ('で', {}, {'suggestedDeletionIds': ['s']}),
                       ('36万円です。\n', {}, {})]))
     toks, _ = _toks(doc, 1)
     order = S.adopt_order(doc, {'s'}, 1, 1)
-    assert ''.join(toks[k]['ch'] for k in order) == '一括でなら36万円です。'
-    assert S.carry_change(toks, order, '一括ならX で36万円です。'.replace(' ', ''), '0' * 12)[0] == '一括でならX36万円です。'
+    assert ''.join(toks[k]['ch'] for k in order) == '一括ならで36万円です。'
+    assert S.carry_change(toks, order, '一括ならXで36万円です。', '0' * 12)[0] == '一括ならXで36万円です。'
+    pieces = S.adopt_pieces(doc, {'s'})
+    assert [(x['del'], x['ins'], x.get('lead'), x['who'], x['dwho']) for x in pieces] == [('で', 'なら', 2, 'dd', 'd')]
+    back = _ends(_doc(('◎台本\n', 'HEADING_2'), '一括で36万円です。\n'))
+    view, _ = M.overlay(back, pieces)
+    assert M.text_of(_toks(view, 1)[0]) == '一括ならで36万円です。'
+    # typing in his words: only the typed letter is the owner's; the rest stays drawn as his
+    body, fresh, _ = _run(back, 1, '一括ならXで36万円です。', 'suggest', sugs=pieces)
+    assert body == '◎台本\n一括で36万円です。\n'
+    assert [(f['del'], f['ins'], f.get('lead'), f.get('who'), f.get('dwho')) for f in fresh] == [('で', 'ならX', 3, 'ddo', 'd')]
+    view, _ = M.overlay(back, [{**fresh[0], 'id': pieces[0]['id']}])
+    assert M.text_of(_toks(view, 1)[0]) == '一括ならXで36万円です。'
+    segs = [(g['t'], g.get('who')) for u in S.outline(view) if u.get('para') == 1 for g in u['segs']]
+    assert segs == [('一括', None), ('なら', 'dan'), ('X', None), ('で', 'dan'), ('36万円です。', None)]
+
+
+def test_words_typed_in_front_of_struck_words_stay_in_front():
+    # 11/21: typed before the words struck with them, they moved behind them once written
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '実際に、飲んでいた方も。\n'))
+    toks, _ = _toks(doc, 1)
+    screen, dmask = '実際に、飲んでまえいた方も。', '0' * 9 + '11' + '0' * 3
+    keep = [k for k in range(len(screen)) if dmask[k] != '1']
+    new = ''.join(screen[k] for k in keep)
+    assert new == '実際に、飲んでまえ方も。'
+    struck = [k for k in range(len(screen)) if dmask[k] == '1']
+    def first(j1, j2):
+        lo = keep[j1 - 1] + 1 if j1 > 0 else 0
+        hi = keep[j2] if j2 < len(keep) else len(screen)
+        here = [k for k in struck if lo <= k < hi]
+        return bool(here) and keep[j2 - 1] < here[0]
+    new_toks, _ = M.plan(toks, new, '0' * len(new), 'suggest', ins_first=first)
+    fresh = M.regroup(new_toks, 1, ids=iter(['o-1']))
+    assert [(f['del'], f['ins'], f.get('lead')) for f in fresh] == [('いた', 'まえ', 2)]
+    view, _ = M.overlay(doc, fresh)
+    assert M.text_of(_toks(view, 1)[0]) == screen
+    # accepting it reads as typed
+    t2, end = _toks(view, 1)
+    nt, _ = M.plan(t2, M.text_of(t2), M.bmask_of(t2), 'edit', force={'o-1': True})
+    a_, pos, abm, b_, bbm, _, ops = M.doc_change(t2, nt)
+    assert _apply(_body(doc), S.replace_requests(pos + [end], a_, b_, abm, bbm, ops)) == '◎台本\n実際に、飲んでまえ方も。\n'
 
 
 def test_owners_words_of_two_sentences_are_drawn_once():
