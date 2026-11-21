@@ -95,9 +95,17 @@ def overlay(doc, sugs):
     view['body']['content'] = list(content)
     raws = {pi: _raw(el['paragraph']) for pi, el in enumerate(content) if el.get('paragraph')}
     placed, marks = {}, {}
+    def under(pi, s):
+        # Words that make a whole paragraph (nothing around them) are found by the paragraph above with words in it,
+        # so they do not land in another empty paragraph when paragraphs come or go before them.
+        above, gap = s.get('above'), s.get('gap') or 0
+        if above is None or s.get('pre') or s.get('post') or s.get('del'): return False
+        k = pi - 1 - gap
+        return (k in raws and raws[k].endswith(above) and raws[k] != ''
+                and all(raws.get(q, None) == '' for q in range(k + 1, pi)))
     for s in sorted(sugs, key=lambda x: x.get('at') or ''):
         hint = s.get('para') if isinstance(s.get('para'), int) else 0
-        for pi in sorted(raws, key=lambda p: (abs(p - hint), p)):
+        for pi in sorted(raws, key=lambda p: (not under(p, s), abs(p - hint), p)):
             taken = [(m[0], m[0] + len(m[1].get('del') or '')) for m in marks.get(pi, [])]
             at = _find(raws[pi], s, taken)
             if at is None: continue
