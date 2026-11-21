@@ -2035,11 +2035,11 @@ function ChatInput({
       {screenItems.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" data-chat-attached>
           {screenItems.map((x) => (
-            <span key={x.key} data-chat-attached-item={x.key} className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-sky-400/50 bg-sky-50 py-1 pl-1 pr-2 text-xs text-sky-950 dark:bg-sky-950/40 dark:text-sky-100">
-              {x.preview ? <img src={x.preview} alt="" className="h-7 w-12 shrink-0 rounded object-cover ring-1 ring-sky-300" /> : null}
+            <span key={x.key} data-chat-attached-item={x.key} className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 py-1 pl-1.5 pr-2 text-xs font-medium text-foreground">
+              {x.preview ? <img src={x.preview} alt="" className="h-7 w-12 shrink-0 rounded object-cover ring-1 ring-primary/30" /> : null}
               <span className="min-w-0 truncate">{x.label}</span>
               {screenSending ? <Loader2 className="h-3 w-3 shrink-0 animate-spin" /> : (
-                <button type="button" onClick={() => { dropScreenItem(projectId, x.key); x.onRemove?.(); }} className="shrink-0 text-sky-700/70 hover:text-sky-950" aria-label="添えた物を外す"><X className="h-3 w-3" /></button>
+                <button type="button" onClick={() => { dropScreenItem(projectId, x.key); x.onRemove?.(); }} className="shrink-0 text-muted-foreground hover:text-foreground" aria-label="添えた物を外す"><X className="h-3 w-3" /></button>
               )}
             </span>
           ))}

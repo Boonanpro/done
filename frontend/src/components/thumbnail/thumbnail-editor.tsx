@@ -633,7 +633,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const id = selPart.id;
     putAttach(link.projectId, {
       key: 'thumb-part',
-      label: `選んだ部品：${partLabel(selPart)}`,
+      label: `選んだ部品：${selPart.type === 'text' ? `文字「${selPart.text.replace(/\n/g, ' ').slice(0, 14)}」` : partLabel(selPart)}`,
       preview: selPart.type === 'image' ? selPart.src : undefined,
       detail: `- みきさんが選んだ部品（「これ」「この文字」「この絵」はこれ）: ${where} の ${partText}。添付の絵の赤い枠がこの部品。`,
       upload: () => link.snapshot({ box }),
