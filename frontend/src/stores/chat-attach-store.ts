@@ -47,9 +47,10 @@ export const useChatAttachStore = create<State>((set, get) => ({
 const EMPTY: ChatAttachItem[] = [];
 export const useChatAttachments = (projectId: string) => useChatAttachStore((s) => s.items[projectId] || EMPTY);
 
-/** 送る本文: みきさんの言葉の後ろに、添えた物の中身を足す。 */
+/** 送る本文: みきさんの言葉と、添えた物の札（画面に出る短い1行）。中身はダンにだけ渡す（<dan-context> は画面に出ない）。 */
 export function composeAttached(text: string, items: ChatAttachItem[]): string {
   if (!items.length) return text;
+  const shown = `（${items.map((x) => x.label).join('・')}）`;
   const body = items.map((x) => x.detail).join('\n');
-  return `${text || '（言葉なし。添えた物を見て判断してください）'}\n\n［画面から添えた物］\n${body}`;
+  return `${text ? `${text}\n` : ''}${shown}\n\n<dan-context>\nkind: screen-attachment\nnote: みきさんが画面から添えた物。言葉が無ければ添えた物を見て判断する。\n${body}\n</dan-context>`;
 }
