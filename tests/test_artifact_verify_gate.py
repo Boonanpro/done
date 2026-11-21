@@ -33,7 +33,8 @@ def run(tmp_path, rows, env_extra=None, **extra):
     t = tmp_path/'t.jsonl'
     t.write_text('\n'.join(json.dumps(r, ensure_ascii=False) for r in rows), encoding='utf-8')
     payload = {'hook_event_name': 'Stop', 'transcript_path': str(t), 'session_id': 's1', 'stop_hook_active': False, **extra}
-    env = dict(os.environ, DAN_ARTIFACT_GATE_DIR=str(tmp_path/'store'), DAN_ARTIFACT_GATE_LIVE='D:/done', **(env_extra or {}))
+    env = dict(os.environ, DAN_ARTIFACT_GATE_DIR=str(tmp_path/'store'), DAN_ARTIFACT_GATE_LIVE='D:/done')
+    env.update(env_extra or {})
     p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload).encode(), capture_output=True, env=env)
     assert p.returncode == 0, p.stderr
     out = p.stdout.decode('utf-8').strip()
@@ -277,6 +278,21 @@ def test_a_removed_temporary_copy_in_a_worktree_is_not_counted(tmp_path):
     assert run(tmp_path, rm, env_extra=env) is None
     (wt / 'frontend/src/app/artifacts/dev-lead').mkdir()
     assert run(tmp_path, rm, env_extra=env)['decision'] == 'block'   # 写しが残っていれば数える
+
+
+def test_a_removed_temporary_artifact_in_the_live_tree_is_not_counted(tmp_path):
+    """11-21: 動いている木に試しの成果物（裏側だけ）を作って消した後も、地図と撮影を求めて止め続けた。"""
+    live = tmp_path / 'live'
+    (live / 'frontend/src/app/artifacts').mkdir(parents=True)
+    env = {'DAN_ARTIFACT_GATE_LIVE': live.as_posix()}
+    rm = [claude_tool('Bash', {'command': f'rm -rf {live.as_posix()}/frontend/src/app/artifacts/zz-test'}, '1'),
+          claude_tool('Bash', {'command': 'python scripts/artifact_seen.py --slug zz-test'}, '2'),
+          claude_result('2', '[artifact_seen] slug=zz-test result=UNCHECKED（本人の画面では未確認）')]
+    gone = run(tmp_path, rm, env_extra=env)
+    assert gone is None or 'place_map.py check artifact:zz-test' not in gone['reason']
+    (live / 'frontend/src/app/artifacts/zz-test').mkdir()
+    r = run(tmp_path, rm, env_extra=env)
+    assert r and 'place_map.py check artifact:zz-test' in r['reason']   # 残っていれば地図を求める
 
 
 def test_place_with_a_map_in_docs_places_is_a_common_place():
