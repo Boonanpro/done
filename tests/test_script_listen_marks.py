@@ -347,3 +347,14 @@ def test_typed_words_follow_dans_words_when_struck_ones_come_first():
     order = S.adopt_order(doc, {'s'}, 1, 1)
     assert ''.join(toks[k]['ch'] for k in order) == '一括でなら36万円です。'
     assert S.carry_change(toks, order, '一括ならX で36万円です。'.replace(' ', ''), '0' * 12)[0] == '一括でならX36万円です。'
+
+
+def test_owners_words_of_two_sentences_are_drawn_once():
+    # 11/21: a whole paragraph of the owner's words (two sentences) showed both in the first sentence and the second
+    # one again as plain text
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n', [('\n', {}, {'suggestedInsertionIds': ['a']})], '後の文。\n'))
+    sug = {'id': 'o-1', 'para': 2, 'pre': '', 'del': '', 'ins': '一つ目です。二つ目です。', 'bm': '', 'post': '', 'above': '前の文。', 'gap': 0}
+    view, placed = M.overlay(doc, [sug])
+    assert placed == {'o-1': 2}
+    says = [u for u in S.outline(view) if u.get('para') == 2]
+    assert [[(s['t'], s.get('ins')) for s in u['segs']] for u in says] == [[('一つ目です。', 'o-1')], [('二つ目です。', 'o-1')]]

@@ -267,7 +267,9 @@ def outline(doc):
         visible = [c for c in chars if not c[2]['del']]
         if all(c[2]['blue'] or not c[1].strip() for c in visible) or text.startswith('［'):
             units.append({'kind': 'note', 'text': text, 'para': pi, 'segs': _segs(chars)}); continue
-        mine = []      # (unit, end) of this paragraph, to hand every character (deleted ones too) to a unit
+        mine = []      # (unit, place of its last character) of this paragraph, to hand every character to a unit
+        place = {id(c): p for p, c in enumerate(chars)}
+        last = lambda part: place[id(part[-1])]
         for part in _split(chars):
             while part and not part[0][1].strip(): part = part[1:]
             while part and not part[-1][1].strip(): part = part[:-1]
@@ -276,18 +278,20 @@ def outline(doc):
             end = part[-1][0] + _units16(part[-1][1])
             if not speak or not re.search(r'[\w぀-ヿ一-鿿]', speak):
                 u = {'kind': 'note', 'text': _raw(part).strip(), 'para': pi}
-                units.append(u); mine.append((u, end)); continue
+                units.append(u); mine.append((u, last(part))); continue
             start = part[0][0]
             inside = [c for c in chars if start <= c[0] < end]
             u = {'kind': 'say', 'text': _raw(part).strip(), 'speak': speak, 'para': pi, 'start': start, 'end': end,
                  'bmask': ''.join('1' if c[2]['bold'] else '0' for c in part),
                  'bold': all(c[2]['bold'] for c in part if c[1].strip()),
                  'locked': any(c[2]['ins'] or c[2]['del'] for c in inside), 'section': section, 'gap': 's'}
-            units.append(u); mine.append((u, end))
-        # Characters between sentences (spaces, a deleted sentence) go to the sentence after them.
+            units.append(u); mine.append((u, last(part)))
+        # Characters between sentences (spaces, a deleted sentence) go to the sentence after them. By their place in
+        # the paragraph, not their doc index: the owner's added words all sit at one index (11/21: a suggestion of two
+        # sentences drew both in the first one, and the second one again as plain text).
         own = [[] for _ in mine]
-        for c in chars:
-            k = next((i for i, (_, end) in enumerate(mine) if c[0] < end), len(mine) - 1)
+        for p, c in enumerate(chars):
+            k = next((i for i, (_, end) in enumerate(mine) if p <= end), len(mine) - 1)
             if k >= 0: own[k].append(c)
         for (u, _), cs in zip(mine, own):
             u['segs'] = _segs(cs)
