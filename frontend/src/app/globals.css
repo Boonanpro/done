@@ -267,3 +267,14 @@
   background-color: var(--background);
   color: var(--foreground);
 }
+/* ダンの返事の文字は暗い地のために白（!important）で決めてあり、白い地の欄では見えなかった（2026-11-21 台本を聞く画面で
+   ダンの返事が白い地に白い文字で、返事が来ていないように見えた）。白い地の欄の中だけ、文字の色を地に合わせる。 */
+.theme-light .prose-dan {
+  color: var(--foreground) !important;
+}
+.theme-light .prose-dan.text-sm {
+  color: var(--muted-foreground) !important;
+}
+.theme-light .prose-dan * {
+  color: inherit !important;
+}

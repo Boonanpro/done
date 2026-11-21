@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react';
 
+import { chatBusy } from '@/lib/chat-outbox';
+
 // このページを描いたビルドの名前（frontend_prod.py が build 時に焼き込む）。開発サーバーでは空。
 const LOADED_BUILD = process.env.NEXT_PUBLIC_DASHBOARD_BUILD || '';
 const CHECK_MS = 60_000;
@@ -19,14 +21,18 @@ export function NewBuildNotice() {
     if (!LOADED_BUILD) return;
     let found = false;
     const check = async () => {
-      if (found) return;
+      // 見つけた後も、裏にある間は会話が落ち着いた所で読み直す（会話の入力中・送信中・ダンの作業中は待つ。lib/chat-outbox.ts）
+      if (found) {
+        if (document.visibilityState === 'hidden' && !chatBusy()) window.location.reload();
+        return;
+      }
       try {
         const res = await fetch('/dashboard-build', { cache: 'no-store' });
         if (!res.ok) return;
         const { build } = (await res.json()) as { build?: string };
         if (build && build !== LOADED_BUILD) {
           found = true;
-          if (document.visibilityState === 'hidden') window.location.reload();
+          if (document.visibilityState === 'hidden' && !chatBusy()) window.location.reload();
           else setStale(true);
         }
       } catch {
@@ -34,7 +40,7 @@ export function NewBuildNotice() {
       }
     };
     const onVisibility = () => {
-      if (document.visibilityState === 'hidden' && found) window.location.reload();
+      if (document.visibilityState === 'hidden' && found && !chatBusy()) window.location.reload();
       else if (document.visibilityState === 'visible') void check();
     };
     void check();

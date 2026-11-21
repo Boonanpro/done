@@ -37,6 +37,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { toast } from 'sonner';
+import { AUTO_RESEND_MS, outboxClaim, outboxDrop, outboxHas, outboxList, outboxPut, outboxRelease, outboxVersion, setChatBusy, subscribeOutbox, type OutboxEntry } from '@/lib/chat-outbox';
 
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -742,6 +743,9 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
         {pending && (
           <span className="mt-0.5 mr-1 text-[11px] text-muted-foreground">仮送信・次の区切りで反映</span>
         )}
+        {msg.unsent && (
+          <span data-chat-unsent className="mt-0.5 mr-1 text-[11px] text-amber-600">まだ届いていません・届くまで送り直しています</span>
+        )}
       </div>
     );
   }
@@ -941,6 +945,9 @@ function ChatInput({
   const optimisticMessageIdRef = useRef<string | null>(null);
   const titleGeneratedRef = useRef(false);
   const streamRequestRef = useRef(0);
+  // この画面が今まさに送っている（通信中の）送信 ID。送信の控えの送り直しは、これを二重に送らない
+  const inflightIdsRef = useRef(new Set<string>());
+  const checkOutboxRef = useRef<(delayMs?: number) => void>(() => {});
   const queryClient = useQueryClient();
   const router = useRouter();
   const user = useAuthStore((state) => state.user);
@@ -1275,6 +1282,20 @@ function ChatInput({
     };
 
     const queryKey = ['project-messages', roomId];
+    // 送った文を、サーバーが受け取ったと返すまで端末に控える（読み直し・通信の切れで消さない。lib/chat-outbox.ts）。
+    // 部品の答え（自分で送り直す）と、取り消した文の書き換え（replace）は控えない
+    const outboxed = !extra?.answerTo && !replaceMessageIdRef.current;
+    if (outboxed) {
+      outboxPut({ id: tempUserMessageId, room: roomId, content, ...(imageUrls.length ? { image_urls: imageUrls } : {}), ...(fileUrls.length ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(refs.length ? { timeline_refs: refs } : {}) });
+    }
+    inflightIdsRef.current.add(tempUserMessageId);
+    // 届いたか分からないまま通信が終わった: 預かりを外し、少し後に同じ ID で保存を確かめる（無ければ送り直す）
+    const unsure = () => {
+      if (!outboxed || savedMessage) return;
+      inflightIdsRef.current.delete(tempUserMessageId);
+      outboxRelease(roomId, tempUserMessageId);
+      checkOutboxRef.current(1500);
+    };
     await queryClient.cancelQueries({ queryKey });
     const currentReplaceId = replaceMessageIdRef.current;
     if (currentReplaceId) {
@@ -1341,6 +1362,7 @@ function ChatInput({
         {
           onUserMessage: (msg) => {
             savedMessage = msg;   // この送信の保存の印（新しい送信に追い越されていても、この答えの決着には使う）
+            outboxDrop(roomId, tempUserMessageId);
             if (streamRequestRef.current !== requestId) { reportSaved(msg); return; }
             serverMessageIdRef.current = msg.id;
             optimisticMessageIdRef.current = msg.id;
@@ -1401,6 +1423,7 @@ function ChatInput({
           },
           onFollowupQueued: () => {
             startSeen = true;   // 追い連絡を走っているターンに入れた＝ダンの処理に渡った
+            outboxDrop(roomId, tempUserMessageId);
           },
           onProcessStep: (_step: ProcessStep) => {
             if (streamRequestRef.current !== requestId) return;
@@ -1413,6 +1436,7 @@ function ChatInput({
           },
           onInterrupted: () => {
             void settleAnswer();   // 保存の echo の前に切れたなら、送信 ID で確かめてから決める
+            unsure();
             if (streamRequestRef.current !== requestId) return;
             // 返事の通信が切れた。ダンの作業はサーバーで続くので「作業中」の表示は保つが、手元の印
             // （localActive）は立てない。立てると、作業が終わっても誰も外さず停止ボタンのまま残った（2026-10-14）。
@@ -1432,6 +1456,7 @@ function ChatInput({
           },
           onComplete: () => {
             void settleAnswer();   // done だけで echo が無い・取り消し（abort）も、ここで決着させる
+            unsure();
             if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(false);
             setInterrupted(projectId, false);
@@ -1490,8 +1515,10 @@ function ChatInput({
               queryClient.setQueryData<{ messages: MessageResponse[] }>(['project-messages', roomId], (old) =>
                 old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
               );
-              setMessage((cur) => (cur.trim() ? cur : content));
+              setMessage((cur) => (cur.trim() ? (cur.includes(content) ? cur : `${cur}\n\n${content}`) : content));
             }
+            // サーバーがはっきり断った（入力欄に戻した）ので、控えからは外す（自動では送り直さない）
+            outboxDrop(roomId, tempUserMessageId);
             toast.error(error || 'メッセージの送信に失敗しました');
           },
           onProjectCreated: (createdProjectId) => {
@@ -1508,6 +1535,7 @@ function ChatInput({
     } catch (error) {
       // 取り消し（abort）か、通信そのものの失敗。部品の答えは、保存の echo が無ければ送信 ID で確かめてから決める
       void settleAnswer();
+      unsure();
       if (streamRequestRef.current !== requestId) return;
       syncActiveStatus(false);
       setInterrupted(projectId, false);
@@ -1524,6 +1552,8 @@ function ChatInput({
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
       }
+      inflightIdsRef.current.delete(tempUserMessageId);
+      if (outboxed && !savedMessage && outboxHas(roomId, tempUserMessageId)) unsure();
       // どの終わり方でも、部品の答えは必ず一度決着させ（新しい送信に追い越された時も）、それから通信の終わりを知らせる
       // （部品は、保存済みでダンの処理が始まった印を見ていなければ、開始の状態をサーバーに確かめる）
       if (extra?.answerTo) {
@@ -1568,6 +1598,7 @@ function ChatInput({
     imageUrls: string[] = [],
     fileUrls: { name: string; url: string }[] = [],
     replyToMsg?: MessageResponse | null,
+    resendId?: string,
   ) => {
     if (!content.trim() && imageUrls.length === 0 && fileUrls.length === 0) return;
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
@@ -1576,11 +1607,21 @@ function ChatInput({
     const optimisticContent = mediaParts ? (content ? `${mediaParts}\n\n${content}` : mediaParts) : content;
 
     // 本物のID（サーバーはこれを行IDにする）: エコーでもフィードでも同じ行が置き換わるだけ。キャンセルもこのIDで分かる。
-    const tempId =
+    // 送信の控えから送り直す時は、最初に送った時と同じ ID（サーバーは同じ ID を二度保存しない）
+    const tempId = resendId || (
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
     const queryKey = ['project-messages', roomId];
+    outboxPut({ id: tempId, room: roomId, content, ...(imageUrls.length ? { image_urls: imageUrls } : {}), ...(fileUrls.length ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}) });
+    inflightIdsRef.current.add(tempId);
+    let echoed = false;
+    const unsure = () => {
+      if (echoed) return;
+      inflightIdsRef.current.delete(tempId);
+      outboxRelease(roomId, tempId);
+      checkOutboxRef.current(1500);
+    };
     const optimistic: MessageResponse = {
       id: tempId,
       room_id: roomId,
@@ -1601,9 +1642,9 @@ function ChatInput({
         },
       } : {}),
     };
-    queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
-      messages: [optimistic, ...(old?.messages || [])],
-    }));
+    queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => (
+      old?.messages?.some((m) => m.id === tempId) ? old : { messages: [optimistic, ...(old?.messages || [])] }
+    ));
 
     const controller = new AbortController();
     try {
@@ -1611,6 +1652,8 @@ function ChatInput({
         { message: content, session_id: roomId, client_message_id: tempId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}) },
         {
           onUserMessage: (msg) => {
+            echoed = true;
+            outboxDrop(roomId, tempId);
             // 届いた: サーバーの行（届いた時刻）に置き換える。フィードが先に入れていたら重ねない。
             queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => {
               const rows = old?.messages || [];
@@ -1619,22 +1662,31 @@ function ChatInput({
                 : rows.map((m: MessageResponse) => (m.id === tempId ? { ...msg } : m)) };
             });
           },
-          onFollowupQueued: () => {},
+          onFollowupQueued: () => { echoed = true; outboxDrop(roomId, tempId); },
           // 本リクエストは即終了する。メインストリームのスピナー等には触れない。
-          onComplete: () => {},
+          onComplete: () => { unsure(); },
+          // 届く前に通信が切れた（画面の入れ替え・Wi-Fi）: 以前はここに何も無く、文は「送信中」のまま2分後に消えていた
+          onInterrupted: () => { unsure(); },
           onError: (error) => {
             queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
               messages: (old?.messages || []).filter((m: MessageResponse) => m.id !== tempId),
             }));
+            // 断られた文は消さずに入力欄へ戻す（以前は消えていた）
+            if (!echoed) setMessage((cur) => (cur.trim() ? (cur.includes(content) ? cur : `${cur}\n\n${content}`) : content));
+            outboxDrop(roomId, tempId);
             toast.error(error || '追い連絡の送信に失敗しました');
           },
         },
         controller.signal,
       );
     } catch (error) {
+      unsure();
       if (error instanceof Error && error.name !== 'AbortError') {
         toast.error('追い連絡の送信中に問題が発生しました');
       }
+    } finally {
+      inflightIdsRef.current.delete(tempId);
+      if (!echoed && outboxHas(roomId, tempId)) unsure();
     }
   }, [queryClient, roomId, user?.id, user?.display_name]);
 
@@ -1721,6 +1773,121 @@ function ChatInput({
     await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo, refs);
   }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, projectId, replyTo, onClearReply, timelineRefs, pendingComments, clearPendingComments, previewArtifactForComments, screenItems, takeScreenItems, screenSending]);
 
+  // ── 送信の控え（lib/chat-outbox.ts）の確かめと送り直し ──
+  // 開いた時・つながり直した時・前に戻った時・届いたか分からない通信が終わった時に、控えに残っている文を
+  // 同じ送信 ID でサーバーに聞く。保存済みなら控えを消して保存行に置き換え、保存されていなければ同じ ID で送り直す
+  // （ほかのタブが預かっている文・この画面が今送っている文は送らない）。古すぎる文は送らずに入力欄へ戻す。
+  const checkingRef = useRef(false);
+  const checkTimerRef = useRef<number | null>(null);
+  const checkOutbox = useCallback(async () => {
+    if (checkingRef.current) return;
+    const list = outboxList(roomId).filter((e) => !inflightIdsRef.current.has(e.id));
+    if (!list.length) return;
+    checkingRef.current = true;
+    const queryKey = ['project-messages', roomId];
+    const bubbleOf = (e: OutboxEntry, unsent: boolean): MessageResponse => {
+      const media = [
+        ...(e.image_urls || []).map((u) => `[添付画像: ${u}]`),
+        ...(e.file_urls || []).map((f) => `[添付ファイル: ${f.name} (${f.url})]`),
+      ].join('\n');
+      return {
+        id: e.id, room_id: roomId, sender_id: user?.id || '', sender_name: user?.display_name || 'You', sender_type: 'human',
+        content: media ? (e.content ? `${media}\n\n${e.content}` : media) : e.content,
+        created_at: e.created_at, pending: true, ...(unsent ? { unsent: true } : {}),
+      };
+    };
+    const showBubble = (e: OutboxEntry, unsent: boolean) => queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) => {
+      const rows = old?.messages || [];
+      const cur = rows.find((m) => m.id === e.id);
+      if (cur && !cur.pending) return old;   // もう保存行が出ている
+      if (cur && !!cur.unsent === unsent) return old;
+      const b = cur ? { ...cur, unsent } : bubbleOf(e, unsent);
+      return { messages: cur ? rows.map((m) => (m.id === e.id ? b : m)) : [b, ...rows] };
+    });
+    try {
+      for (const e of list) {
+        if (inflightIdsRef.current.has(e.id)) continue;
+        let r: Awaited<ReturnType<typeof api.rooms.messageSaved>> | null = null;
+        try { r = await api.rooms.messageSaved(roomId, e.id); } catch { r = null; }
+        if (r && r.saved === true) {
+          outboxDrop(roomId, e.id);
+          const row = r.message as MessageResponse | undefined;
+          if (row) {
+            queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) => {
+              const rows = old?.messages || [];
+              return { messages: rows.some((m) => m.id === row.id) ? rows.map((m) => (m.id === row.id ? row : m)) : [row, ...rows] };
+            });
+          }
+          continue;
+        }
+        const age = Date.now() - Date.parse(e.created_at);
+        if (!r || r.saved !== false) {
+          // 聞けなかった（つながっていない）: 文は「まだ届いていない」として出したまま、次の確かめで聞き直す
+          showBubble(e, age > 8000);
+          continue;
+        }
+        if (age > AUTO_RESEND_MS || (e.tries || 0) >= 6) {
+          // 何十分も後に勝手に届くと本人の今の話とずれるので、送らずに入力欄へ戻す
+          outboxDrop(roomId, e.id);
+          queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) =>
+            old ? { messages: old.messages.filter((m) => m.id !== e.id) } : old);
+          setMessage((cur) => (cur.trim() ? (cur.includes(e.content) ? cur : `${cur}\n\n${e.content}`) : e.content));
+          toast.message('届かなかった文を入力欄に戻しました');
+          continue;
+        }
+        const claimed = outboxClaim(roomId, e.id);
+        if (!claimed) { showBubble(e, true); continue; }
+        showBubble(e, true);
+        if (abortControllerRef.current) {
+          // ダンの返事を受けている最中: 追い連絡として同じ ID で送る（返事の通信は切らない）
+          await sendFollowup(e.content, e.image_urls || [], e.file_urls || [], null, e.id);
+        } else {
+          serverMessageIdRef.current = null;
+          aiRespondedRef.current = false;
+          pendingMessageRef.current = { text: e.content, files: [], replyTo: null };
+          await sendMessageCore(e.content, e.image_urls || [], e.file_urls || [], undefined, e.timeline_refs || [], { clientMessageId: e.id });
+        }
+      }
+    } finally {
+      checkingRef.current = false;
+    }
+  }, [queryClient, roomId, sendFollowup, sendMessageCore, user?.display_name, user?.id]);
+
+  useEffect(() => {
+    checkOutboxRef.current = (delayMs = 0) => {
+      if (checkTimerRef.current) window.clearTimeout(checkTimerRef.current);
+      checkTimerRef.current = window.setTimeout(() => { checkTimerRef.current = null; void checkOutbox(); }, delayMs);
+    };
+    checkOutboxRef.current(300);
+    const onOnline = () => checkOutboxRef.current(300);
+    const onVisible = () => { if (document.visibilityState === 'visible') checkOutboxRef.current(300); };
+    window.addEventListener('online', onOnline);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      document.removeEventListener('visibilitychange', onVisible);
+      if (checkTimerRef.current) window.clearTimeout(checkTimerRef.current);
+      checkTimerRef.current = null;
+      checkOutboxRef.current = () => {};
+    };
+  }, [checkOutbox]);
+
+  // 控えが残っている間は、数秒ごとに確かめ直す
+  const outboxTick = useSyncExternalStore(subscribeOutbox, outboxVersion, () => 0);
+  const outboxCount = useMemo(() => outboxList(roomId).length, [roomId, outboxTick]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!outboxCount) return;
+    const t = window.setInterval(() => checkOutboxRef.current(0), 6000);
+    return () => window.clearInterval(t);
+  }, [outboxCount]);
+
+  // 入力中・送信中・ダンの作業中は、画面の入れ替えで勝手に読み直させない（components/layout/new-build-notice.tsx・lib/live-version/guard.ts）
+  useEffect(() => {
+    const key = `chat:${roomId}`;
+    setChatBusy(key, isBusy || !!message.trim());
+    return () => setChatBusy(key, false);
+  }, [isBusy, message, roomId]);
+
   // 停止: 定義は docs/current/chat-timeline-definition.md。止めて、ダンがまだ読んでいない自分のメッセージは
   // サーバーが取り消して返す。画面はその答えどおりに消して入力欄へ戻す（推測では消さない）。
   const handleCancel = useCallback(async () => {
@@ -1744,6 +1911,8 @@ function ChatInput({
     serverMessageIdRef.current = null;
     optimisticMessageIdRef.current = null;
     replaceMessageIdRef.current = null;
+    // 止めた送信は送り直さない（取り消された文はサーバーの答えどおり入力欄へ戻る）
+    if (unsentId) outboxDrop(roomId, unsentId);
 
     let withdrawn: Array<{ id: string; content: string | null }> = [];
     try {
@@ -1758,6 +1927,7 @@ function ChatInput({
     }
     if (withdrawn.length > 0) {
       const ids = new Set(withdrawn.map((w) => w.id));
+      ids.forEach((id) => outboxDrop(roomId, id));
       const texts = withdrawn
         .map((w) => (w.id === unsentId ? pending?.text ?? w.content : w.content) ?? '')
         .filter((t) => t.trim());
@@ -2320,6 +2490,7 @@ function mergeFreshMessages(
       && prev.content === m.content
       && prev.pendingFollowup === m.pendingFollowup
       && prev.reply_to_id === m.reply_to_id
+      && !prev.pending && !prev.unsent
       ? prev
       : m;
   });
@@ -2338,7 +2509,8 @@ function mergeFreshMessages(
     // 送信中（まだサーバーに無い）: 送ってから2分までは待つ。それを過ぎてもサーバーに無いのは、届かなかった送信
     // （2026-10-14: データベースが止まっていた間に送った2通が、画面の一番下に「送信中」のまま残り続け、
     // ブラウザに保存されるので読み直しても消えなかった）。比べるのは同じ端末の時計どうし。
-    if (m.pending) return Date.now() - new Date(m.created_at).getTime() < 120_000;
+    // 送信の控え（lib/chat-outbox.ts）に残っている文は、届くまで（送り直している間も）消さない。
+    if (m.pending) return Date.now() - new Date(m.created_at).getTime() < 120_000 || outboxHas(m.room_id, m.id);
     const t = new Date(m.created_at).getTime();
     return t >= cutoff || t < oldestFresh;
   });

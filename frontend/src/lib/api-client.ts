@@ -109,6 +109,8 @@ export interface MessageResponse {
   // 送った瞬間の、まだサーバーに届いていない自分のメッセージ（届けば同じ id の保存行に置き換わる）。
   // 並びは一番下（端末の時計は使わない。docs/current/chat-timeline-definition.md）。
   pending?: boolean;
+  // 送った文がまだサーバーに届いていないと分かった（送信の控え lib/chat-outbox.ts が、同じ ID で送り直している間）。
+  unsent?: boolean;
 }
 
 export interface RoomOpenResponse {
