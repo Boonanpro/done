@@ -18,8 +18,8 @@ watches:
   - frontend/src/components/script-listen/listen-screen.tsx
   - frontend/src/components/script-listen/listen-chat.tsx
   - app/services/script_rooms.py
-fingerprint: 24db096dc8b67196
-described: 77403cd24fca2de2
+fingerprint: bdf9a57d67bfa012
+described: 182c3edf5cd82652
 last_review: "2026-11-21 説明は変えない: main の開く速さの直しを取り込んだだけ。説明は今回のサムネの会話の分で書き直し済み"
 ---
 # 台本を聞く画面の「ダンと台本」
@@ -56,5 +56,5 @@ last_review: "2026-11-21 説明は変えない: main の開く速さの直しを
 - ラベル: 「書き方」、「画像を入れる」、「声」、「ドキュメント」、「ダンの作業の様子を見る」、「前の文」、「次の文」、「ダンと台本」、「閉じる」、「ダンが直している所へ」、「コメントを追加」
 - 試験の印: 「script-editor」、「chat-toggle」、「compare-toggle」、「image-add」、「play-para」、「dan-bar」、「ref-panel」、「listen-thumb」、「dan-glow」
 
-<!-- place_map:files {"app/services/script_rooms.py": "a1b6c7f5f6", "frontend/src/components/script-listen/listen-screen.tsx": "9bfd0c1912"} -->
+<!-- place_map:files {"app/services/script_rooms.py": "8be46f2ffc", "frontend/src/components/script-listen/listen-screen.tsx": "9bfd0c1912"} -->
 <!-- place_map:auto:end -->
