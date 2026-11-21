@@ -691,6 +691,15 @@ export function ProductionWorkspace({
   };
 
   // 部品で持つサムネ（背景・人物・文字・矢印が別々）。同じ制作の窓の中で、右の「ダンと制作」と一緒に開く
+  // 動画にサムネを1枚足して開く（もうあればその1枚を開く）
+  const createThumbFor = async (video: ProductionContent) => {
+    const res = await fetch(`/api/v1/production-assets/contents/${encodeURIComponent(video.id)}/thumbnails?room_id=${encodeURIComponent(roomId)}`, { method: 'POST', credentials: 'include' });
+    if (!res.ok) { toast.error('サムネを作れませんでした'); return; }
+    const made = (await res.json()) as ProductionContent;
+    setContents((prev) => (prev.some((c) => c.id === made.id) ? prev : [...prev, made]));
+    openContent(made);
+  };
+
   if (selectedContent && isThumbContent(selectedContent)) {
     // 動画とひと組のサムネは、上の「動画 / サムネ」の切り替えから開く。戻ると動画のエディター
     const video = selectedContent.video_id ? contents.find((c) => c.id === selectedContent.video_id) || null : null;
@@ -757,7 +766,7 @@ export function ProductionWorkspace({
   const hasTimeline = !!selectedContent && !!(selectedContent.timeline as { sequence?: unknown } | undefined)?.sequence;
   if (selectedContent && (primaryVideo || hasTimeline)) {
     const mediaUrl = primaryVideo ? assetMediaUrl(primaryVideo) : undefined;
-    return (
+    const videoEditor = (
       <VideoReviewEditor
         key={primaryVideo ? primaryVideo.id : `content-${selectedContent.id}`}
         embedded
@@ -781,13 +790,7 @@ export function ProductionWorkspace({
             thumb={(thumbsByVideo.get(selectedContent.id) || [])[0] || null}
             compact={compact}
             onOpen={openContent}
-            onCreate={async () => {
-              const res = await fetch(`/api/v1/production-assets/contents/${encodeURIComponent(selectedContent.id)}/thumbnails?room_id=${encodeURIComponent(roomId)}`, { method: 'POST', credentials: 'include' });
-              if (!res.ok) { toast.error('サムネを作れませんでした'); return; }
-              const made = (await res.json()) as ProductionContent;
-              setContents((prev) => (prev.some((c) => c.id === made.id) ? prev : [...prev, made]));
-              openContent(made);
-            }}
+            onCreate={() => createThumbFor(selectedContent)}
           />
           <div ref={assetsWrapRef} className={compact ? '' : 'relative'}>
             <button
@@ -886,6 +889,15 @@ export function ProductionWorkspace({
         onGenerateClip={generateFromAnnotation}
         onExecute={createProductionJob}
       />
+    );
+    // スマホは上の道具がメニューに畳まれるので、「動画 / サムネ」の切り替えを上に出す
+    if (!compact) return videoEditor;
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <WorkSections video={selectedContent} thumbs={thumbsByVideo.get(selectedContent.id) || []} current={selectedContent.id}
+          compact onOpen={openContent} onCreate={() => createThumbFor(selectedContent)} />
+        <div className="min-h-0 flex-1">{videoEditor}</div>
+      </div>
     );
   }
 
@@ -1231,20 +1243,27 @@ function AssetThumb({ asset, fallback }: { asset: ProductionAsset; fallback: Rea
 }
 
 // 動画とひと組の切り替え（動画 / サムネ1 / サムネ2…）。サムネのページの上に出す
-function WorkSections({ video, thumbs, current, compact, onOpen }: {
+function WorkSections({ video, thumbs, current, compact, onOpen, onCreate }: {
   video: ProductionContent; thumbs: ProductionContent[]; current: string; compact: boolean;
-  onOpen: (content: ProductionContent) => void;
+  onOpen: (content: ProductionContent) => void; onCreate?: () => Promise<void>;
 }) {
+  const [busy, setBusy] = useState(false);
   const tab = (active: boolean) =>
     `flex shrink-0 items-center gap-1 rounded-md px-2.5 ${compact ? 'h-9 text-sm' : 'h-7 text-xs'} font-medium ${active ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`;
   return (
     <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-muted/30 px-2 py-1" data-work-sections>
-      <button type="button" className={tab(false)} onClick={() => onOpen(video)} data-section-video><Film className="h-3.5 w-3.5" />動画</button>
+      <button type="button" className={tab(video.id === current)} onClick={() => onOpen(video)} data-section-video><Film className="h-3.5 w-3.5" />動画</button>
       {thumbs.map((t, k) => (
         <button key={t.id} type="button" className={tab(t.id === current)} onClick={() => onOpen(t)} data-section-thumb={t.id}>
           <ImageIcon className="h-3.5 w-3.5" />{thumbs.length > 1 ? `サムネ${k + 1}` : 'サムネ'}
         </button>
       ))}
+      {!thumbs.length && onCreate ? (
+        <button type="button" className={tab(false)} disabled={busy} data-section-thumb-create
+          onClick={async () => { setBusy(true); try { await onCreate(); } finally { setBusy(false); } }}>
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}サムネを作る
+        </button>
+      ) : null}
     </div>
   );
 }
