@@ -10,6 +10,7 @@ import { ArrowLeft, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Sav
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
+import { SideResizeHandle, useSideWidth } from '@/components/ui/side-resize';
 import { ApiError } from '@/lib/api-client';
 import { promptsApi, type PromptItem, type PromptSummary, type PromptVersion } from '@/lib/prompts-api';
 import { cn } from '@/lib/utils';
@@ -503,20 +504,8 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
     draftDiff,
   }), [node, shown, sel, draftDiff]);
   const bump = useCallback(() => setPulse(n => n + 1), []);
-  // PC の会話の列は、この画面をスクロールさせている枠の高さに合わせる（開発室の中では上に切り替えの帯があり、画面の高さより低い）
-  const talkBox = useRef<HTMLElement>(null);
-  const [frameH, setFrameH] = useState(0);
-  useLayoutEffect(() => {
-    let el = talkBox.current?.parentElement || null;
-    while (el && !/(auto|scroll)/.test(getComputedStyle(el).overflowY)) el = el.parentElement;
-    const frame = el;
-    const fit = () => setFrameH(frame ? frame.clientHeight : window.innerHeight);
-    fit();
-    const ro = frame ? new ResizeObserver(fit) : null;
-    if (frame) ro!.observe(frame);
-    window.addEventListener('resize', fit);
-    return () => { ro?.disconnect(); window.removeEventListener('resize', fit); };
-  }, []);
+  // PC の会話の欄は右に常にいる（スクロールしても動かない）。左の表示との境目を引いて幅を変える（2026-11-21 本人）
+  const [talkRef, side] = useSideWidth('dan-prompts-chat-width', 400);
   // スマホの「ダンと話す」は、全文の下に貼り付く保存の帯の上に出す
   const lift = draftDiff ? 'high' : shown && !shown.readonly ? 'mid' : 'low';
   useEffect(() => {
@@ -566,7 +555,10 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   );
 
   return (
-    <div className={cn('space-y-4', embedded ? 'p-3 sm:p-4' : '')}>
+    <div className="lg:flex lg:h-full lg:min-h-0">
+    {/* 左: 図・一覧・全文。PC はここだけがスクロールする */}
+    <div className={cn('space-y-4 lg:min-w-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain', embedded ? 'p-3 sm:p-4' : 'px-3 py-4 sm:px-6')}>
+      <div className="mx-auto max-w-[1100px] space-y-4">
       <header>
         <h1 className="text-xl font-bold">ダンを動かしている指示文</h1>
         <p className="text-sm text-stone-600">上から下へ、みきさんの頼みが流れる順に並んでいます。箱を押すと、その箱が読む指示文が出ます。</p>
@@ -578,7 +570,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
       ) : null}
       <Diagram counts={counts} active={node?.id || ''} onPick={p => onGo({ place: p })} />
 
-      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)] xl:grid-cols-[minmax(0,300px)_minmax(0,1fr)_minmax(0,380px)]">
+      <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]">
         <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block')}>
           {node ? (
             <div className="flex items-start gap-3">
@@ -628,24 +620,25 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
             <p className="text-sm text-stone-500">左の一覧から文を選ぶと、ここに全文がそのまま出ます。</p>
           )}
         </main>
-        {/* ダンとの会話。PC は全文の横の列（スクロールしても見えたまま）、スマホは下から出す。中身は1つだけ置く（会話の線を2本にしない） */}
-        <section ref={talkBox} aria-label="ダンと話す" style={{ ['--talk-h' as string]: frameH ? `${frameH - 16}px` : undefined }}
-          className={cn(
-            'z-50 flex-col overflow-hidden bg-white',
-            talkOpen ? 'flex' : 'hidden',
-            'fixed inset-x-0 bottom-0 h-[72dvh] rounded-t-2xl border-t border-stone-300 shadow-[0_-8px_30px_rgba(0,0,0,0.18)]',
-            'lg:sticky lg:inset-auto lg:top-2 lg:flex lg:h-[var(--talk-h,calc(100dvh-1rem))] lg:max-h-[900px] lg:rounded-xl lg:border lg:border-stone-200 lg:shadow-none',
-          )}>
-          <PromptsChat ctx={talkCtx} onPulse={bump} onBusy={setTalkBusy} onClearSelection={() => setPicked(v => ({ ...v, sel: null }))}
-            header={(
-              <div className="flex items-center gap-2 border-b border-stone-200 px-3 py-2">
-                <span className="flex-1 text-sm font-bold text-stone-800">ダンと話して直す</span>
-                {talkBusy ? <span className="text-[11px] text-emerald-700">ダンが作業中</span> : null}
-                <button type="button" onClick={() => setTalkOpen(false)} aria-label="会話を閉じる" className="rounded p-1 text-stone-500 hover:bg-stone-100 lg:hidden"><X className="h-5 w-5" /></button>
-              </div>
-            )} />
-        </section>
       </div>
+      </div>
+    </div>
+    {/* 右: ダンとの会話。PC は右に常にいて、境目を引いて幅を変える。スマホは下から出す。中身は1つだけ置く（会話の線を2本にしない） */}
+    <section ref={talkRef} aria-label="ダンと話す" style={side.style}
+      className={cn(
+        'z-50 flex-col overflow-hidden bg-white',
+        talkOpen ? 'flex' : 'hidden',
+        'fixed inset-x-0 bottom-0 h-[72dvh] rounded-t-2xl border-t border-stone-300 shadow-[0_-8px_30px_rgba(0,0,0,0.18)]',
+        'lg:relative lg:inset-auto lg:z-auto lg:flex lg:h-full lg:w-[var(--side-w)] lg:shrink-0 lg:overflow-visible lg:rounded-none lg:border-l lg:border-t-0 lg:border-stone-200 lg:shadow-none',
+      )}>
+      <SideResizeHandle side={side} className="hidden lg:block" />
+      <PromptsChat ctx={talkCtx} onPulse={bump} onBusy={setTalkBusy} onClearSelection={() => setPicked(v => ({ ...v, sel: null }))}
+        header={(
+          <div className="flex items-center justify-end border-b border-stone-200 px-2 py-1 lg:hidden">
+            <button type="button" onClick={() => setTalkOpen(false)} aria-label="会話を閉じる" className="rounded p-1 text-stone-500 hover:bg-stone-100"><X className="h-5 w-5" /></button>
+          </div>
+        )} />
+    </section>
       {!talkOpen ? <div className="lg:hidden"><TalkButton onOpen={() => setTalkOpen(true)} lift={lift} busy={talkBusy} /></div> : null}
     </div>
   );

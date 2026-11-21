@@ -29,6 +29,7 @@ import { DanLiveContext, isLive } from './listen-dan';
 import { RefsPanel, type SectionHead } from './listen-refs';
 import { ListenShare } from './listen-share';
 import { ListenChat, ListenThumb, type ThumbContext, type ThumbTarget } from './listen-side';
+import { SideResizeHandle, useSideWidth } from '@/components/ui/side-resize';
 import { mark as perfMark, note as perfNote, startReport } from './listen-perf';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
@@ -417,6 +418,8 @@ export function ListenScreen({ docId }: { docId: string }) {
   const [phoneChat, setPhoneChat] = useState(false);
   const [thumb, setThumb] = useState<ThumbTarget | null>(null);
   const chatSide = screenWide && chatOpen;
+  // 右の会話の欄の幅: 境目を引いて変える（台本もサムネも同じ欄。2026-11-21 本人）
+  const [chatRef, chatW] = useSideWidth('dan-script-listen-chat-width', 400);
 
   const says = useMemo(() => (doc?.units.filter(u => u.kind === 'say') as SayUnit[]) || [], [doc]);
   const sayIndex = useMemo(() => new Map(says.map((u, i) => [u.n, i])), [says]);
@@ -2084,7 +2087,8 @@ export function ListenScreen({ docId }: { docId: string }) {
       )}
       </div>
       {chatSide && (
-        <aside aria-label="ダンと台本" className="w-[400px] shrink-0 border-l border-stone-200 bg-background text-foreground">
+        <aside ref={chatRef} aria-label="ダンと台本" style={chatW.style} className="relative w-[var(--side-w)] shrink-0 border-l border-stone-200 bg-background text-foreground">
+          <SideResizeHandle side={chatW} />
           <ListenChat docId={docId} thumbOpen={!!thumb} />
         </aside>
       )}

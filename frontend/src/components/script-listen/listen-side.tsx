@@ -58,7 +58,7 @@ function chatProject(docId: string): Promise<string> {
   return p;
 }
 
-export function ListenChat({ docId, lead, thumbOpen }: { docId: string; lead?: ReactNode; thumbOpen?: boolean }) {
+export function ListenChat({ docId, lead }: { docId: string; lead?: ReactNode; thumbOpen?: boolean }) {
   useBearerFetch();
   useRoomFeed(true);   // ダンの返事と作業中の表示をすぐ届ける
   const [projectId, setProjectId] = useState<string | null>(roomCache.get(docId) || null);
@@ -74,10 +74,7 @@ export function ListenChat({ docId, lead, thumbOpen }: { docId: string; lead?: R
   return (
     <div data-testid="script-chat" className="theme-light flex h-full min-h-0 flex-col bg-background text-foreground">
       {projectId ? (
-        <ProjectChatPanel key={projectId} projectId={projectId} editorChat editorHeaderLead={lead}
-          emptyHint={thumbOpen
-            ? 'このサムネのことを、ここに書くか上の「話す」で話してください。サムネの部品を押すかペンで書き込むと、この欄に添えられます。開いているサムネと選んだ部品は、ダンにも見えています。'
-            : 'この台本のことを、ここに書くか上の「話す」で話してください。カーソルのある文や選んだ文字は、ダンにも見えています。'} />
+        <ProjectChatPanel key={projectId} projectId={projectId} editorChat editorHeaderLead={lead} />
       ) : (
         <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
           {failed ? `ダンとの会話を開けませんでした（${failed}）` : (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />ダンを呼んでいます…</>)}

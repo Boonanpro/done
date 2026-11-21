@@ -17,7 +17,6 @@ import {
   FileText,
   FolderKanban,
   Loader2,
-  MessageSquare,
   MessageSquarePlus,
   Mic,
   Paperclip,
@@ -3570,11 +3569,10 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
         ) : !hasAnyContent && !isActiveExecution ? (
+          // 会話がまだ無い時は何も書かない（使い方の案内は置かない。2026-11-21 本人「チャットを作る時にその使い方を指定するような
+          // 無駄なメッセージを書かない」）。emptyHint は、案内ではない事実（例: 何かが読めなかった）を出す時だけ渡す
           <div className="flex h-full flex-col items-center justify-center p-6">
-            <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/20" />
-            <p className="text-base text-muted-foreground md:text-[17px]">
-              {emptyHint || (editorChat ? 'どんな動画を作りたいか、ここに書くか、上の「話す」で話してください。' : 'メッセージを送信して開始してください。')}
-            </p>
+            {emptyHint ? <p className="text-base text-muted-foreground md:text-[17px]">{emptyHint}</p> : null}
           </div>
         ) : (
           <ShapeAnswerProvider messages={messages} ownerId={ownerId} roomId={initialRoomId} submit={answerShapeInRoom} recheck={recheckAnswer}>
