@@ -22,7 +22,13 @@
   python scripts/thumb.py undo    <部屋> <作品>                      1つ前の形へ戻す
   python scripts/thumb.py refs    <部屋> <作品> add <絵のURL> "題" "チャンネル" | clear
         「一覧で見る」で横に並べるほかのサムネ（参考・競合・同じチャンネルの過去の動画）
-  python scripts/thumb.py create  <部屋> "題" <doc.json>             新しいサムネの作品を作る
+  python scripts/thumb.py list    <部屋> <動画の作品>                  その動画のサムネ（1枚目が表のサムネ）
+  python scripts/thumb.py create  <部屋> "題" <doc.json> --video <動画の作品>
+        別の案を頼まれた時だけ、同じ動画のサムネを1枚足す。直す時は今のサムネを set/repaint で直し、作り直さない
+        （2026-11-21 本人「今あるサムネを直しているだけなのに、なんでサムネが増えていくんだ」）。
+        試しの案を比べる時も新しい作品は作らず、render で PNG にして見せる。サムネは必ず動画とひと組
+  python scripts/thumb.py attach  <部屋> <サムネ> <動画の作品> [何枚目(0から)]   動画につなぐ
+  python scripts/thumb.py archive <部屋> <サムネ>                      要らなくなったサムネを消さずに隠す
 """
 from __future__ import annotations
 
@@ -90,9 +96,26 @@ def main() -> None:
         sys.exit(__doc__)
     cmd = a[0]
     if cmd == 'create':
-        room, title, path = a[1], a[2], a[3]
-        c = td.create(room, title, json.loads(Path(path).read_text(encoding='utf-8')))
+        if '--video' not in a:
+            sys.exit('サムネは動画とひと組で作る。--video <動画の作品> を付ける（直すだけなら今のサムネを set で直す）')
+        i = a.index('--video')
+        video = a[i + 1]
+        rest = a[:i] + a[i + 2:]
+        room, title, path = rest[1], rest[2], rest[3]
+        c = td.create(room, title, json.loads(Path(path).read_text(encoding='utf-8')), video_id=video)
         print(c['id'])
+        return
+    if cmd == 'list':
+        for k, c in enumerate(td.thumbnails_of(a[1], a[2])):
+            print(f"{k + 1}枚目 {c['id']} {c.get('title')}")
+        return
+    if cmd == 'attach':
+        c = td.attach(a[1], a[2], a[3], order=int(a[4]) if len(a) > 4 else None)
+        print(f"つなぎました {c['id']} → 動画 {c['video_id']}")
+        return
+    if cmd == 'archive':
+        td.archive(a[1], a[2])
+        print('隠しました（消してはいない）')
         return
     room, cid = a[1], a[2]
     doc = td.get(room, cid)

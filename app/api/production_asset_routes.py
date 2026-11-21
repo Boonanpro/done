@@ -90,6 +90,12 @@ class ProductionContent(BaseModel):
     outputs: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str
     updated_at: str
+    # サムネは動画とひと組（2026-11-21 本人「サムネだけというのは基本的にないし、動画だけというのも基本的に存在しない」）。
+    # サムネの作品は video_id にその動画の作品を持ち、一覧には出ず動画のエディターの「サムネ」から開く。
+    # archived は前に増えてしまった控えのサムネ（消さずに隠す）。script_doc は動画の台本（Google ドキュメントの ID）。
+    video_id: str | None = None
+    archived: bool = False
+    script_doc: str | None = None
 
 
 class CreateContentRequest(BaseModel):
@@ -7341,6 +7347,9 @@ async def delete_content(
     next_contents = [content for content in contents if content.get("id") != content_id]
     if len(next_contents) == len(contents):
         raise HTTPException(status_code=404, detail="Content not found")
+    for content in next_contents:   # 消した動画のサムネは、ひとり立ちで一覧に出てこないよう控えに回す（消さない）
+        if content.get("video_id") == content_id:
+            content["archived"] = True
     _write_contents(room_id, next_contents)
     from app.services.editor_conversation_lifecycle import purge
     purge(_room_dir(room_id), content_id)
@@ -9575,6 +9584,22 @@ def save_thumbnail_doc(content_id: str, data: ThumbnailSaveRequest, room_id: str
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"rev": doc["rev"]}
+
+
+@router.post("/contents/{content_id}/thumbnails")
+def create_video_thumbnail(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    """動画の作品にサムネを1枚足す（まだ無い時のエディターの「サムネを作る」）。もうあれば、その1枚目を返す
+    （2026-11-21 本人「今あるサムネを直しているだけなのに、なんでサムネが増えていくんだ」）。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    have = thumbnail_doc.thumbnails_of(room_id, content_id)
+    if have:
+        return have[0]
+    video = next((c for c in _read_contents(room_id) if str(c.get("id")) == str(content_id)), None)
+    if not video or thumbnail_doc.is_thumbnail(video):
+        raise HTTPException(status_code=404, detail="動画の作品が見つかりません")
+    doc = {"width": 1920, "height": 1080, "background": "#111111", "parts": [], "title": video.get("title") or ""}
+    return thumbnail_doc.create(room_id, "サムネ", doc, video_id=content_id)
 
 
 @router.post("/contents/{content_id}/thumbnail/export")

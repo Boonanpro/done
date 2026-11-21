@@ -153,11 +153,15 @@ def open_work(doc_id: str, object_id: str | None, order: int | None) -> dict[str
             'parts': [{'id': 'photo', 'type': 'image', 'name': 'サムネの絵（文字も絵の一部）', 'src': td.media_url(room, a['id']),
                        'asset_id': a['id'], 'x': 0, 'y': 0, 'w': 1920, 'h': h}],
             'title': doc.get('title', '')}
-    c = td.create(room, f"{doc.get('title', '台本')} サムネ{k + 1}", tdoc, [a['id']])
+    # サムネは動画とひと組で作る（2026-11-21 本人「サムネだけというのは基本的にない」）。台本の動画が無ければ空の動画の作品を作る
+    video = td.video_for_doc(room, doc_id, doc.get('title', '') or '台本の動画')
+    c = td.create(room, f"サムネ{k + 1}", tdoc, [a['id']], video_id=video)
+    td.attach(room, c['id'], video, order=k)
     with _lock:
         data = load(doc_id)
         held = _item(data, imgs[k]['object'], k)
         if held and _rev(room, held['content_id']) >= 0:     # 作っている間に別の作品がつながった時は、そちらを生かす
+            td.archive(room, c['id'])                        # 作りかけた方は一覧にも動画にも出さない
             return {'room_id': room, 'content_id': held['content_id']}
         items = [i for i in data.get('items') or [] if i.get('order') != k]
         items.append({'order': k, 'object': imgs[k]['object'], 'content_id': c['id'], 'synced_rev': 1})
@@ -201,6 +205,14 @@ def tie(doc_id: str, order: int, content_id: str, room: str | None = None, synce
         items = [i for i in data.get('items') or [] if i.get('order') != order]
         items.append({'order': order, 'object': imgs[order]['object'], 'content_id': content_id,
                       'synced_rev': _rev(room, content_id) if synced else 0})
+        try:    # つないだサムネを台本の動画とひと組にする（まだどの動画にもつながっていない時だけ）
+            from app.services import thumbnail_doc as td
+            from app.api import production_asset_routes as par
+            c = next((c for c in par._read_contents(room) if c.get('id') == content_id), None)
+            if c and not c.get('video_id'):
+                td.attach(room, content_id, td.video_for_doc(room, doc_id, doc.get('title', '')), order=order)
+        except Exception:
+            pass
         _save(doc_id, {'room': room, 'items': sorted(items, key=lambda i: i['order'])})
         return load(doc_id)
 

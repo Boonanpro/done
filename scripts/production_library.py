@@ -56,8 +56,13 @@ def cmd_list(room: str) -> None:
     assets = json.loads((d / "assets.json").read_text(encoding="utf-8")) if (d / "assets.json").exists() else []
     contents = td._read_contents_raw(room)
     print(f"部屋 {room}: 素材 {len(assets)} / 作品 {len(contents)}")
-    for c in contents[-20:]:
+    # サムネは動画とひと組なので、動画の下に並べる（控えに回したサムネは出さない）
+    from app.services.thumbnail_doc import is_thumbnail, thumbnails_of
+    videos = [c for c in contents if not (is_thumbnail(c) and (c.get('video_id') or c.get('archived')))]
+    for c in videos[-20:]:
         print(f"  作品 {c.get('id')}  {c.get('title')}  ({c.get('format')}, 素材{len(c.get('asset_ids') or [])})")
+        for k, t in enumerate(thumbnails_of(room, c['id'], contents) if not is_thumbnail(c) else []):
+            print(f"    サムネ{k + 1} {t.get('id')}  {t.get('title')}（直すのは scripts/thumb.py）")
     for a in assets[-40:]:
         dur = (a.get("metadata") or {}).get("duration")
         print(f"  素材 {a.get('id')}  {a.get('kind')}  {a.get('status')}  {a.get('filename')}"
