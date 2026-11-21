@@ -152,7 +152,7 @@ function Messages({ thread }: { thread: Thread }) {
           const look = WHO_LOOK[m.who] || WHO_LOOK.other;
           const name = WHO[m.who] || m.name || '他の人';
           return (
-            <div key={m.id} data-who={m.who} className="flex items-start gap-1.5">
+            <div key={m.id} data-msg-who={m.who} className="flex items-start gap-1.5">
               <span className={cn('mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white', look.dot)}>
                 {look.initial || name.slice(0, 1)}
               </span>
