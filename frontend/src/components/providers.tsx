@@ -4,6 +4,7 @@
 
 'use client';
 
+import { IsRestoringProvider } from '@tanstack/react-query';
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
 import { useMemo } from 'react';
 import { Toaster } from '@/components/ui/sonner';
@@ -30,8 +31,12 @@ export function Providers({ children }: ProvidersProps) {
         dehydrateOptions: { shouldDehydrateQuery: shouldPersistQuery },
       }}
     >
-      <PwaNotificationBadgeSync />
-      {children}
+      {/* 画面は端末の控えの読み戻しを待たずにネットから読み始める。控えが先に読めればそれを先に描き、新しい答えは控えで
+          上書きされない（hydrate は新しい時だけ）。本人の Chrome では読み戻しに5〜30秒かかり、その間チャットが空のままだった（2026-11-21） */}
+      <IsRestoringProvider value={false}>
+        <PwaNotificationBadgeSync />
+        {children}
+      </IsRestoringProvider>
       <Toaster
         position="bottom-right"
         toastOptions={{
