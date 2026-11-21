@@ -660,8 +660,14 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
             # Typing into Dan's suggestion: it becomes the owner's suggestion with the same words first, then the
             # change is made to it like to any owner suggestion (it stays a suggestion until 承認 / 却下).
             if _depth >= 2: raise ListenError(GONE_HERE, 409)
-            _adopt(doc_id, doc, shown, sugs, need.sids, range(para_from, para_to + 1))
-            out = replace(doc_id, para_from, para_to, old, new, old_bmask, new_bmask, mode, new_dmask, _depth + 1)
+            paras = range(para_from, para_to + 1)
+            # What the screen reads once those words are the owner's (struck words first, then added ones; words his
+            # suggestions both add and take out are gone), with the same change made to it.
+            order = adopt_order(shown, need.sids, para_from, para_to)
+            o2, ob2 = ''.join(toks[k]['ch'] for k in order), ''.join('1' if toks[k]['b'] else '0' for k in order)
+            n2, nb2 = carry_change(toks, order, new, new_bmask)
+            _adopt(doc_id, doc, shown, sugs, need.sids, paras)
+            out = replace(doc_id, para_from, para_to, o2, n2, ob2, nb2, mode, '', _depth + 1)
             return {**out, 'changed': True, 'reload': True}
         except M.Settle as need:
             # Dan's suggestion is being typed over: decide it in the doc the way the owner means it, then the rest.
@@ -990,6 +996,65 @@ def adopt_plan(shown, sids, now='', paras=None):
                 piece.update(_above(shown, pi, sids, paras))
             out.append(piece)
     return out, positions
+
+
+def adopt_order(shown, sids, para_from, para_to):
+    """The characters of paragraphs ``para_from``..``para_to`` (indices into their tokens) in the order the screen shows
+    them once Dan's suggestions ``sids`` there are the owner's (adopt_plan): in each taken stretch its struck words,
+    then its added words; words both added and taken out by his suggestions are gone."""
+    order, base = [], 0
+    for pi in range(para_from, para_to + 1):
+        if pi > para_from:
+            order.append(base); base += 1             # the paragraph end
+        got = _dan_stretches(shown, pi, sids)
+        if not got: continue
+        toks, chars, stretches = got
+        taken = {}
+        for i, j, t in stretches:
+            if t: taken[i] = j
+        k = 0
+        while k < len(toks):
+            if k not in taken:
+                order.append(base + k); k += 1; continue
+            j = taken[k]
+            dele = [x for x in range(k, j) if not _dan_ins(chars[x])]
+            ins = [x for x in range(k, j) if not _dan_del(chars[x])]
+            same = ''.join(toks[x]['ch'] for x in dele) == ''.join(toks[x]['ch'] for x in ins)
+            order += [base + x for x in (dele if same else dele + ins)]
+            k = j
+        base += len(toks)
+    return order
+
+
+def carry_change(old_toks, order, new, new_bmask):
+    """The owner's change (``old_toks`` -> ``new``) made to the same characters put in ``order`` (adopt_order).
+    Words typed next to characters that are gone go after the nearest one before them that is still there."""
+    ops = M.ops_for(old_toks, new)
+    gone = set()
+    at = {}                                           # old index -> [(text, bold)] typed just before it
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == 'equal': continue
+        gone |= set(range(i1, i2))
+        if j2 > j1: at.setdefault(i1, []).append((new[j1:j2], new_bmask[j1:j2].ljust(j2 - j1, '0')))
+    where = {k: n for n, k in enumerate(order)}
+    after = {}                                        # position in order -> typed text after it (-1 = at the start)
+    for i, typed in at.items():
+        p = next((where[q] for q in range(i - 1, -1, -1) if q in where), None)
+        if p is None:
+            nxt = next((where[q] for q in range(i, len(old_toks)) if q in where), None)
+            p = -1 if nxt is None else nxt - 1
+        after.setdefault(p, []).extend(typed)
+    bold = {}
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == 'equal':
+            for d in range(i2 - i1): bold[i1 + d] = new_bmask[j1 + d] if j1 + d < len(new_bmask) else '0'
+    text, bm = [], []
+    for t, b in after.get(-1, []): text.append(t); bm.append(b)
+    for n, k in enumerate(order):
+        if k not in gone:
+            text.append(old_toks[k]['ch']); bm.append(bold.get(k, '1' if old_toks[k]['b'] else '0'))
+        for t, b in after.get(n, []): text.append(t); bm.append(b)
+    return ''.join(text), ''.join(bm)
 
 
 def adopt_pieces(shown, sids, now='', paras=None):

@@ -296,6 +296,10 @@ def _signals(old_toks, ops):
             a, b = old_toks[i1 - 1], old_toks[i1] if i1 < len(old_toks) else None
             if b is not None and a['sid'] and a['sid'] == b['sid']:
                 put(a['sid'], kinds(a) == 'i')
+            elif b is not None and a['k'] == b['k'] == 'x' and a['sid'] and b['sid']:
+                # Between two of Dan's suggestions that sit together (one inside another, 11/21 「そして|2」): it is
+                # inside his words all the same.
+                put(a['sid'], kinds(a) == 'i'); put(b['sid'], kinds(b) == 'i')
     return sig
 
 
