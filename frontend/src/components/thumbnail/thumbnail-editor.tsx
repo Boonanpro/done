@@ -34,6 +34,8 @@ type Props = {
   backLabel?: string;
   /** 横の会話につなぐ（台本を聞く画面）。選んだ部品・ペンの書き込みをその会話の入力欄に添える */
   chatLink?: ChatLink | null;
+  /** 「読み直す」の前に、開くべき作品が変わっていないか確かめる（台本を聞く画面）。別の作品へ移ったら true */
+  onReload?: () => Promise<boolean>;
 };
 
 export type ChatLink = {
@@ -106,7 +108,7 @@ function partDetail(p: ThumbPart, b: PartBox): string {
   return `部品 ${p.id}（絵「${p.name || ''}」・${where}${p.rotation ? `・回転${p.rotation}` : ''}${hid}）`;
 }
 
-export function ThumbnailEditor({ roomId, contentId, title, compact = false, phoneChat, onBack, backLabel, chatLink }: Props) {
+export function ThumbnailEditor({ roomId, contentId, title, compact = false, phoneChat, onBack, backLabel, chatLink, onReload }: Props) {
   const [doc, setDoc] = useState<ThumbDoc | null>(null);
   const docRef = useRef<ThumbDoc | null>(null);
   docRef.current = doc;
@@ -279,12 +281,14 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     setReloading(true);
     try {
       await flush();
+      // つながりが別の作品に変わっていれば、その作品を開き直す（11/21 本人「何のための読み直すボタンだよ」）
+      if (onReload && (await onReload().catch(() => false))) return;
       setBust((n) => n + 1);
       await load(true);
     } finally {
       setReloading(false);
     }
-  }, [flush, load]);
+  }, [flush, load, onReload]);
   // 画面に出す形（絵の住所に読み直しの印を付けるだけ。保存する形は doc のまま）
   const viewDoc = useMemo(() => (doc && bust ? {
     ...doc,

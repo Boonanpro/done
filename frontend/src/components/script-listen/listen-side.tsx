@@ -8,7 +8,7 @@
 //   開く（「ダンと一緒にサムネ編集して仕上げたりしたい」）。閉じると、直した形が Google ドキュメントの絵にも入る
 //   （app/services/script_listen_thumbs.py）。
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -129,6 +129,26 @@ export function ListenThumb({ docId, target, title, compact, phoneChat, onClose,
     return () => { live = false; };
   }, [docId, target.object, target.order]);
 
+  // 開いている間に台本のサムネのつながりが別の作品へ変わったら（ダンがつなぎ直した等）、そちらを開き直す。
+  // 開いた時の作品を持ち続けると、「読み直す」を押しても閉じて開き直すまで古い作品のままだった（11/21）
+  const workRef = useRef(work);
+  workRef.current = work;
+  const follow = useCallback(async (): Promise<boolean> => {
+    const cur = workRef.current;
+    if (!cur) return false;
+    const { items } = await listenApi.thumbs(docId);
+    const it = (target.object ? items.find(i => i.object === target.object) : undefined)
+      ?? items.find(i => i.order === target.order);
+    if (!it || it.content_id === cur.content_id) return false;
+    setWork({ room_id: cur.room_id, content_id: it.content_id });
+    return true;
+  }, [docId, target.object, target.order]);
+  useEffect(() => {
+    if (!work) return;
+    const t = window.setInterval(() => { void follow().catch(() => {}); }, 5000);
+    return () => window.clearInterval(t);
+  }, [work, follow]);
+
   const close = () => {
     if (!work) { onClose(false); return; }
     onClose(true);
@@ -159,6 +179,7 @@ export function ListenThumb({ docId, target, title, compact, phoneChat, onClose,
       chatLink={chatLink}
       backLabel="台本に戻る"
       onBack={close}
+      onReload={follow}
     />
   );
 }
