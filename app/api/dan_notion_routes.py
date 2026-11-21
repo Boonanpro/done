@@ -75,6 +75,33 @@ def get_block(block_id: str, user: TokenData = Depends(get_current_user)):
     return block
 
 
+@router.get("/blocks/{block_id}/media")
+def get_block_media(block_id: str, h: str = "", user: TokenData = Depends(get_current_user)):
+    """The block's properties.image (a data URL) as the file itself, kept by the browser for a year.
+
+    The dev-lead board read each picture as the whole block in JSON (base64, a third larger) and could not let the
+    browser keep it (11-21 本人「開発室のページをリフレッシュした時の読み込みが遅すぎる」). The picture of a block only
+    changes together with its hash, which the screen puts in ?h=, so a new picture has a new address."""
+    import base64
+    import re
+
+    from fastapi.responses import Response
+
+    block = _svc().get_block(user.user_id, block_id)
+    image = ((block or {}).get("properties") or {}).get("image") or {}
+    data = image.get("data") if isinstance(image, dict) else None
+    m = re.match(r"data:([\w.+/-]+)?(;base64)?,", data or "")
+    if not m:
+        raise HTTPException(status_code=404, detail="絵が見つかりません")
+    body = data[m.end():]
+    raw = base64.b64decode(body) if m.group(2) else body.encode("utf-8")
+    same = bool(h) and h == image.get("hash")
+    return Response(content=raw, media_type=m.group(1) or "application/octet-stream", headers={
+        # private: Cloudflare does not rewrite it (a public max-age under 4 h is rewritten to 4 h) and does not keep it.
+        "Cache-Control": "private, max-age=31536000, immutable" if same else "private, no-cache",
+    })
+
+
 @router.get("/blocks/{block_id}/children", response_model=list[BlockResponse])
 def list_children(block_id: str, omit_image_data: bool = False, user: TokenData = Depends(get_current_user)):
     if not _svc().get_block(user.user_id, block_id):
