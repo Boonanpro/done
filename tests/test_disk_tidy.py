@@ -167,3 +167,22 @@ def test_low_space_wakes_once(dt, monkeypatch):
     m.wake_dan('空きが少ない')
     m.wake_dan('空きが少ない')
     assert len(woke) == 1
+
+
+def test_browser_caches_only_idle_profiles_and_keep_logins(dt, tmp_path, monkeypatch):
+    m, ws, live, data = dt
+    root = tmp_path / 'ai'
+    monkeypatch.setattr(m, 'BROWSER_ROOT', root)
+    monkeypatch.setattr(m, 'BROWSER_CACHE_MIN', 1)
+    idle, busy, locked = (root / f'browser_data--{n}' for n in ('idle', 'busy', 'locked'))
+    for prof in (idle, busy, locked):
+        _file(prof / 'Default/Cache/Cache_Data/f', size=4096)
+        _file(prof / 'Default/Cookies', size=2048)
+    os.symlink('host-1', locked / 'SingletonLock')
+    plan = m.Plan()
+    m.plan_browser_caches(plan, ps=f'Chrome --user-data-dir={busy} --foo')
+    assert [it['path'] for it in plan.items] == [str(idle / 'Default/Cache')]
+    m.execute(plan)
+    assert not (idle / 'Default/Cache').exists()
+    assert (idle / 'Default/Cookies').exists()
+    assert (busy / 'Default/Cache').exists() and (locked / 'Default/Cache').exists()
