@@ -64,4 +64,26 @@ async function send(docId: string, first: boolean) {
     if (est) extra.store = { mb: Math.round((est.usage || 0) / 1e6), ...Object.fromEntries(Object.entries(est.usageDetails || {}).map(([k, v]) => [k, Math.round(v / 1e6)])) };
   } catch { /* ignore */ }
   perfLog({ surface: 'web', event: 'script-listen-open', ms: marks.editable ?? marks.text ?? -1, extra });
+  void probeStore();
+}
+
+/** Once a day per device: how heavy the site's IndexedDB is to read (the chat's kept copy lives there). 11/21 the side
+ * chat waited 5–8 s for it on the owner's Chrome. */
+async function probeStore() {
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    if (localStorage.getItem('script-listen-idb-probe') === day) return;
+    localStorage.setItem('script-listen-idb-probe', day);
+    const { get, keys } = await import('idb-keyval');
+    const t0 = performance.now();
+    const ks = await keys();
+    const t1 = performance.now();
+    const rq = await get<string>('done-rq-cache');
+    const t2 = performance.now();
+    const dbs = (await indexedDB.databases?.())?.map(d => d.name) || [];
+    perfLog({ surface: 'web', event: 'script-listen-idb', ms: t2 - t0, extra: {
+      keys_ms: Math.round(t1 - t0), rq_ms: Math.round(t2 - t1), rq_kb: Math.round((typeof rq === 'string' ? rq.length : 0) / 1024),
+      n_keys: ks.length, listen_keys: ks.filter(k => String(k).startsWith('script-listen-doc-')).length, dbs,
+    } });
+  } catch { /* ignore */ }
 }
