@@ -312,3 +312,38 @@ def test_typing_into_dans_suggestion_inside_another_of_his():
     back = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n', [('\n', {}, a)], '後の文。\n'))
     body, fresh, _ = _run(back, 2, 'そして2つ目ですね。', 'edit', sugs=pieces)
     assert body == _body(back) and [(f['del'], f['ins']) for f in fresh] == [('', 'そして2つ目ですね。')]
+
+
+@pytest.mark.parametrize('typed,want', [
+    ('そして25Xつ目です。', 'そして2Xつ目です。'),     # next to 「5」, which goes with the adoption (11/21 on the screen: X was lost)
+    ('そしてX25つ目です。', 'そしてX2つ目です。'),
+    ('そして2つ目です。', 'そして2つ目です。'),         # 「5」 taken out: nothing more to change
+])
+def test_typing_next_to_words_that_go_with_the_adoption(tmp_path, monkeypatch, typed, want):
+    a, ab, a_b = {'suggestedInsertionIds': ['a']}, {'suggestedInsertionIds': ['b', 'a']}, {'suggestedInsertionIds': ['a'], 'suggestedDeletionIds': ['b']}
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n',
+                     [('そして', {}, a), ('2', {}, ab), ('5', {}, a_b), ('つ目です。\n', {}, a)], '後の文。\n'))
+    doc['revisionId'], doc['_account'] = 'r1', 'x'
+    back = _ends(_doc(('◎台本\n', 'HEADING_2'), '前の文。\n', [('\n', {}, a)], '後の文。\n'))
+    back['revisionId'], back['_account'] = 'r2', 'x'
+    now = {'doc': doc}
+    monkeypatch.setattr(S, 'OWNER_SUGS', tmp_path / 'sugs.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: now['doc'])
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    def docs(m, path, acc, body=None, params=None):
+        now['doc'] = back; return {}
+    monkeypatch.setattr(S, '_docs', docs)
+    S.replace('d', 2, 2, 'そして25つ目です。', typed, '0' * 10, '0' * len(typed), 'edit')
+    assert [x['ins'] for x in M.load(tmp_path / 'sugs.json', 'd')] == [want]
+
+
+def test_typed_words_follow_dans_words_when_struck_ones_come_first():
+    # Docs keeps 「なら」 (added) before 「で」 (struck); as the owner's suggestion it reads 「で」 then 「なら」
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'),
+                     [('一括', {}, {}), ('なら', {}, {'suggestedInsertionIds': ['s']}), ('で', {}, {'suggestedDeletionIds': ['s']}),
+                      ('36万円です。\n', {}, {})]))
+    toks, _ = _toks(doc, 1)
+    order = S.adopt_order(doc, {'s'}, 1, 1)
+    assert ''.join(toks[k]['ch'] for k in order) == '一括でなら36万円です。'
+    assert S.carry_change(toks, order, '一括ならX で36万円です。'.replace(' ', ''), '0' * 12)[0] == '一括でならX36万円です。'
