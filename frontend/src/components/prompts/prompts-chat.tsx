@@ -96,6 +96,10 @@ const DanBody = memo(function DanBody({ body, messageId }: { body: string; messa
 });
 
 type Shown = ChatMessage & { pending?: boolean; failed?: string };
+const byTime = (a: ChatMessage, b: ChatMessage) => a.created_at.localeCompare(b.created_at);
+/** 送ったばかりの発言（pending）が、保存された発言として届いたか */
+const sameSend = (local: Shown, saved: ChatMessage) =>
+  saved.id === local.id || saved.client_message_id === local.id || (saved.sender_type !== 'ai' && saved.content === local.content);
 const isDan = (m: ChatMessage) => m.sender_type === 'ai';
 const clock = (at: string) => new Date(at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const touchOnly = () => typeof window !== 'undefined' && window.matchMedia('(hover: none) and (pointer: coarse)').matches;
@@ -144,8 +148,8 @@ export function PromptsChat({ ctx, onClearSelection, onPulse, onBusy, header }: 
   const readAll = useCallback(async (r: string) => {
     const got = await promptsChat.messages(r, 40);
     setMessages(prev => {
-      const pending = prev.filter(m => m.pending && !got.some(g => g.client_message_id === m.id || g.id === m.id));
-      return [...got, ...pending];
+      const pending = prev.filter(m => m.pending && !got.some(g => sameSend(m, g)));
+      return [...got, ...pending].sort(byTime);
     });
     setMore(got.length >= 40);
   }, []);
@@ -183,8 +187,8 @@ export function PromptsChat({ ctx, onClearSelection, onPulse, onBusy, header }: 
           if (data.room_id !== room || !data.message) return;
           const m = data.message;
           setMessages(prev => {
-            const rest = prev.filter(x => x.id !== m.id && !(x.pending && (x.id === m.client_message_id)));
-            return [...rest, m].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+            const rest = prev.filter(x => x.id !== m.id && !(x.pending && sameSend(x, m)));
+            return [...rest, m].sort(byTime);
           });
           if (isDan(m)) pulse.current();
         } catch { /* 読めない知らせは捨てる */ }
@@ -237,7 +241,7 @@ export function PromptsChat({ ctx, onClearSelection, onPulse, onBusy, header }: 
     const older = await promptsChat.messages(room, 40, messages[0].created_at).catch(() => []);
     setMore(older.length >= 40);
     stick.current = false;
-    setMessages(prev => [...older.filter(o => !prev.some(p => p.id === o.id)), ...prev]);
+    setMessages(prev => [...older.filter(o => !prev.some(p => p.id === o.id)), ...prev].sort(byTime));
     requestAnimationFrame(() => { if (el) el.scrollTop = el.scrollHeight - before; });
   }
 
@@ -360,11 +364,11 @@ export function PromptsChat({ ctx, onClearSelection, onPulse, onBusy, header }: 
 }
 
 /** スマホの「ダンと話す」の丸いボタン（押すと下から会話が出る） */
-export function TalkButton({ onOpen, lifted, busy }: { onOpen: () => void; lifted?: boolean; busy?: boolean }) {
+export function TalkButton({ onOpen, lift = 'low', busy }: { onOpen: () => void; lift?: 'low' | 'mid' | 'high'; busy?: boolean }) {
   return (
     <button type="button" onClick={onOpen}
       className={cn('fixed right-3 z-40 flex items-center gap-1.5 rounded-full bg-amber-600 px-4 py-3 text-sm font-bold text-white shadow-lg active:bg-amber-700',
-        lifted ? 'bottom-[calc(env(safe-area-inset-bottom)+96px)]' : 'bottom-[calc(env(safe-area-inset-bottom)+16px)]')}>
+        lift === 'high' ? 'bottom-[calc(env(safe-area-inset-bottom)+150px)]' : lift === 'mid' ? 'bottom-[calc(env(safe-area-inset-bottom)+76px)]' : 'bottom-[calc(env(safe-area-inset-bottom)+16px)]')}>
       <MessageCircle className="h-4 w-4" />ダンと話す{busy ? <span className="h-2 w-2 rounded-full bg-emerald-300" aria-label="作業中" /> : null}
     </button>
   );

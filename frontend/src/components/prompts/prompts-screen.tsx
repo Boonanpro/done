@@ -386,6 +386,9 @@ function Editor({ id, pulse, onBack, onSaved, onState, onSelection }: {
             value={draft}
             onChange={e => setDraft(e.target.value)}
             onSelect={e => report(e.currentTarget)}
+            onMouseUp={e => report(e.currentTarget)}
+            onKeyUp={e => report(e.currentTarget)}
+            onTouchEnd={e => report(e.currentTarget)}
             spellCheck={false}
             className="block w-full resize-none overflow-hidden rounded-lg border-2 border-amber-300 bg-white px-3 py-2 text-[14px] leading-relaxed text-stone-900 shadow-inner outline-none focus:border-amber-500 focus:ring-4 focus:ring-amber-100"
           />
@@ -500,6 +503,22 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
     draftDiff,
   }), [node, shown, sel, draftDiff]);
   const bump = useCallback(() => setPulse(n => n + 1), []);
+  // PC の会話の列は、この画面をスクロールさせている枠の高さに合わせる（開発室の中では上に切り替えの帯があり、画面の高さより低い）
+  const talkBox = useRef<HTMLElement>(null);
+  const [frameH, setFrameH] = useState(0);
+  useLayoutEffect(() => {
+    let el = talkBox.current?.parentElement || null;
+    while (el && !/(auto|scroll)/.test(getComputedStyle(el).overflowY)) el = el.parentElement;
+    const frame = el;
+    const fit = () => setFrameH(frame ? frame.clientHeight : window.innerHeight);
+    fit();
+    const ro = frame ? new ResizeObserver(fit) : null;
+    if (frame) ro!.observe(frame);
+    window.addEventListener('resize', fit);
+    return () => { ro?.disconnect(); window.removeEventListener('resize', fit); };
+  }, []);
+  // スマホの「ダンと話す」は、全文の下に貼り付く保存の帯の上に出す
+  const lift = draftDiff ? 'high' : shown && !shown.readonly ? 'mid' : 'low';
   useEffect(() => {
     let live = true;
     promptsApi.list()
@@ -610,12 +629,12 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           )}
         </main>
         {/* ダンとの会話。PC は全文の横の列（スクロールしても見えたまま）、スマホは下から出す。中身は1つだけ置く（会話の線を2本にしない） */}
-        <section aria-label="ダンと話す"
+        <section ref={talkBox} aria-label="ダンと話す" style={{ ['--talk-h' as string]: frameH ? `${frameH - 16}px` : undefined }}
           className={cn(
             'z-50 flex-col overflow-hidden bg-white',
             talkOpen ? 'flex' : 'hidden',
-            'fixed inset-x-0 bottom-0 h-[82dvh] rounded-t-2xl border-t border-stone-300 shadow-[0_-8px_30px_rgba(0,0,0,0.18)]',
-            'lg:sticky lg:inset-auto lg:top-2 lg:flex lg:h-[calc(100dvh-1rem)] lg:max-h-[900px] lg:rounded-xl lg:border lg:border-stone-200 lg:shadow-none',
+            'fixed inset-x-0 bottom-0 h-[72dvh] rounded-t-2xl border-t border-stone-300 shadow-[0_-8px_30px_rgba(0,0,0,0.18)]',
+            'lg:sticky lg:inset-auto lg:top-2 lg:flex lg:h-[var(--talk-h,calc(100dvh-1rem))] lg:max-h-[900px] lg:rounded-xl lg:border lg:border-stone-200 lg:shadow-none',
           )}>
           <PromptsChat ctx={talkCtx} onPulse={bump} onBusy={setTalkBusy} onClearSelection={() => setPicked(v => ({ ...v, sel: null }))}
             header={(
@@ -627,7 +646,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
             )} />
         </section>
       </div>
-      {!talkOpen ? <div className="lg:hidden"><TalkButton onOpen={() => setTalkOpen(true)} lifted={!!draftDiff} busy={talkBusy} /></div> : null}
+      {!talkOpen ? <div className="lg:hidden"><TalkButton onOpen={() => setTalkOpen(true)} lift={lift} busy={talkBusy} /></div> : null}
     </div>
   );
 }
