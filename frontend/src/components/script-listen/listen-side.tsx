@@ -17,6 +17,8 @@ import { ThumbnailEditor } from '@/components/thumbnail/thumbnail-editor';
 import { useRoomFeed } from '@/hooks/useRoomFeed';
 import { errorText, listenApi } from '@/lib/script-listen-api';
 
+import { mark as perfMark } from './listen-perf';
+
 // サムネの編集と会話の欄は、ログインの印を付けずに自分の API を呼ぶ（クッキーだけ）。クッキーが切れていても動くよう、
 // この画面と同じ端末に残したログインの印を付ける（制作の窓 editor-dan-chat.tsx と同じ）。
 function useBearerFetch() {
@@ -51,7 +53,7 @@ export function ListenChat({ docId, lead }: { docId: string; lead?: ReactNode })
     if (roomCache.get(docId)) return;
     let live = true;
     listenApi.room(docId)
-      .then(r => { roomCache.set(docId, r.project_id); if (live) setProjectId(r.project_id); })
+      .then(r => { perfMark('room'); roomCache.set(docId, r.project_id); if (live) setProjectId(r.project_id); })
       .catch(e => { if (live) setFailed(errorText(e)); });
     return () => { live = false; };
   }, [docId]);

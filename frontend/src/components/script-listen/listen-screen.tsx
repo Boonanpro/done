@@ -29,6 +29,7 @@ import { DanLiveContext, isLive } from './listen-dan';
 import { RefsPanel, type SectionHead } from './listen-refs';
 import { ListenShare } from './listen-share';
 import { ListenChat, ListenThumb, type ThumbTarget } from './listen-side';
+import { mark as perfMark, note as perfNote, startReport } from './listen-perf';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
 const RATE_KEY = 'script-listen-rate';
@@ -559,7 +560,9 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   const load = useCallback(async (keepText?: { start: number; text: string }) => {
     try {
+      perfMark('doc0');
       const d = await listenApi.doc(docId, voiceRef.current);
+      perfMark('doc1');
       // Coming from last time's copy: stay on the sentence that is showing (or playing).
       const here = staleRef.current && !keepText ? saysRef.current[curRef.current] : undefined;
       show(d, keepText || (here ? { start: here.start, text: here.text } : undefined));
@@ -573,9 +576,26 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
   }, [docId, show]);
 
+  // How fast the screen opened on this device (listen-perf.ts).
+  useEffect(() => {
+    if (!doc) return;
+    perfMark('text');
+    if (stale) return;
+    const id = requestAnimationFrame(() => {
+      perfMark('editable');
+      const imgs = Array.from(editorRef.current?.querySelectorAll('img') || []);
+      void Promise.all(imgs.map(i => i.decode().catch(() => undefined))).then(() => perfMark('imgs'));
+    });
+    return () => cancelAnimationFrame(id);
+  }, [doc, stale]);
+
   useEffect(() => {
     let fresh = false;
+    startReport(docId);
+    perfMark('idb0');
     void idbGet<ListenDoc>(cacheKey(docId, voiceRef.current)).then(d => {
+      perfMark('idb1');
+      perfNote('idbHit', !!d);
       if (!d || fresh || saysRef.current.length) return;
       staleRef.current = true;
       setStale(true);
@@ -588,6 +608,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   const loadComments = useCallback(async () => {
     try {
       const c = await listenApi.comments(docId);
+      perfMark('comments');
       setThreads(c.threads);
       setCanComment(c.can_comment);
       return c.threads;
