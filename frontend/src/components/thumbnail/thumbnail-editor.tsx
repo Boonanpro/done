@@ -9,10 +9,10 @@
 // - 一覧で見る: YouTube の一覧と同じ小さい大きさで、ほかのサムネと並べて見る
 // 保存は手を離した時に自動。ダンが直した形は1.5秒ごとに読み直して、目の前で変わる。
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ArrowLeft, ArrowDown, ArrowUp, Check, Copy, Download, Eye, EyeOff, LayoutGrid, Loader2, Lock, MessageSquare,
-  MousePointer2, PenLine, Redo2, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
+  MousePointer2, PenLine, Redo2, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -132,6 +132,12 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const [exporting, setExporting] = useState(false);
   const [phoneChatOpen, setPhoneChatOpen] = useState(false);
   const [stageW, setStageW] = useState(800);
+  // 寄る・引く（1 = 枠に収まる大きさ）。Ctrl（Mac は ⌘）＋スクロール、トラックパッドのつまむ動き（11/21 本人）
+  const [zoom, setZoom] = useState(1);
+  const zoomAnchor = useRef<{ fx: number; fy: number; cx: number; cy: number } | null>(null);
+  // 読み直した回数。絵の住所に付けて、手元に控えた前の絵を使わずに取り直す
+  const [bust, setBust] = useState(0);
+  const [reloading, setReloading] = useState(false);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const [finishJob, setFinishJob] = useState<ThumbFinishJob | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
@@ -236,7 +242,54 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     ro.observe(el);
     return () => ro.disconnect();
   }, [doc, compact]);
-  const scale = doc ? stageW / doc.width : 1;
+  const viewW = Math.round(stageW * zoom);
+  const scale = doc ? viewW / doc.width : 1;
+  const hasDoc = !!doc;
+
+  // Ctrl＋スクロールで、指している所を中心に寄る・引く（ページ全体の拡大は止める）
+  useEffect(() => {
+    const el = stageWrap.current;
+    if (!el) return;
+    const onWheel = (ev: WheelEvent) => {
+      if (!ev.ctrlKey && !ev.metaKey) return;
+      ev.preventDefault();
+      const svg = svgRef.current;
+      if (!svg) return;
+      const r = svg.getBoundingClientRect();
+      zoomAnchor.current = { fx: (ev.clientX - r.left) / r.width, fy: (ev.clientY - r.top) / r.height, cx: ev.clientX, cy: ev.clientY };
+      const d = Math.max(-40, Math.min(40, ev.deltaY));
+      setZoom((z) => Math.max(0.25, Math.min(8, z * Math.exp(-d * 0.008))));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [hasDoc]);
+  // 寄った後、指していた所が同じ所に来るように送る
+  useLayoutEffect(() => {
+    const a = zoomAnchor.current;
+    const el = stageWrap.current;
+    const svg = svgRef.current;
+    zoomAnchor.current = null;
+    if (!a || !el || !svg) return;
+    const r = svg.getBoundingClientRect();
+    el.scrollLeft += r.left + a.fx * r.width - a.cx;
+    el.scrollTop += r.top + a.fy * r.height - a.cy;
+  }, [zoom]);
+
+  const reload = useCallback(async () => {
+    setReloading(true);
+    try {
+      await flush();
+      setBust((n) => n + 1);
+      await load(true);
+    } finally {
+      setReloading(false);
+    }
+  }, [flush, load]);
+  // 画面に出す形（絵の住所に読み直しの印を付けるだけ。保存する形は doc のまま）
+  const viewDoc = useMemo(() => (doc && bust ? {
+    ...doc,
+    parts: doc.parts.map((p) => (p.type === 'image' && p.src ? { ...p, src: `${p.src}${p.src.includes('?') ? '&' : '?'}r=${bust}` } : p)),
+  } : doc), [doc, bust]);
 
   const boxOf = useCallback((p: ThumbPart): PartBox => {
     if (p.type === 'image') return { x: p.x, y: p.y, w: p.w, h: p.h };
@@ -703,6 +756,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       <span className="mx-1 h-5 w-px bg-border" />
       <button type="button" className={toolBtn(false)} onClick={undo} disabled={!undoStack.current.length} title="元に戻す（Ctrl+Z）"><Undo2 className="h-3.5 w-3.5" /></button>
       <button type="button" className={toolBtn(false)} onClick={redo} disabled={!redoStack.current.length} title="やり直す（Ctrl+Shift+Z）"><Redo2 className="h-3.5 w-3.5" /></button>
+      <button type="button" className={toolBtn(false)} onClick={() => void reload()} disabled={reloading} title="最新の形と絵を読み直す" data-thumb-reload>
+        <RefreshCw className={`h-3.5 w-3.5 ${reloading ? 'animate-spin' : ''}`} />{compact ? null : '読み直す'}
+      </button>
       <button type="button" className={toolBtn(false)} onClick={() => void exportPng()} disabled={exporting} title="1280×720 の PNG に書き出す">
         {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}{compact ? null : '書き出す'}
       </button>
@@ -916,12 +972,15 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   ) : null;
 
   const stage = (
-    <div ref={stageWrap} className={`relative flex min-h-0 min-w-0 items-center justify-center ${compact ? 'w-full' : 'h-full w-full'}`}>
-      <div style={{ width: stageW }} className="relative shadow-lg" data-thumb-stage>
+    <div className={`relative min-h-0 min-w-0 ${compact ? 'w-full' : 'h-full w-full'}`}>
+    <div ref={stageWrap} className={`min-h-0 min-w-0 overflow-auto ${compact ? 'w-full' : 'h-full w-full'}`}
+      style={compact ? { height: Math.round(stageW * doc.height / doc.width) } : undefined} data-thumb-stage-wrap>
+      <div className="flex min-h-full min-w-full w-max items-center justify-center">
+      <div style={{ width: viewW }} className="relative shrink-0 shadow-lg" data-thumb-stage>
         <ThumbCanvas
           ref={svgRef}
-          doc={doc}
-          width={stageW}
+          doc={viewDoc || doc}
+          width={viewW}
           boxes={boxes}
           marks={shownMarks}
           onMeasure={(id, box) => setBoxes((b) => (b[id] && Math.abs(b[id].x - box.x) < 0.5 && Math.abs(b[id].y - box.y) < 0.5 && Math.abs(b[id].w - box.w) < 0.5 && Math.abs(b[id].h - box.h) < 0.5 ? b : { ...b, [id]: box }))}
@@ -934,6 +993,14 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           onPointerCancel={onPointerUp}
         />
       </div>
+      </div>
+    </div>
+      {zoom !== 1 ? (
+        <button type="button" onClick={() => setZoom(1)} title="枠に収まる大きさに戻す" data-thumb-zoom
+          className="absolute bottom-2 left-2 z-10 rounded-md bg-black/70 px-2 py-1 text-[11px] font-medium text-white">
+          {Math.round(zoom * 100)}%・戻す
+        </button>
+      ) : null}
     </div>
   );
 

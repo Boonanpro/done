@@ -152,6 +152,26 @@ def add_image_asset(room_id: str, path: Path, filename: str, generated_by: str =
     return row
 
 
+def versioned(room_id: str, doc: dict[str, Any]) -> dict[str, Any]:
+    """絵の部品の住所に、その絵のファイルの版（大きさと更新時刻）を付けた写しを返す。
+
+    同じ素材のファイルを描き直した時（画質を落とした・切り抜き直した）、住所が同じだと本人の画面が
+    手元に控えた前の絵を出し続けていた（11/21 中村さんの部品の画質を落としたのにエディターで変わらない）。
+    """
+    parts = doc.get('parts') if isinstance(doc, dict) else None
+    if not isinstance(parts, list):
+        return doc
+    out = []
+    for p in parts:
+        if isinstance(p, dict) and p.get('type') == 'image' and p.get('asset_id'):
+            f = asset_file(room_id, str(p['asset_id']))
+            if f is not None:
+                st = f.stat()
+                p = {**p, 'src': f"{media_url(room_id, str(p['asset_id']))}&v={st.st_size:x}-{st.st_mtime_ns:x}"}
+        out.append(p)
+    return {**doc, 'parts': out}
+
+
 def asset_file(room_id: str, asset_id: str) -> Path | None:
     par = _par()
     a = next((a for a in par._read_assets(room_id) if str(a.get('id')) == str(asset_id)), None)
@@ -165,7 +185,7 @@ def asset_file(room_id: str, asset_id: str) -> Path | None:
 
 def render(room_id: str, content_id: str, out: Path | None = None, marks: list | None = None,
            out_w: int = 1280, doc: dict[str, Any] | None = None, timeout: float = 120) -> Path:
-    doc = doc or get(room_id, content_id)
+    doc = versioned(room_id, doc or get(room_id, content_id))
     if not doc.get('parts'):
         raise ValueError('サムネに部品がありません')
     d = _par()._room_dir(room_id) / 'thumbnails' / content_id
