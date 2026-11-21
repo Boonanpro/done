@@ -43,6 +43,11 @@ function when(at?: string) {
 }
 
 const WHO: Record<string, string> = { owner: 'みきさん', dan: 'ダン' };
+const WHO_LOOK: Record<string, { dot: string; bubble: string; name: string; initial?: string }> = {
+  owner: { dot: 'bg-violet-600', bubble: 'border-violet-500 bg-violet-50', name: 'text-violet-800', initial: 'み' },
+  dan: { dot: 'bg-sky-600', bubble: 'border-sky-500 bg-sky-50', name: 'text-sky-800', initial: 'ダ' },
+  other: { dot: 'bg-stone-500', bubble: 'border-stone-400 bg-stone-50', name: 'text-stone-700' },
+};
 
 function ReplyBox({ onSend, placeholder, autoFocus }: { onSend: (text: string) => Promise<void>; placeholder: string; autoFocus?: boolean }) {
   const [text, setText] = useState('');
@@ -141,17 +146,28 @@ function Messages({ thread }: { thread: Thread }) {
   return (
     <>
       <div className="space-y-2">
-        {thread.messages.map(m => (
-          <div key={m.id}>
-            <div className="flex items-baseline gap-1.5 text-[11px] text-stone-500">
-              <span className={cn('font-semibold', m.who === 'dan' ? 'text-amber-800' : 'text-stone-700')}>{WHO[m.who] || m.name || '他の人'}</span>
-              <span>{when(m.at)}</span>
+        {thread.messages.map(m => {
+          // Who wrote it must be clear at a glance (11/21 本人): a coloured initial and a tinted bubble per writer —
+          // みきさん violet (their suggestions are violet), ダン sky (Dan's work line is sky), anyone else grey.
+          const look = WHO_LOOK[m.who] || WHO_LOOK.other;
+          const name = WHO[m.who] || m.name || '他の人';
+          return (
+            <div key={m.id} data-who={m.who} className="flex items-start gap-1.5">
+              <span className={cn('mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white', look.dot)}>
+                {look.initial || name.slice(0, 1)}
+              </span>
+              <div className={cn('min-w-0 flex-1 rounded-md border-l-[3px] px-2 py-1', look.bubble)}>
+                <div className="flex items-baseline gap-1.5 text-[11px]">
+                  <span className={cn('font-bold', look.name)}>{name}</span>
+                  <span className="text-stone-500">{when(m.at)}</span>
+                </div>
+                {m.action
+                  ? <div className="text-[12px] text-stone-500">{m.action === 'resolve' ? '解決にしました' : '開き直しました'}</div>
+                  : <div className="whitespace-pre-wrap break-words leading-relaxed text-stone-800">{(m.text || '').replace(/^ダン[：:]\s*/, '')}</div>}
+              </div>
             </div>
-            {m.action
-              ? <div className="text-[12px] text-stone-500">{m.action === 'resolve' ? '解決にしました' : '開き直しました'}</div>
-              : <div className="whitespace-pre-wrap break-words leading-relaxed text-stone-800">{(m.text || '').replace(/^ダン[：:]\s*/, '')}</div>}
-          </div>
-        ))}
+          );
+        })}
       </div>
       {job && (
         // The newest line of Dan's work on it; pressing it opens the whole log here in the card (11/20).
