@@ -9,8 +9,8 @@ speak: |
   - 台本の Google ドキュメントを読み上げで聞き、その場で直し、コメントでダンとやり取りする画面です。
   - 撮る時に開くのは中村さんの台本（④2本目）。開くだけでは台本は変わらない。直す確かめは消してよい写しで scripts/check_script_listen.py を使う。
 shows: []
-fingerprint: d85fadb1a6f32a86
-described: 4d0ad48a7ae45df4
+fingerprint: 7564110f8760d116
+described: 87678581617bac6f
 last_review: "2026-11-21 説明は変えない: main の開く速さの直しを取り込んだだけ。説明は今回のサムネの会話の分で書き直し済み"
 ---
 # 台本を聞いて直す画面
@@ -21,7 +21,8 @@ last_review: "2026-11-21 説明は変えない: main の開く速さの直しを
 
 - 上の帯: 台本の題、「コメント N」（PC は解決済みの出し入れ、スマホは全部のコメントと提案の欄）、声の選び、「共有」（`[data-testid="share-copy"]`。相手に送るリンクをコピーする。リンク先は作業用ではなくお客さん用の写しで、リンクを知る人は誰でも編集・コメントできる。初めて押した時に写しができ、台本が写しより進んでいれば欄に「今の台本に更新する」が出る。app/services/script_share.py、2026-11-20 本人）、「ドキュメント」（元の Google ドキュメントを開く）。右の「ダンと台本」の会話の欄は白い地（`.theme-light`、11/20 本人「黒じゃなくて白に」）。
 - 本文（`[data-testid="script-editor"]`）: タイトル、白い枠の中のサムネ・タイトル・前提と狙い（読まない）、「◎台本」から下の本文。全体が1枚の編集面で、文や段落ごとの枠は無い（2026-11-19 本人「黄色い枠…余計なものを付けるな。Googleドキュメントと同じくらいの使い勝手にしろ」）。
-  - 鳴っている文に薄い橙の帯（打っている間は消える）。コメントの付いた文は薄い黄色。提案は緑の下線（足す）・赤の線（消す）。
+  - 鳴っている文に薄い橙の帯（打っている間は消える）。コメントの付いた文は薄い黄色。提案は緑の下線（足す）・赤の線（消す）。みきさんの提案は紫。ダンの提案をみきさんが書き換えた所は、ダンの字が緑・赤のまま、打った字だけ紫（`[data-who="dan"]`、11/21）。
+  - 押し方（11/21 本人「1回は何もせず、2回で紐づいてるコメントやカードに遷移」）: PC は1回押すとカーソルだけ、提案・コメントのある所をダブルクリックでその札へ。段落にマウスを乗せると左に ▶（`[data-testid="play-para"]`、鳴っていれば ‖）が出て、そこから聞く。スマホは1回でそこで直せ、2回続けて押すと札（札の無い所は再生・停止）。
   - 段落をまたいで選べる。選ぶと、PC は本文と右の札の間、スマホは選んだ所の下に丸いコメントの印（「コメントを追加」）。
   - Enter で改行、Ctrl+Z で戻す、Ctrl+Shift+Z / Ctrl+Y でやり直し、Ctrl+B で太字。打つのを止めると、変わった段落が自動でドキュメントに入る。
 - 右の余白（PC）: コメントの札（返事・解決）と提案の札（承認・却下）が、その文の横に並ぶ。スマホは下から出る欄。
@@ -44,9 +45,9 @@ last_review: "2026-11-21 説明は変えない: main の開く速さの直しを
 
 - 見張るファイル: `app/api/script_listen_screen.py`, `app/services/script_listen.py`, `frontend/src/app/script-listen/page.tsx`, `frontend/src/components/script-listen/editor-dom.ts`, `frontend/src/components/script-listen/listen-cards.tsx`, `frontend/src/components/script-listen/listen-screen.tsx`, `frontend/src/lib/script-listen-api.ts`
 - ラベル: 「書き方」、「画像を入れる」、「声」、「ドキュメント」、「ダンの作業の様子を見る」、「前の文」、「次の文」、「ダンと台本」、「閉じる」、「ダンが直している所へ」、「コメントを追加」
-- 試験の印: 「card-dan-line」、「script-editor」、「chat-toggle」、「compare-toggle」、「image-add」、「dan-bar」、「ref-panel」、「listen-thumb」、「dan-glow」
+- 試験の印: 「card-dan-line」、「script-editor」、「chat-toggle」、「compare-toggle」、「image-add」、「play-para」、「dan-bar」、「ref-panel」、「listen-thumb」、「dan-glow」
 - ボタンの字: 「開く」、「やめる」
 - 見出し: 「台本を聞く」
 
-<!-- place_map:files {"app/api/script_listen_screen.py": "58e19a68f9", "app/services/script_listen.py": "bcf1c94c54", "frontend/src/app/script-listen/page.tsx": "3e527407c1", "frontend/src/components/script-listen/editor-dom.ts": "7101a9b8f2", "frontend/src/components/script-listen/listen-cards.tsx": "88aedbadb9", "frontend/src/components/script-listen/listen-screen.tsx": "fa93d02a3f", "frontend/src/lib/script-listen-api.ts": "8ba160d28e"} -->
+<!-- place_map:files {"app/api/script_listen_screen.py": "58e19a68f9", "app/services/script_listen.py": "24abe90507", "frontend/src/app/script-listen/page.tsx": "3e527407c1", "frontend/src/components/script-listen/editor-dom.ts": "8b7aa80f40", "frontend/src/components/script-listen/listen-cards.tsx": "3f174bea7a", "frontend/src/components/script-listen/listen-screen.tsx": "190297089d", "frontend/src/lib/script-listen-api.ts": "58e75e7ffd"} -->
 <!-- place_map:auto:end -->
