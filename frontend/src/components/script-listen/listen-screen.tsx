@@ -1443,7 +1443,17 @@ export function ListenScreen({ docId }: { docId: string }) {
     if (touch) return;
     const t = e.target as HTMLElement;
     if (t.closest('[data-play-para]')) return;
-    const p = t.closest('[data-testid="script-editor"] p[data-para]') as HTMLElement | null;
+    let p = t.closest('[data-testid="script-editor"] p[data-para]') as HTMLElement | null;
+    // Left of the text (where the button sits) there is no paragraph under the mouse: pick the paragraph on the
+    // mouse's line, so moving left to press the button keeps it (11/21 本人「押そうとすると消える」).
+    const ed = editorRef.current;
+    if (!p && ed && e.clientX < ed.getBoundingClientRect().left) {
+      p = Array.from(ed.querySelectorAll('p[data-para]')).find(el => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        return e.clientY >= r.top - 4 && e.clientY <= r.bottom + 4;
+      }) as HTMLElement | null || null;
+      if (!p) return; // between paragraphs: keep the button where it is
+    }
     const first = p ? (p.matches('[data-n]') ? p : p.querySelector('[data-n]')) as HTMLElement | null : null;
     const n = first ? Number(first.dataset.n) : NaN;
     if (!p || !Number.isFinite(n) || sayForUnit(n) < 0 || !contentRef.current) {
@@ -1985,6 +1995,8 @@ export function ListenScreen({ docId }: { docId: string }) {
       >
         <div className="mx-auto flex max-w-6xl gap-6 px-3 pb-44 pt-4 sm:pl-10 sm:pr-6">
           <div ref={contentRef} className="relative min-w-0 max-w-3xl flex-1" onMouseMove={onContentMove} onMouseLeave={() => setHoverPara(null)}>
+            {/* The strip left of the text, so the mouse stays "in" the text on its way to the play button. */}
+            {!touch && <div aria-hidden data-play-gutter className="absolute inset-y-0 -left-10 w-10" />}
             {!touch && hoverPara && (() => {
               const here = says[cur];
               const on = playing && !!here && hoverPara.ns.includes(here.n);
