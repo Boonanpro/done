@@ -1,6 +1,7 @@
 'use client';
 
 import { callDuration, callSide, collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
+import { probeSiteIdbOncePerDay } from '@/lib/idb-probe';
 import { perfLog, roomClickStart } from '@/lib/perf-log';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import {
@@ -2904,8 +2905,9 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
         event: 'room-open-visible',
         ms: performance.now() - start,
         room_id: project?.room_id ?? null,
-        extra: { from_click: roomClickStart(projectId) != null, messages: messagesData?.messages?.length ?? 0, open: openState, mount_delay: Math.round(mountAtRef.current - start), render: Math.round(performance.now() - mountAtRef.current) },
+        extra: { from_click: roomClickStart(projectId) != null, messages: messagesData?.messages?.length ?? 0, open: openState, mount_delay: Math.round(mountAtRef.current - start), render: Math.round(performance.now() - mountAtRef.current), nav: Math.round(performance.now()) },
       });
+      probeSiteIdbOncePerDay();
     });
   }, [isBooting, projectId, project?.room_id, messagesData?.messages?.length, openState]);
 

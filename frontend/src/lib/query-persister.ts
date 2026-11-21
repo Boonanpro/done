@@ -27,6 +27,42 @@ export const PERSIST_BUSTER = 'v2';
 
 const KEY = 'done-rq-cache';
 
+// 部屋ごとの会話（一番重い）は、新しく読んだ順にこの数の部屋だけ残す。全部の部屋を残すと本人の端末で6.8MBになり、
+// 読み戻しに31秒かかった（2026-11-21）。開くのは最近の部屋がほとんどなので、残りはネットから読む
+const PER_ROOM_KEYS = new Set(['project', 'project-messages', 'chat-artifacts', 'collab-room', 'collab-messages', 'collab-participants', 'outbound-proposal']);
+const KEEP_ROOMS = 16; // 部屋の番号と会話の部屋の番号で2つずつ数えるので、約8部屋
+const MAX_CHARS = 2_500_000;
+
+type Dehydrated = { clientState: { queries: Array<{ queryKey: readonly unknown[]; state: { dataUpdatedAt?: number } }> } };
+type Q = Dehydrated['clientState']['queries'][number];
+const roomOf = (q: Q) => (PER_ROOM_KEYS.has(String(q.queryKey[0])) ? JSON.stringify(q.queryKey.slice(1, 2)) : null);
+
+/** Keeps the shared lists and only the `rooms` most recently read rooms, so the kept copy stays small enough to read back quickly. */
+export function trimPersisted<T>(client: T, rooms = KEEP_ROOMS): T {
+  const c = client as unknown as Dehydrated;
+  const queries = c?.clientState?.queries;
+  if (!Array.isArray(queries)) return client;
+  const latest = new Map<string, number>();
+  for (const q of queries) {
+    const r = roomOf(q);
+    if (r != null) latest.set(r, Math.max(latest.get(r) ?? 0, q.state?.dataUpdatedAt ?? 0));
+  }
+  const keep = new Set([...latest.entries()].sort((x, y) => y[1] - x[1]).slice(0, rooms).map(([r]) => r));
+  const kept = queries.filter((q) => { const r = roomOf(q); return r == null || keep.has(r); });
+  return { ...c, clientState: { ...c.clientState, queries: kept } } as unknown as T;
+}
+
+function serialize(client: unknown): string {
+  // まだ大きければ、残す部屋を半分ずつ減らす
+  let rooms = KEEP_ROOMS;
+  let out = JSON.stringify(trimPersisted(client, rooms));
+  while (out.length > MAX_CHARS && rooms > 1) {
+    rooms = Math.floor(rooms / 2);
+    out = JSON.stringify(trimPersisted(client, rooms));
+  }
+  return out;
+}
+
 export function makeQueryPersister() {
   if (typeof window === 'undefined' || !('indexedDB' in window)) return undefined;
   return createAsyncStoragePersister({
@@ -36,8 +72,9 @@ export function makeQueryPersister() {
       setItem: (k, v) => set(k, v).catch(() => undefined),
       removeItem: (k) => del(k).catch(() => undefined),
     },
-    // 連続更新（ポーリング・SSE）をまとめて書く
-    throttleTime: 1500,
+    serialize,
+    // 連続更新（ポーリング・SSE）をまとめて書く。数MBを1.5秒ごとに書き直すと端末の置き場所が重くなるので5秒
+    throttleTime: 5000,
   });
 }
 
