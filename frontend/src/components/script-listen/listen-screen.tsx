@@ -28,7 +28,7 @@ import { Composer, SuggestionCard, ThreadCard } from './listen-cards';
 import { DanLiveContext, isLive } from './listen-dan';
 import { RefsPanel, type SectionHead } from './listen-refs';
 import { ListenShare } from './listen-share';
-import { ListenChat, ListenThumb, type ThumbTarget } from './listen-side';
+import { ListenChat, ListenThumb, type ThumbContext, type ThumbTarget } from './listen-side';
 import { mark as perfMark, note as perfNote, startReport } from './listen-perf';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
@@ -1685,6 +1685,7 @@ export function ListenScreen({ docId }: { docId: string }) {
   // picked, whether it plays, whether a thumbnail is open. Sent a moment after it changes.
   const stateTimer = useRef<number | null>(null);
   const lastState = useRef('');
+  const thumbCtx = useRef<ThumbContext | null>(null);
   const tellState = useCallback(() => {
     if (stateTimer.current) window.clearTimeout(stateTimer.current);
     stateTimer.current = window.setTimeout(() => {
@@ -1698,7 +1699,11 @@ export function ListenScreen({ docId }: { docId: string }) {
       } else if (playingRef.current && says[curRef.current]) {
         sentence = says[curRef.current].text; para = says[curRef.current].para;
       }
-      const body = { para, sentence, selection, playing: playingRef.current, thumb: thumb ? `${thumb.order + 1}枚目` : '' };
+      const tc = thumb ? thumbCtx.current : null;
+      const body = thumb
+        // サムネを開いている間は、台本の文ではなくサムネとその部品が「これ」
+        ? { playing: playingRef.current, thumb: `${thumb.order + 1}枚目`, thumb_room: tc?.room_id || '', thumb_content: tc?.content_id || '', thumb_part: tc?.part || '' }
+        : { para, sentence, selection, playing: playingRef.current, thumb: '' };
       const key = JSON.stringify(body);
       if (key === lastState.current) return;
       lastState.current = key;
@@ -2071,15 +2076,16 @@ export function ListenScreen({ docId }: { docId: string }) {
             target={thumb}
             title={thumbTitle}
             compact={!screenWide}
-            phoneChat={screenWide ? null : (lead => <ListenChat docId={docId} lead={lead} />)}
+            phoneChat={screenWide ? null : (lead => <ListenChat docId={docId} lead={lead} thumbOpen />)}
             onClose={() => setThumb(null)}
+            onContext={ctx => { thumbCtx.current = ctx; tellState(); }}
           />
         </div>
       )}
       </div>
       {chatSide && (
         <aside aria-label="ダンと台本" className="w-[400px] shrink-0 border-l border-stone-200 bg-background text-foreground">
-          <ListenChat docId={docId} />
+          <ListenChat docId={docId} thumbOpen={!!thumb} />
         </aside>
       )}
       </div>

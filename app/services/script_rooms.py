@@ -138,7 +138,7 @@ def children(origin_room_id: str, sb=None) -> list[dict[str, Any]]:
 
 def put_state(doc_id: str, state: dict[str, Any]) -> None:
     STATE.mkdir(parents=True, exist_ok=True)
-    keep = {k: state.get(k) for k in ('para', 'sentence', 'selection', 'playing', 'thumb') if state.get(k) not in (None, '')}
+    keep = {k: state.get(k) for k in ('para', 'sentence', 'selection', 'playing', 'thumb', 'thumb_room', 'thumb_content', 'thumb_part') if state.get(k) not in (None, '')}
     keep['at'] = time.time()
     (STATE / f'{doc_id}.json').write_text(json.dumps(keep, ensure_ascii=False), encoding='utf-8')
 
@@ -174,12 +174,26 @@ def context_lines(room_id: str) -> list[str]:
     if st:
         age = int(time.time() - float(st['at']))
         bits = []
-        if st.get('thumb'): bits.append(f"サムネの編集を開いている（{st['thumb']}）")
-        if st.get('selection'): bits.append(f"選んでいる文字「{str(st['selection'])[:200]}」")
-        if st.get('sentence'): bits.append(f"カーソルの文「{str(st['sentence'])[:200]}」（段落 {st.get('para')}）")
-        if st.get('playing'): bits.append('読み上げを聞いている')
-        if bits:
-            lines.append(f"みきさんの画面の今（{age}秒前）: " + '／'.join(bits) + '。「ここ」「この文」はこれ。')
+        if st.get('thumb'):
+            # サムネの編集を開いている間は、台本の文ではなくサムネが「これ」（2026-11-21 本人「このサムネとかって言っても通じるのか？」）
+            from app.services.thumbnail_doc import cli
+            room, cid = st.get('thumb_room') or '', st.get('thumb_content') or ''
+            t = f"みきさんの画面の今（{age}秒前）: 台本の上のサムネの{st['thumb']}を、サムネの編集で開いている"
+            if cid:
+                t += f"（作品 content_id={cid}、部屋 {room}）"
+            t += '。「このサムネ」「これ」はこのサムネ。'
+            if st.get('thumb_part'):
+                t += f"選んでいる部品: {str(st['thumb_part'])[:600]}。「この文字」「この絵」「これ」はこの部品。"
+            if cid:
+                t += (f"中身は {cli()} show {room} {cid}、今の絵は {cli()} render {room} {cid}（Read で見る）。"
+                      f"直すと、みきさんの開いている画面がその場で変わる。")
+            lines.append(t)
+        else:
+            if st.get('selection'): bits.append(f"選んでいる文字「{str(st['selection'])[:200]}」")
+            if st.get('sentence'): bits.append(f"カーソルの文「{str(st['sentence'])[:200]}」（段落 {st.get('para')}）")
+            if st.get('playing'): bits.append('読み上げを聞いている')
+            if bits:
+                lines.append(f"みきさんの画面の今（{age}秒前）: " + '／'.join(bits) + '。「ここ」「この文」はこれ。')
     try:
         from app.services import script_listen_thumbs as T
         items = T.status(d)
@@ -189,7 +203,9 @@ def context_lines(room_id: str) -> list[str]:
             ws = '、'.join(f"{i['order'] + 1}枚目 content_id={i['content_id']}" for i in items)
             lines.append(f"台本の上のサムネは部品で持つ作品（部屋 {room}）: {ws}。直すのは {cli()}（show/set/repaint/finish/render/undo、"
                          f"部屋は {room}）。直した形は画面が数秒でドキュメントの絵に入れる（すぐ入れるなら "
-                         f"{PY} -m app.services.script_listen_thumbs sync {d}）。")
+                         f"{PY} -m app.services.script_listen_thumbs sync {d}）。"
+                         "頼まれた所だけを部品で直す（背景の話なら背景の部品・色だけ、文字の話ならその文字だけ）。人物の絵を作り替える時は "
+                         ".claude/skills/talk-script/thumbnail.md の7節。会話にサムネの絵や部品が添えてあれば、それが話の対象。")
     except Exception:
         pass
     return lines

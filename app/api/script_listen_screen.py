@@ -248,6 +248,20 @@ class ThumbSync(BaseModel):
     content_id: str | None = Field(None, max_length=100)
 
 
+class ThumbSnapshot(BaseModel):
+    content_id: str = Field(..., max_length=100)
+    marks: list = Field(default_factory=list, max_length=200)
+    box: list[float] | None = Field(None, max_length=4)
+
+
+@router.post('/doc/{doc_id}/thumb/snapshot')
+async def thumb_snapshot(doc_id: str, body: ThumbSnapshot, user: TokenData = Depends(get_current_user)):
+    """The thumbnail as it is now, with the pen lines and the picked part's frame drawn on it, as a picture the chat can carry."""
+    from app.services import script_listen_thumbs as T
+    try: return await run_in_threadpool(T.snapshot, S.doc_id_from(doc_id), body.content_id, body.marks, body.box)
+    except Exception as exc: _fail(exc)
+
+
 @router.post('/doc/{doc_id}/thumb/sync')
 async def thumb_sync(doc_id: str, body: ThumbSync, user: TokenData = Depends(get_current_user)):
     from app.services import script_listen_thumbs as T
@@ -270,6 +284,9 @@ class ScreenState(BaseModel):
     selection: str = Field('', max_length=4000)
     playing: bool = False
     thumb: str = Field('', max_length=200)
+    thumb_room: str = Field('', max_length=100)
+    thumb_content: str = Field('', max_length=100)
+    thumb_part: str = Field('', max_length=1500)
 
 
 @router.post('/doc/{doc_id}/state')
