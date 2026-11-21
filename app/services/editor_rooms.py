@@ -187,9 +187,20 @@ def context_lines(room_id: str) -> list[str]:
                              f"直すのは {cli()}（show {a} {info['content_id']} で部品の一覧、set で位置・大きさ・色・文字、"
                              "repaint で絵の部品の範囲だけ描き直し、finish で文字より奥の絵を構図のまま光・影を整えた1枚に仕上げる、"
                              "render で今の形を PNG にして確かめる、undo で1つ前に戻す）。"
-                             "mcp__timeline は使わない。保存するとエディターの画面がすぐ変わる。")
+                             "mcp__timeline は使わない。保存するとエディターの画面がすぐ変わる。"
+                             "直す時はこの作品をそのまま直し、新しいサムネの作品を作らない。")
             else:
                 lines.append(f"この部屋の作品: content_id={info['content_id']}。タイムラインは mcp__timeline__* で直す。")
+                try:   # 動画とひと組のサムネ（エディターの「サムネ」で開く）。2026-11-21 本人「サムネは動画とセット」
+                    from app.services.thumbnail_doc import cli, thumbnails_of
+                    th = thumbnails_of(a, info['content_id'])
+                except Exception:
+                    th = []
+                if th:
+                    ws = '、'.join(f"{k + 1}枚目「{c.get('title')}」content_id={c['id']}" for k, c in enumerate(th))
+                    lines.append(f"この動画のサムネ（エディターの「サムネ」で開く・この会話と同じ）: {ws}。直すのは {cli()}"
+                                 f"（show/set/repaint/finish/render/undo、部屋は {a}）。直す時は今のサムネをそのまま直し、"
+                                 "新しいサムネの作品を作らない（別の案を頼まれた時だけ create --video で同じ動画に足す）。")
         lines.append(f"本体の部屋の話（決まったこと・台本・素材の場所）は lookup(source=messages, room_id={a}) で読む。"
                      "記憶・ルールは本体の部屋と同じ。ほかの制作の部屋は下の一覧。")
         sibs = [c for c in children(a) if c["room_id"] != room_id]

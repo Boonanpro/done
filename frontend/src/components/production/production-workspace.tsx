@@ -42,7 +42,14 @@ type ProductionContent = {
   outputs: Array<Record<string, unknown>>;
   created_at: string;
   updated_at: string;
+  /** サムネの作品なら、ひと組の動画の作品（2026-11-21 本人「サムネは必ず動画とセットで」） */
+  video_id?: string | null;
+  /** 前に増えてしまったサムネの控え（消さずに隠す） */
+  archived?: boolean;
 };
+
+const isThumbContent = (c: ProductionContent | null | undefined) =>
+  !!c && (c.format === 'thumbnail' || !!(c.timeline as { thumbnail?: unknown } | undefined)?.thumbnail);
 
 type ProductionJob = {
   id: string;
@@ -200,6 +207,14 @@ export function ProductionWorkspace({
     window.history.replaceState(null, '', url.toString());
   }, []);
 
+  // 作品を開く: 押した札にすぐ「開いています」を出し、エディターの組み立ては画面を止めずに進める
+  // （長い作品では組み立てに0.3〜1秒かかり、その間クリックしたまま画面が固まっていた。2026-11-19）
+  const openContent = (content: ProductionContent) => {
+    setOpeningContentId(content.id);
+    startOpening(() => setSelectedContent(content));
+    setUrlContentId(content.id);
+  };
+
   // Job ids we've already reacted to as terminal (done/failed). Without this, loadJobs would
   // call loadAll on EVERY poll as long as any terminal job exists (a finished build is always
   // 'done'), and loadAll churns selectedContent's identity -> loadJobs re-fires -> loadAll ...
@@ -256,9 +271,30 @@ export function ProductionWorkspace({
   }, [hasProcessing, loadAll]);
 
   const selectedContentId = selectedContent?.id ?? null;
+  // 動画とひと組のサムネを開いている間も、横の「ダンと制作」はその動画の会話のまま
+  const chatContentId = selectedContent && isThumbContent(selectedContent) && selectedContent.video_id
+    ? selectedContent.video_id : selectedContentId;
   useEffect(() => {
-    if (!booting) onContentChange?.(selectedContentId);
-  }, [booting, selectedContentId, onContentChange]);
+    if (!booting) onContentChange?.(chatContentId);
+  }, [booting, chatContentId, onContentChange]);
+  // 動画ごとのサムネ（1枚目が表のサムネ）
+  const thumbsByVideo = useMemo(() => {
+    const map = new Map<string, ProductionContent[]>();
+    for (const c of contents) {
+      if (!isThumbContent(c) || !c.video_id || c.archived) continue;
+      const list = map.get(c.video_id) || [];
+      list.push(c);
+      map.set(c.video_id, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => {
+        const pa = (a as { pattern_order?: number }).pattern_order ?? 99;
+        const pb = (b as { pattern_order?: number }).pattern_order ?? 99;
+        return pa - pb || a.created_at.localeCompare(b.created_at);
+      });
+    }
+    return map;
+  }, [contents]);
 
   // ライブラリを見ている間、素材と作品が変わったら（ダンが「ダンと制作」から足した時など）すぐ読み直す。
   // 一覧そのもの（大きい部屋で1MB超）は変わった時だけ取り、毎回は数バイトの印だけを見る。
@@ -655,21 +691,33 @@ export function ProductionWorkspace({
   };
 
   // 部品で持つサムネ（背景・人物・文字・矢印が別々）。同じ制作の窓の中で、右の「ダンと制作」と一緒に開く
-  if (selectedContent && (selectedContent.format === 'thumbnail' || !!(selectedContent.timeline as { thumbnail?: unknown } | undefined)?.thumbnail)) {
-    return (
+  if (selectedContent && isThumbContent(selectedContent)) {
+    // 動画とひと組のサムネは、上の「動画 / サムネ」の切り替えから開く。戻ると動画のエディター
+    const video = selectedContent.video_id ? contents.find((c) => c.id === selectedContent.video_id) || null : null;
+    const siblings = video ? thumbsByVideo.get(video.id) || [] : [];
+    const editor = (
       <ThumbnailEditor
         key={selectedContent.id}
         roomId={roomId}
         contentId={selectedContent.id}
-        title={selectedContent.title}
+        title={video ? `${video.title}｜${selectedContent.title}` : selectedContent.title}
         compact={compact}
         phoneChat={phoneChat}
+        backLabel={video ? '動画に戻る' : undefined}
         onBack={() => {
+          if (video) { openContent(video); return; }
           setSelectedContent(null);
           setUrlContentId(null);
           void loadAll();
         }}
       />
+    );
+    if (!video) return editor;
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <WorkSections video={video} thumbs={siblings} current={selectedContent.id} compact={compact} onOpen={openContent} />
+        <div className="min-h-0 flex-1">{editor}</div>
+      </div>
     );
   }
 
@@ -727,6 +775,20 @@ export function ProductionWorkspace({
         sequenceAssets={sequencePictureAssets(selectedContent, assets).map(sequenceAssetForEditor)}
         phoneChat={phoneChat}
         headerTools={
+          <>
+          <VideoThumbButton
+            roomId={roomId}
+            thumb={(thumbsByVideo.get(selectedContent.id) || [])[0] || null}
+            compact={compact}
+            onOpen={openContent}
+            onCreate={async () => {
+              const res = await fetch(`/api/v1/production-assets/contents/${encodeURIComponent(selectedContent.id)}/thumbnails?room_id=${encodeURIComponent(roomId)}`, { method: 'POST', credentials: 'include' });
+              if (!res.ok) { toast.error('サムネを作れませんでした'); return; }
+              const made = (await res.json()) as ProductionContent;
+              setContents((prev) => (prev.some((c) => c.id === made.id) ? prev : [...prev, made]));
+              openContent(made);
+            }}
+          />
           <div ref={assetsWrapRef} className={compact ? '' : 'relative'}>
             <button
               type="button"
@@ -787,6 +849,7 @@ export function ProductionWorkspace({
               </>
             ) : null}
           </div>
+          </>
         }
         sidePanelTop={
           latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') ? (
@@ -870,13 +933,6 @@ export function ProductionWorkspace({
   const folders = ASSET_FOLDERS
     .map((folder) => ({ ...folder, items: assets.filter(folder.test) }))
     .filter((folder) => folder.items.length > 0);
-  // 作品を開く: 押した札にすぐ「開いています」を出し、エディターの組み立ては画面を止めずに進める
-  // （長い作品では組み立てに0.3〜1秒かかり、その間クリックしたまま画面が固まっていた。2026-11-19）
-  const openContent = (content: ProductionContent) => {
-    setOpeningContentId(content.id);
-    startOpening(() => setSelectedContent(content));
-    setUrlContentId(content.id);
-  };
   // 「新規作成」: 空のタイムラインの作品を作ってすぐ開く。右の「ダンと制作」で話しながら組み立てる
   // （2026-11-12 本人「新規作成ボタンを押したらタイムラインを開いて、そこで会話する。喋りながら動画が出来ていく」）。
   const createContent = async () => {
@@ -905,7 +961,11 @@ export function ProductionWorkspace({
       setCreating(false);
     }
   };
-  const sortedContents = [...contents].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+  // サムネは動画とひと組なので、一覧には動画だけを出す（動画につながったサムネ・控えのサムネは出さない）。
+  // 2026-11-21 本人「エディターの中にサムネイル単体のページを作るのはやめて」
+  const sortedContents = contents
+    .filter((c) => !(isThumbContent(c) && (c.video_id || c.archived)))
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
 
   // ライブラリ: 左に作品と素材のフォルダ、真ん中に大きく「ダンと制作」（2026-11-12 本人「左のサイドバーに
   // プロジェクト一覧と素材フォルダ、真ん中にチャットをどでかく、それだけでいい」）。素材を足すのも作品を作るのも会話で頼む。
@@ -1036,10 +1096,32 @@ export function ProductionWorkspace({
                 key={content.id}
                 type="button"
                 onClick={() => openContent(content)}
-                className="overflow-hidden rounded-lg border border-border text-left hover:border-primary"
+                className="group overflow-hidden rounded-lg border border-border text-left hover:border-primary"
+                data-content-card={content.id}
               >
                 <span className="relative flex aspect-video items-center justify-center overflow-hidden bg-muted">
                   <ContentCover roomId={roomId} content={content} fallback={<Film className="h-6 w-6 text-muted-foreground" />} />
+                  {(() => {
+                    // マウスを乗せると右下にその動画のサムネ。押すとエディターより先にサムネのページを開く
+                    const thumb = (thumbsByVideo.get(content.id) || [])[0];
+                    if (!thumb) return null;
+                    return (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        title="サムネを開く"
+                        data-card-thumb={thumb.id}
+                        onClick={(event) => { event.stopPropagation(); openContent(thumb); }}
+                        onKeyDown={(event) => { if (event.key === 'Enter') { event.stopPropagation(); openContent(thumb); } }}
+                        className={`absolute bottom-1.5 right-1.5 w-[46%] overflow-hidden rounded-md border-2 border-white shadow-lg transition-opacity hover:border-primary ${compact ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'}`}
+                      >
+                        <span className="flex aspect-video items-center justify-center bg-black">
+                          <ContentCover roomId={roomId} content={thumb} fallback={<ImageIcon className="h-4 w-4 text-white/60" />} />
+                        </span>
+                        <span className="absolute left-1 top-1 rounded bg-black/70 px-1 text-[10px] font-semibold text-white">サムネ</span>
+                      </span>
+                    );
+                  })()}
                   {opening && openingContentId === content.id ? (
                     <span data-opening-content className="absolute inset-0 flex items-center justify-center gap-1.5 bg-black/45 text-[12px] font-medium text-white">
                       <Loader2 className="h-4 w-4 animate-spin" />開いています
@@ -1146,4 +1228,48 @@ function AssetThumb({ asset, fallback }: { asset: ProductionAsset; fallback: Rea
   // 小さい絵はサーバーが最初に頼まれた時に作る（大きな画像や動画をそのまま読まない）
   if (asset.kind === 'image' || asset.kind === 'video') return <img src={assetThumbBase(asset)} alt="" loading="lazy" className="h-full w-full object-cover" />;
   return <>{fallback}</>;
+}
+
+// 動画とひと組の切り替え（動画 / サムネ1 / サムネ2…）。サムネのページの上に出す
+function WorkSections({ video, thumbs, current, compact, onOpen }: {
+  video: ProductionContent; thumbs: ProductionContent[]; current: string; compact: boolean;
+  onOpen: (content: ProductionContent) => void;
+}) {
+  const tab = (active: boolean) =>
+    `flex shrink-0 items-center gap-1 rounded-md px-2.5 ${compact ? 'h-9 text-sm' : 'h-7 text-xs'} font-medium ${active ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`;
+  return (
+    <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-muted/30 px-2 py-1" data-work-sections>
+      <button type="button" className={tab(false)} onClick={() => onOpen(video)} data-section-video><Film className="h-3.5 w-3.5" />動画</button>
+      {thumbs.map((t, k) => (
+        <button key={t.id} type="button" className={tab(t.id === current)} onClick={() => onOpen(t)} data-section-thumb={t.id}>
+          <ImageIcon className="h-3.5 w-3.5" />{thumbs.length > 1 ? `サムネ${k + 1}` : 'サムネ'}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// 動画のエディターの上の「サムネ」。小さな絵を押すとその動画のサムネのページ。まだ無ければ作る
+function VideoThumbButton({ roomId, thumb, compact, onOpen, onCreate }: {
+  roomId: string; thumb: ProductionContent | null; compact: boolean;
+  onOpen: (content: ProductionContent) => void; onCreate: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const cls = `flex items-center gap-1.5 rounded-md border border-border bg-background px-2 text-xs font-medium text-foreground hover:bg-muted ${compact ? 'h-10 w-full text-sm' : 'h-8'}`;
+  if (!thumb) {
+    return (
+      <button type="button" className={cls} disabled={busy} data-video-thumb-create
+        onClick={async () => { setBusy(true); try { await onCreate(); } finally { setBusy(false); } }}>
+        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}サムネを作る
+      </button>
+    );
+  }
+  return (
+    <button type="button" className={cls} onClick={() => onOpen(thumb)} title="この動画のサムネを開く" data-video-thumb={thumb.id}>
+      <span className="flex h-5 w-9 items-center justify-center overflow-hidden rounded-sm bg-black">
+        <ContentCover roomId={roomId} content={thumb} fallback={<ImageIcon className="h-3 w-3 text-white/60" />} />
+      </span>
+      サムネ
+    </button>
+  );
 }
