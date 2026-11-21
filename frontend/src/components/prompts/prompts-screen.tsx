@@ -5,8 +5,8 @@
 // 押すと全文がそのまま出て、その場で書き直せる。誰が読むか・いつ効くか・なぜある文か・履歴は全文の下にたたんである。
 // 使う所: /prompts（app/prompts/page.tsx）と、開発室のボードの「指示文」（artifacts/dev-lead）。
 // 裏側は app/api/prompts_screen.py、文の置き場所と履歴は app/services/prompt_store.py。
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save } from 'lucide-react';
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -14,6 +14,35 @@ import { ApiError } from '@/lib/api-client';
 import { promptsApi, type PromptItem, type PromptSummary, type PromptVersion } from '@/lib/prompts-api';
 import { cn } from '@/lib/utils';
 import { BOX_H, EDGES, H, NODES, W, WORK_FRAME, type ArchEdge, type ArchNode } from './architecture';
+import { diffText, hunks, lineDiff } from './line-diff';
+import { PromptsChat, TalkButton, type PromptChatContext } from './prompts-chat';
+
+type Selection = { from: number; to: number; text: string };
+/** 文の中の位置（何文字目）から行番号（1から） */
+const lineAt = (text: string, offset: number) => text.slice(0, offset).split('\n').length;
+function selectionOf(text: string, start: number, end: number): Selection | null {
+  if (end <= start) return null;
+  const picked = text.slice(start, end);
+  if (!picked.trim()) return null;
+  const to = lineAt(text, picked.endsWith('\n') ? end - 1 : end);
+  return { from: lineAt(text, start), to, text: picked };
+}
+
+/** 変わった所（ダンが直した所）。消した行は赤い線、足した行は緑 */
+function DiffView({ before, after }: { before: string; after: string }) {
+  const rows = useMemo(() => hunks(lineDiff(before, after)), [before, after]);
+  return (
+    <div className="max-h-72 overflow-auto rounded-md border border-stone-200 bg-white font-mono text-[12.5px] leading-relaxed">
+      {rows.map((r, i) => ('gap' in r
+        ? <div key={i} className="bg-stone-50 px-2 text-[11px] text-stone-400">… 同じ行 {r.gap}</div>
+        : <div key={i} className={cn('flex gap-2 whitespace-pre-wrap break-all px-2', r.kind === 'add' ? 'bg-emerald-50 text-emerald-900' : r.kind === 'del' ? 'bg-rose-50 text-rose-900 line-through decoration-rose-400' : 'text-stone-600')}>
+            <span className="w-8 shrink-0 select-none text-right text-stone-400">{r.kind === 'del' ? '' : r.line}</span>
+            <span className="w-3 shrink-0 select-none">{r.kind === 'add' ? '+' : r.kind === 'del' ? '−' : ''}</span>
+            <span className="min-w-0 flex-1">{r.text || ' '}</span>
+          </div>))}
+    </div>
+  );
+}
 
 const WHO: Record<string, string> = { owner: 'みきさん', dan: 'ダン', seed: '元の文' };
 // 前の画面（家の絵）の場所の名前で開かれた時の行き先
@@ -145,14 +174,96 @@ function Diagram({ counts, active, onPick }: { counts: Record<string, number>; a
 }
 
 // ---- 全文と書き直し ----
-function Editor({ id, onBack, onSaved }: { id: string; onBack: () => void; onSaved: () => void }) {
+type DanChange = { before: string; beforeSha: string; after: string; note: string; by: string; at?: string };
+
+function Editor({ id, pulse, onBack, onSaved, onState, onSelection }: {
+  id: string;
+  /** 会話のダンが動いている間・返事が来た時に増える。そのたびに版を見て、ダンが直していれば全文を新しい版にする */
+  pulse: number;
+  onBack: () => void; onSaved: () => void;
+  /** 開いている文と書きかけ（会話に添える） */
+  onState: (item: PromptItem | null, draft: string) => void;
+  /** 選んでいる所・カーソルの行（会話に添える） */
+  onSelection: (sel: Selection | null, cursor: number | null) => void;
+}) {
   const [item, setItem] = useState<PromptItem | null>(null);
   const [draft, setDraft] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [viewing, setViewing] = useState<PromptVersion | null>(null);
+  const [change, setChange] = useState<DanChange | null>(null);   // ダンが会話から直した所（元に戻すまで出す）
+  const [waiting, setWaiting] = useState<PromptItem | null>(null);   // 書きかけがある間に届いたダンの版
+  const [showDiff, setShowDiff] = useState(true);
   const area = useRef<HTMLTextAreaElement>(null);
+  const plain = useRef<HTMLPreElement>(null);
+  const itemRef = useRef<PromptItem | null>(null);
+  const draftRef = useRef('');
+  useLayoutEffect(() => { itemRef.current = item; draftRef.current = draft; }, [item, draft]);
+  useEffect(() => { onState(item, draft); }, [item, draft, onState]);
+
+  // ダンが直したか（会話のダンが動いている間と返事が来た時）。版の印だけ聞き、変わっていたら全文を読み直す
+  const checking = useRef(false);
+  useEffect(() => {
+    if (!pulse || checking.current) return;
+    const now = itemRef.current;
+    if (!now || now.id.startsWith('skill/')) return;
+    checking.current = true;
+    promptsApi.sha(now.id)
+      .then(async got => {
+        if (got.sha === itemRef.current?.sha) return;
+        const fresh = await promptsApi.item(now.id);
+        const old = itemRef.current;
+        if (!old || fresh.sha === old.sha) return;
+        const last = fresh.history[0];
+        const dirty = draftRef.current !== old.text;
+        if (dirty) { setWaiting(fresh); return; }
+        setItem(fresh); setDraft(fresh.text); setViewing(null); setWaiting(null); setShowDiff(true);
+        setChange({ before: old.text, beforeSha: old.sha, after: fresh.text, note: last?.note || '', by: last?.by || 'dan', at: last?.at });
+        toast.success(`${WHO[last?.by || 'dan'] || 'ダン'}が「${fresh.title}」を直しました。`);
+        onSaved();
+      })
+      .catch(() => undefined)
+      .finally(() => { checking.current = false; });
+  }, [pulse, onSaved]);
+
+  function takeWaiting() {
+    const old = itemRef.current;
+    if (!waiting || !old) return;
+    const last = waiting.history[0];
+    setChange({ before: old.text, beforeSha: old.sha, after: waiting.text, note: last?.note || '', by: last?.by || 'dan', at: last?.at });
+    setItem(waiting); setDraft(waiting.text); setWaiting(null); setShowDiff(true);
+    onSaved();
+  }
+
+  async function undoChange() {
+    if (!item || !change) return;
+    setBusy(true); setError('');
+    try {
+      const out = await promptsApi.revert(item.id, change.beforeSha);
+      setItem(out.item); setDraft(out.item.text); setChange(null);
+      toast.success('ダンが直す前の文に戻しました。');
+      onSaved();
+    } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); }
+  }
+
+  const report = (el: HTMLTextAreaElement) => {
+    onSelection(selectionOf(el.value, el.selectionStart, el.selectionEnd), lineAt(el.value, el.selectionStart));
+  };
+  // 読むだけの文・前の版は <pre>。その中で選んだ文を拾う
+  const reportPlain = () => {
+    const pre = plain.current, sel = typeof window !== 'undefined' ? window.getSelection() : null;
+    if (!pre || !sel || !sel.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    if (!pre.contains(range.startContainer) || !pre.contains(range.endContainer)) return;
+    const head = document.createRange();
+    head.selectNodeContents(pre);
+    head.setEnd(range.startContainer, range.startOffset);
+    const start = head.toString().length;
+    const whole = pre.textContent || '';
+    onSelection(selectionOf(whole, start, start + range.toString().length), lineAt(whole, start));
+  };
 
   // 文が替わる時は呼ぶ側が key={id} で作り直すので、ここは開いた時に1回読むだけ
   useEffect(() => {
@@ -178,7 +289,7 @@ function Editor({ id, onBack, onSaved }: { id: string; onBack: () => void; onSav
     setBusy(true); setError('');
     try {
       const out = await promptsApi.save(item.id, draft, note, item.sha);
-      setItem(out.item); setDraft(out.item.text); setNote(''); setViewing(null);
+      setItem(out.item); setDraft(out.item.text); setNote(''); setViewing(null); setChange(null); setWaiting(null);
       toast.success(out.saved ? '保存しました。次にこの文が読まれる時から効きます。' : '中身が同じなので変えていません。');
       onSaved();
     } catch (err) { setError(errorText(err)); }
@@ -215,7 +326,7 @@ function Editor({ id, onBack, onSaved }: { id: string; onBack: () => void; onSav
 
   return (
     <div className="space-y-3">
-      <button type="button" onClick={onBack} className="inline-flex items-center gap-1 text-sm text-stone-500 hover:text-stone-800 lg:hidden">
+      <button type="button" onClick={onBack} className="inline-flex items-center gap-1 text-sm text-stone-500 hover:text-stone-800 xl:hidden">
         <ArrowLeft className="h-4 w-4" />一覧に戻る
       </button>
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -223,6 +334,30 @@ function Editor({ id, onBack, onSaved }: { id: string; onBack: () => void; onSav
         <StateBadge p={{ readonly: item.readonly, last_by: last?.by, last_at: last?.at }} />
         <span className="text-xs text-stone-400">{draft.length.toLocaleString()}字</span>
       </div>
+
+      {waiting ? (
+        <div className="flex flex-col gap-2 rounded-lg border border-sky-300 bg-sky-50 p-2.5 text-sm text-sky-950 sm:flex-row sm:items-center">
+          <span className="flex-1">ダンがこの文の新しい版を保存しました。今の書きかけはまだ保存していません。</span>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={takeWaiting} className="border-sky-300 bg-white text-sky-900 hover:bg-sky-100">ダンの版を開く（書きかけは消える）</Button>
+          </div>
+        </div>
+      ) : null}
+      {change ? (
+        <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-2.5" data-testid="dan-change">
+          <div className="flex flex-wrap items-start gap-2">
+            <p className="min-w-0 flex-1 text-sm text-amber-950">
+              <b>{WHO[change.by] || 'ダン'}が直しました{change.at ? `（${when(change.at)}）` : ''}</b>{change.note ? `：${change.note}` : ''}
+            </p>
+            <div className="flex shrink-0 gap-1.5">
+              <Button size="sm" variant="outline" onClick={() => setShowDiff(v => !v)} className="h-8 border-amber-300 bg-white px-2 text-amber-900 hover:bg-amber-100">{showDiff ? '変わった所を隠す' : '変わった所'}</Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => void undoChange()} className="h-8 border-amber-300 bg-white px-2 text-amber-900 hover:bg-amber-100"><RotateCcw className="mr-1 h-3.5 w-3.5" />元に戻す</Button>
+              <button type="button" aria-label="閉じる" onClick={() => setChange(null)} className="rounded p-1 text-amber-800 hover:bg-amber-100"><X className="h-4 w-4" /></button>
+            </div>
+          </div>
+          {showDiff ? <DiffView before={change.before} after={change.after} /> : null}
+        </div>
+      ) : null}
 
       {viewing ? (
         <div className="space-y-2">
@@ -233,11 +368,11 @@ function Editor({ id, onBack, onSaved }: { id: string; onBack: () => void; onSav
               <Button size="sm" onClick={() => void revert(viewing)} disabled={busy}><RotateCcw className="mr-1 h-4 w-4" />この版に戻す</Button>
             ) : null}
           </div>
-          <pre className="whitespace-pre-wrap rounded-md border bg-stone-50 p-3 text-[14px] leading-relaxed text-stone-800">{viewing.text}</pre>
+          <pre ref={plain} onMouseUp={reportPlain} onTouchEnd={reportPlain} className="whitespace-pre-wrap rounded-md border bg-stone-50 p-3 text-[14px] leading-relaxed text-stone-800">{viewing.text}</pre>
         </div>
       ) : item.readonly ? (
         <div className="space-y-2">
-          <pre className="whitespace-pre-wrap rounded-md border bg-stone-50 p-3 text-[14px] leading-relaxed text-stone-800">{item.text}</pre>
+          <pre ref={plain} onMouseUp={reportPlain} onTouchEnd={reportPlain} className="whitespace-pre-wrap rounded-md border bg-stone-50 p-3 text-[14px] leading-relaxed text-stone-800">{item.text}</pre>
           <p className="text-xs text-stone-500">この文はまだプログラムの中にあるので、ここでは読むだけです。直したい時はダンに言ってください。この画面で直せる形に移します。</p>
         </div>
       ) : (
@@ -250,6 +385,10 @@ function Editor({ id, onBack, onSaved }: { id: string; onBack: () => void; onSav
             ref={area}
             value={draft}
             onChange={e => setDraft(e.target.value)}
+            onSelect={e => report(e.currentTarget)}
+            onMouseUp={e => report(e.currentTarget)}
+            onKeyUp={e => report(e.currentTarget)}
+            onTouchEnd={e => report(e.currentTarget)}
             spellCheck={false}
             className="block w-full resize-none overflow-hidden rounded-lg border-2 border-amber-300 bg-white px-3 py-2 text-[14px] leading-relaxed text-stone-900 shadow-inner outline-none focus:border-amber-500 focus:ring-4 focus:ring-amber-100"
           />
@@ -341,7 +480,45 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const list = useRef<HTMLElement>(null);
 
   const [round, setRound] = useState(0);   // 保存・戻すの後に一覧を読み直す
-  const load = () => setRound(n => n + 1);
+  const load = useCallback(() => setRound(n => n + 1), []);
+
+  // ---- ダンとの会話（2026-11-21）。今開いている文・選んだ所・書きかけを会話に添える ----
+  const [pulse, setPulse] = useState(0);
+  const [talkOpen, setTalkOpen] = useState(false);   // スマホの下から出す会話
+  const [talkBusy, setTalkBusy] = useState(false);
+  const [open, setOpen] = useState<{ item: PromptItem | null; draft: string }>({ item: null, draft: '' });
+  // 選んだ所は、どの文で選んだかと一緒に持つ（別の文を開いたら使わない）
+  const [picked, setPicked] = useState<{ id: string; sel: Selection | null; cursor: number | null }>({ id: '', sel: null, cursor: null });
+  const onState = useCallback((item: PromptItem | null, draft: string) => setOpen({ item, draft }), []);
+  const onSelection = useCallback((next: Selection | null, cursor: number | null) => setPicked({ id, sel: next, cursor }), [id]);
+  const sel = useMemo(() => (picked.id === id ? picked : { sel: null, cursor: null }), [picked, id]);
+  const shownDraft = useDeferredValue(open.draft);
+  const shown = open.item && open.item.id === id ? open.item : null;
+  const draftDiff = useMemo(() => (shown && !shown.readonly && shownDraft !== shown.text ? diffText(shown.text, shownDraft) : null), [shown, shownDraft]);
+  const talkCtx = useMemo<PromptChatContext>(() => ({
+    place: node ? { id: node.id, name: node.name } : null,
+    prompt: shown ? { id: shown.id, title: shown.title, reader: shown.reader, when: shown.when, readonly: shown.readonly, source: shown.source, chars: shown.chars } : null,
+    selection: sel.sel,
+    cursor: sel.cursor,
+    draftDiff,
+  }), [node, shown, sel, draftDiff]);
+  const bump = useCallback(() => setPulse(n => n + 1), []);
+  // PC の会話の列は、この画面をスクロールさせている枠の高さに合わせる（開発室の中では上に切り替えの帯があり、画面の高さより低い）
+  const talkBox = useRef<HTMLElement>(null);
+  const [frameH, setFrameH] = useState(0);
+  useLayoutEffect(() => {
+    let el = talkBox.current?.parentElement || null;
+    while (el && !/(auto|scroll)/.test(getComputedStyle(el).overflowY)) el = el.parentElement;
+    const frame = el;
+    const fit = () => setFrameH(frame ? frame.clientHeight : window.innerHeight);
+    fit();
+    const ro = frame ? new ResizeObserver(fit) : null;
+    if (frame) ro!.observe(frame);
+    window.addEventListener('resize', fit);
+    return () => { ro?.disconnect(); window.removeEventListener('resize', fit); };
+  }, []);
+  // スマホの「ダンと話す」は、全文の下に貼り付く保存の帯の上に出す
+  const lift = draftDiff ? 'high' : shown && !shown.readonly ? 'mid' : 'low';
   useEffect(() => {
     let live = true;
     promptsApi.list()
@@ -369,7 +546,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const readonly = here.filter(p => p.readonly);
 
   useEffect(() => {   // 狭い画面では、選んだ物の所まで送る
-    if (typeof window === 'undefined' || window.innerWidth >= 1024) return;
+    if (typeof window === 'undefined' || window.innerWidth >= 1280) return;
     const target = id ? detail.current : place ? list.current : null;
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [id, place]);
@@ -401,8 +578,8 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
       ) : null}
       <Diagram counts={counts} active={node?.id || ''} onPick={p => onGo({ place: p })} />
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,340px)_minmax(0,1fr)]">
-        <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden lg:block')}>
+      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)] xl:grid-cols-[minmax(0,300px)_minmax(0,1fr)_minmax(0,380px)]">
+        <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block')}>
           {node ? (
             <div className="flex items-start gap-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -444,14 +621,32 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
             </details>
           ) : null}
         </aside>
-        <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && 'hidden lg:block')}>
+        <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && 'hidden xl:block')}>
           {id ? (
-            <Editor key={id} id={id} onBack={() => onGo({ place })} onSaved={load} />
+            <Editor key={id} id={id} pulse={pulse} onBack={() => onGo({ place })} onSaved={load} onState={onState} onSelection={onSelection} />
           ) : (
             <p className="text-sm text-stone-500">左の一覧から文を選ぶと、ここに全文がそのまま出ます。</p>
           )}
         </main>
+        {/* ダンとの会話。PC は全文の横の列（スクロールしても見えたまま）、スマホは下から出す。中身は1つだけ置く（会話の線を2本にしない） */}
+        <section ref={talkBox} aria-label="ダンと話す" style={{ ['--talk-h' as string]: frameH ? `${frameH - 16}px` : undefined }}
+          className={cn(
+            'z-50 flex-col overflow-hidden bg-white',
+            talkOpen ? 'flex' : 'hidden',
+            'fixed inset-x-0 bottom-0 h-[72dvh] rounded-t-2xl border-t border-stone-300 shadow-[0_-8px_30px_rgba(0,0,0,0.18)]',
+            'lg:sticky lg:inset-auto lg:top-2 lg:flex lg:h-[var(--talk-h,calc(100dvh-1rem))] lg:max-h-[900px] lg:rounded-xl lg:border lg:border-stone-200 lg:shadow-none',
+          )}>
+          <PromptsChat ctx={talkCtx} onPulse={bump} onBusy={setTalkBusy} onClearSelection={() => setPicked(v => ({ ...v, sel: null }))}
+            header={(
+              <div className="flex items-center gap-2 border-b border-stone-200 px-3 py-2">
+                <span className="flex-1 text-sm font-bold text-stone-800">ダンと話して直す</span>
+                {talkBusy ? <span className="text-[11px] text-emerald-700">ダンが作業中</span> : null}
+                <button type="button" onClick={() => setTalkOpen(false)} aria-label="会話を閉じる" className="rounded p-1 text-stone-500 hover:bg-stone-100 lg:hidden"><X className="h-5 w-5" /></button>
+              </div>
+            )} />
+        </section>
       </div>
+      {!talkOpen ? <div className="lg:hidden"><TalkButton onOpen={() => setTalkOpen(true)} lift={lift} busy={talkBusy} /></div> : null}
     </div>
   );
 }
