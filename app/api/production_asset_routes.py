@@ -242,16 +242,24 @@ def _write_assets(room_id: str, assets: list[dict[str, Any]]) -> None:
 
 
 def _read_json_list(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    # 書いている途中の一覧を「空」と読むと、作品が無いと判断されて別の作品に付け替わる（2026-11-21 台本のサムネ1枚目が
+    # 部品の作品から1枚絵の作品へ入れ替わった）。書き込みは丸ごと置き換えにし、読めなかった時は少し待って読み直す。
+    for attempt in range(4):
+        if not path.exists():
+            return []
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            if attempt == 3:
+                return []
+            time.sleep(0.05 * (attempt + 1))
+    return []
 
 
 def _write_json_list(path: Path, items: list[dict[str, Any]]) -> None:
-    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _read_contents(room_id: str) -> list[dict[str, Any]]:

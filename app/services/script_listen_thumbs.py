@@ -106,7 +106,13 @@ def open_work(doc_id: str, object_id: str | None, order: int | None) -> dict[str
         data = load(doc_id)
         room = data.get('room') or room_of(doc_id)
         it = _item(data, object_id, order)
-        if it and _rev(room, it['content_id']) >= 0:
+        rev = _rev(room, it['content_id']) if it else -1
+        for _ in range(3):                      # 作品が一瞬読めなくても、つないだ作品を1枚絵の新しい作品で置き換えない
+            if not it or rev >= 0:
+                break
+            time.sleep(0.2)
+            rev = _rev(room, it['content_id'])
+        if it and rev >= 0:
             if object_id and it.get('object') != object_id:
                 it['object'] = object_id
                 _save(doc_id, {**data, 'room': room})
