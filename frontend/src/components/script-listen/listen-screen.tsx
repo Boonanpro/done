@@ -1983,7 +1983,7 @@ export function ListenScreen({ docId }: { docId: string }) {
         onWheel={() => { lastUserScroll.current = Date.now(); }}
         onTouchMove={() => { lastUserScroll.current = Date.now(); }}
       >
-        <div className="mx-auto flex max-w-6xl gap-6 px-3 pb-44 pt-4 sm:px-6">
+        <div className="mx-auto flex max-w-6xl gap-6 px-3 pb-44 pt-4 sm:pl-10 sm:pr-6">
           <div ref={contentRef} className="relative min-w-0 max-w-3xl flex-1" onMouseMove={onContentMove} onMouseLeave={() => setHoverPara(null)}>
             {!touch && hoverPara && (() => {
               const here = says[cur];
@@ -1998,7 +1998,7 @@ export function ListenScreen({ docId }: { docId: string }) {
                   onMouseDown={e => e.preventDefault()}
                   onClick={() => playPara(hoverPara.n)}
                   style={{ top: hoverPara.top }}
-                  className="absolute -left-[22px] z-10 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-stone-800 text-white shadow hover:bg-stone-900 sm:-left-[26px]"
+                  className="absolute -left-[36px] z-10 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-stone-800 text-white shadow hover:bg-stone-900"
                 >
                   {on ? <Pause className="h-3 w-3 fill-current" /> : <Play className="ml-px h-3 w-3 fill-current" />}
                 </button>

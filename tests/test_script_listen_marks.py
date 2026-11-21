@@ -372,12 +372,12 @@ def test_words_typed_in_front_of_struck_words_stay_in_front():
     new = ''.join(screen[k] for k in keep)
     assert new == '実際に、飲んでまえ方も。'
     struck = [k for k in range(len(screen)) if dmask[k] == '1']
-    def first(j1, j2):
+    def lead(j1, j2):
         lo = keep[j1 - 1] + 1 if j1 > 0 else 0
         hi = keep[j2] if j2 < len(keep) else len(screen)
         here = [k for k in struck if lo <= k < hi]
-        return bool(here) and keep[j2 - 1] < here[0]
-    new_toks, _ = M.plan(toks, new, '0' * len(new), 'suggest', ins_first=first)
+        return sum(1 for k in keep[j1:j2] if k < here[0]) if here else 0
+    new_toks, _ = M.plan(toks, new, '0' * len(new), 'suggest', lead_of=lead)
     fresh = M.regroup(new_toks, 1, ids=iter(['o-1']))
     assert [(f['del'], f['ins'], f.get('lead')) for f in fresh] == [('いた', 'まえ', 2)]
     view, _ = M.overlay(doc, fresh)
@@ -398,3 +398,26 @@ def test_owners_words_of_two_sentences_are_drawn_once():
     assert placed == {'o-1': 2}
     says = [u for u in S.outline(view) if u.get('para') == 2]
     assert [[(s['t'], s.get('ins')) for s in u['segs']] for u in says] == [[('一つ目です。', 'o-1')], [('二つ目です。', 'o-1')]]
+
+
+def test_words_typed_on_both_sides_of_struck_words_keep_their_places(tmp_path, monkeypatch):
+    # 11/21 on the screen: 「まえ」 typed in front of the struck 「かに」 and 「あと」 behind it read 「かに」「まえあと」 once written
+    doc = _ends(_doc(('◎台本\n', 'HEADING_2'), '「たしかに、ちゃんと」\n'))
+    doc['revisionId'], doc['_account'] = 'r1', 'a'
+    monkeypatch.setattr(S, 'OWNER_SUGS', tmp_path / 'sugs.json')
+    monkeypatch.setattr(S, 'STATE', tmp_path)
+    monkeypatch.setattr(S, 'fetch', lambda d: doc)
+    monkeypatch.setattr(S, '_follow', lambda d: None)
+    def no_write(*a, **k): raise AssertionError('suggestion mode wrote the doc')
+    monkeypatch.setattr(S, '_docs', no_write)
+    old, screen = '「たしかに、ちゃんと」', '「たしまえかにあと、ちゃんと」'
+    r = S.replace('d', 1, 1, old, screen, '0' * len(old), '0' * len(screen), 'suggest', '00000' + '11' + '0' * 9)
+    sugs = M.load(tmp_path / 'sugs.json', 'd')
+    assert [(s['del'], s['ins'], s.get('lead')) for s in sugs] == [('かに', 'まえあと', 2)]
+    view, _ = M.overlay(doc, sugs)
+    assert M.text_of(_toks(view, 1)[0]) == screen
+    # then more typed right behind the struck words: still in its place
+    r = S.replace('d', 1, 1, screen, '「たしまえかにごあと、ちゃんと」', '0' * len(screen), '0' * 16, 'suggest', '')
+    sugs = M.load(tmp_path / 'sugs.json', 'd')
+    view, _ = M.overlay(doc, sugs)
+    assert M.text_of(_toks(view, 1)[0]) == '「たしまえかにごあと、ちゃんと」'

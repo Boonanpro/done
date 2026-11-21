@@ -325,12 +325,12 @@ def _signals(old_toks, ops):
     return sig
 
 
-def plan(old_toks, new, new_bmask, mode, force=None, ins_first=None):
+def plan(old_toks, new, new_bmask, mode, force=None, lead_of=None):
     """The characters after the owner turned ``old_toks`` into ``new`` (with bold ``new_bmask``), in ``mode`` 'edit'
     (the doc changes) or 'suggest' (the change becomes the owner's suggestion). Returns (tokens, settled) where
     settled is {owner sid: accept} decided by this change. Raises Settle when Dan's suggestions must be decided in
-    the doc first, Refused when the change cannot be made. ``ins_first(j1, j2)``: the new words ``new[j1:j2]`` of a
-    replacement stand before the words they strike on the screen (typed in front of struck words)."""
+    the doc first, Refused when the change cannot be made. ``lead_of(j1, j2)``: how many of the new words ``new[j1:j2]``
+    of a replacement stand before the words it strikes on the screen (typed in front of struck words)."""
     ops = ops_for(old_toks, new)
     force = force or {}
     sig = _signals(old_toks, ops)
@@ -371,17 +371,19 @@ def plan(old_toks, new, new_bmask, mode, force=None, ins_first=None):
             t = dict(t); t['src'] = i1 + k
             if t['k'] == 'p': t['k'], t['sid'], t['who'] = 'd', None, 'o'
             struck_here.append(t)
-        front = bool(struck_here) and j2 > j1 and op_mode == 'suggest' and bool(ins_first) and ins_first(j1, j2)
-        if not front: out += struck_here
+        added = []
         for j in range(j1, j2):
             ch = new[j]
             if ch == '\n':
                 if op_mode == 'suggest':
                     raise Refused('提案モードでは、段落を分けることはできません。編集モードに切り替えてください。' if mode == 'suggest' else
                                   '提案の文字の中では段落を分けられません。提案を承認か却下してから分けてください。')
-                out.append({'ch': '\n', 'k': 'n', 'sid': None, 'b': False, 'pos': None}); continue
-            out.append({'ch': ch, 'k': 'new' if op_mode == 'edit' else 'i', 'sid': None, 'b': nb(j), 'pos': None, 'who': 'o'})
-        if front: out += struck_here
+                added.append({'ch': '\n', 'k': 'n', 'sid': None, 'b': False, 'pos': None}); continue
+            added.append({'ch': ch, 'k': 'new' if op_mode == 'edit' else 'i', 'sid': None, 'b': nb(j), 'pos': None, 'who': 'o'})
+        front = 0
+        if struck_here and added and op_mode == 'suggest' and lead_of:
+            front = max(0, min(int(lead_of(j1, j2) or 0), len(added)))
+        out += added[:front] + struck_here + added[front:]
     return out, settled
 
 

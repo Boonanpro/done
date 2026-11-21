@@ -654,23 +654,23 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
         shown, sugs, placed = view(doc_id, doc)
         new_bmask = (new_bmask or '')[:len(new)].ljust(len(new), '0')
         screen = new
-        ins_first = None
+        lead_of = None
         if mode == 'suggest' and '1' in (new_dmask or ''):
             # Letters struck on the screen are still in its text; for the change they are taken out (in suggestion
             # mode taking out = striking), so which of two same letters is struck does not hang on the comparison.
             keep = [k for k in range(len(new)) if not (k < len(new_dmask) and new_dmask[k] == '1')]
             new, new_bmask = ''.join(new[k] for k in keep), ''.join(new_bmask[k] for k in keep)
             struck_at = [k for k in range(len(screen)) if k < len(new_dmask) and new_dmask[k] == '1']
-            def ins_first(j1, j2, keep=keep, struck_at=struck_at):
+            def lead_of(j1, j2, keep=keep, struck_at=struck_at):
                 # Words typed in front of the words struck with them stay in front (11/21: typed before struck words,
                 # they moved behind them once written).
                 lo = keep[j1 - 1] + 1 if j1 > 0 else 0
                 hi = keep[j2] if j2 < len(keep) else len(screen)
                 here = [k for k in struck_at if lo <= k < hi]
-                return bool(here) and keep[j2 - 1] < here[0]
+                return sum(1 for k in keep[j1:j2] if k < here[0]) if here else 0
         para_from, para_to, toks, end, old, new, new_bmask, rebased = _locate(shown, para_from, para_to, old, new,
                                                                               old_bmask, new_bmask)
-        if rebased: ins_first = None
+        if rebased: lead_of = None
         # Boldness is compared on the screen's own terms (bold marks, not the heading style), so only what the owner
         # switched with Ctrl+B is written.
         if not rebased and len(old_bmask or '') == len(old):
@@ -679,7 +679,7 @@ def replace(doc_id, para_from, para_to, old, new, old_bmask='', new_bmask='', mo
             # Nothing changes; the screen may still show words the doc does not have (struck, typed again).
             return {'changed': False, 'reload': not rebased and screen != old}
         try:
-            new_toks, settled = M.plan(toks, new, new_bmask, mode, ins_first=ins_first)
+            new_toks, settled = M.plan(toks, new, new_bmask, mode, lead_of=lead_of)
         except M.Refused as exc:
             raise ListenError(str(exc), 409)
         except M.Adopt as need:
