@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Bot, CheckCheck, Columns2, ExternalLink, ImagePlus, Loader2, MessageSquare, MessageSquarePlus, Pause, PenLine, Pencil, Play, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
 import { toast } from 'sonner';
-import { get as idbGet, set as idbSet } from 'idb-keyval';
+import { del as idbDel, keys as idbKeys } from 'idb-keyval';
 
 import {
   errorText, listenApi, type DanJob, type EditMode, type ListenDoc, type ListenUnit, type Reference, type SayUnit, type Suggestion, type Thread,
@@ -29,6 +29,7 @@ import { DanLiveContext, isLive } from './listen-dan';
 import { RefsPanel, type SectionHead } from './listen-refs';
 import { ListenShare } from './listen-share';
 import { ListenChat, ListenThumb, type ThumbContext, type ThumbTarget } from './listen-side';
+import { mark as perfMark, note as perfNote, startReport } from './listen-perf';
 
 const RATES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];   // 11/20 本人「4倍までつけてほしい」
 const RATE_KEY = 'script-listen-rate';
@@ -38,6 +39,45 @@ const COMPARE_KEY = 'script-listen-compare';
 const CHAT_KEY = 'script-listen-chat';
 const posKey = (doc: string) => `script-listen-pos-${doc}`;
 const cacheKey = (doc: string, voice: string) => `script-listen-doc-${doc}-${voice}`;
+// Last time's doc, kept in localStorage (read at once). 11/21 本人「台本読み上げページも遅い」: it was kept in IndexedDB,
+// and on the owner's Chrome reading it back took 4.5–7.7 s (the site's IndexedDB is heavy); the doc is ~85 kB now that
+// its pictures travel by address, so a few of them fit in localStorage.
+const KEPT_DOCS = 'script-listen-docs';
+const KEEP_DOCS = 6;
+function readKept(doc: string, voice: string): ListenDoc | null {
+  try {
+    const raw = localStorage.getItem(cacheKey(doc, voice));
+    return raw ? (JSON.parse(raw) as ListenDoc) : null;
+  } catch { return null; }
+}
+function keep(doc: string, voice: string, d: ListenDoc) {
+  const k = cacheKey(doc, voice);
+  let list: string[] = [];
+  try { list = JSON.parse(localStorage.getItem(KEPT_DOCS) || '[]'); } catch { /* new list */ }
+  list = [k, ...list.filter(x => x !== k)];
+  const body = JSON.stringify(d);
+  for (;;) {
+    for (const old of list.slice(KEEP_DOCS)) { try { localStorage.removeItem(old); } catch { /* ignore */ } }
+    list = list.slice(0, KEEP_DOCS);
+    try {
+      localStorage.setItem(k, body);
+      localStorage.setItem(KEPT_DOCS, JSON.stringify(list));
+      return;
+    } catch {
+      if (list.length <= 1) return;     // too big even alone: not kept
+      list = list.slice(0, list.length - 1);
+    }
+  }
+}
+/** Once per device: the docs once kept in IndexedDB are taken out of it (they made it heavier for every screen). */
+function dropOldKept() {
+  try {
+    if (localStorage.getItem('script-listen-idb-dropped')) return;
+    localStorage.setItem('script-listen-idb-dropped', '1');
+  } catch { return; }
+  void idbKeys().then(ks => Promise.all(ks.filter(k => typeof k === 'string' && k.startsWith('script-listen-doc-')).map(k => idbDel(k))))
+    .catch(() => undefined);
+}
 // Every clip ends with 0.16 s of silence (+0.03 s kept after the voice). The next clip starts this many seconds of the
 // clip before its end, so only silence is cut and the switch to the next clip happens inside the pause.
 const LEAD = 0.17;
@@ -559,13 +599,15 @@ export function ListenScreen({ docId }: { docId: string }) {
 
   const load = useCallback(async (keepText?: { start: number; text: string }) => {
     try {
+      perfMark('doc0');
       const d = await listenApi.doc(docId, voiceRef.current);
+      perfMark('doc1');
       // Coming from last time's copy: stay on the sentence that is showing (or playing).
       const here = staleRef.current && !keepText ? saysRef.current[curRef.current] : undefined;
       show(d, keepText || (here ? { start: here.start, text: here.text } : undefined));
       staleRef.current = false;
       setStale(false);
-      void idbSet(cacheKey(docId, d.voice || voiceRef.current), d).catch(() => undefined);
+      keep(docId, d.voice || voiceRef.current, d);
       return d;
     } catch (e) {
       setLoadError(errorText(e));
@@ -573,21 +615,41 @@ export function ListenScreen({ docId }: { docId: string }) {
     }
   }, [docId, show]);
 
+  // How fast the screen opened on this device (listen-perf.ts).
   useEffect(() => {
-    let fresh = false;
-    void idbGet<ListenDoc>(cacheKey(docId, voiceRef.current)).then(d => {
-      if (!d || fresh || saysRef.current.length) return;
+    if (!doc) return;
+    perfMark('text');
+    if (stale) return;
+    // A timer, not a frame: a window opened behind others gets no frames.
+    const id = window.setTimeout(() => {
+      perfMark('editable');
+      const imgs = Array.from(editorRef.current?.querySelectorAll('img') || []);
+      void Promise.all(imgs.map(i => i.decode().catch(() => undefined))).then(() => perfMark('imgs'));
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [doc, stale]);
+
+  useEffect(() => {
+    startReport(docId);
+    // The request goes first; last time's doc is shown while it travels (load() puts the real one in when it comes).
+    void load();
+    perfMark('idb0');
+    const d = readKept(docId, voiceRef.current);
+    perfMark('idb1');
+    perfNote('idbHit', !!d);
+    if (d && !saysRef.current.length) {
       staleRef.current = true;
       setStale(true);
       show(d);
-    }).catch(() => undefined);
-    void load().then(() => { fresh = true; });
-    return () => { fresh = true; };
+    }
+    const later = window.setTimeout(dropOldKept, 8000);
+    return () => window.clearTimeout(later);
   }, [load, show, voice, docId]);
 
   const loadComments = useCallback(async () => {
     try {
       const c = await listenApi.comments(docId);
+      perfMark('comments');
       setThreads(c.threads);
       setCanComment(c.can_comment);
       return c.threads;

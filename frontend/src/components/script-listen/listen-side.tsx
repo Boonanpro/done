@@ -17,6 +17,8 @@ import { ThumbnailEditor, type ChatLink } from '@/components/thumbnail/thumbnail
 import { useRoomFeed } from '@/hooks/useRoomFeed';
 import { errorText, listenApi } from '@/lib/script-listen-api';
 
+import { mark as perfMark } from './listen-perf';
+
 // サムネの編集と会話の欄は、ログインの印を付けずに自分の API を呼ぶ（クッキーだけ）。クッキーが切れていても動くよう、
 // この画面と同じ端末に残したログインの印を付ける（制作の窓 editor-dan-chat.tsx と同じ）。
 function useBearerFetch() {
@@ -65,7 +67,7 @@ export function ListenChat({ docId, lead, thumbOpen }: { docId: string; lead?: R
     if (roomCache.get(docId)) return;
     let live = true;
     chatProject(docId)
-      .then(id => { if (live) setProjectId(id); })
+      .then(id => { perfMark('room'); if (live) setProjectId(id); })
       .catch(e => { if (live) setFailed(errorText(e)); });
     return () => { live = false; };
   }, [docId]);

@@ -75,6 +75,21 @@ async def clip(key: str, t: str = Query(..., max_length=2000), v: str = S.DEFAUL
                         headers={'Cache-Control': 'private, max-age=31536000, immutable'})
 
 
+_IMAGE_TYPES = {'jpg': 'image/jpeg', 'png': 'image/png', 'gif': 'image/gif', 'webp': 'image/webp'}
+
+
+@router.get('/img/{name}')
+async def image(name: str):
+    """A picture of a doc, by the unguessable name the doc's answer gave it (script_listen._inline_images). No sign-in
+    mark: an <img> sends none. The name changes when the picture does, so the browser keeps it."""
+    try: p = await run_in_threadpool(S.image_path, name)
+    except Exception: p = None
+    if not p:
+        raise HTTPException(status_code=404, detail='画像がありません。')
+    return FileResponse(p, media_type=_IMAGE_TYPES[p.suffix[1:]],
+                        headers={'Cache-Control': 'private, max-age=31536000, immutable'})
+
+
 class Edit(BaseModel):
     old: str
     new: str

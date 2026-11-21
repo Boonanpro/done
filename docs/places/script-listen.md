@@ -9,8 +9,9 @@ speak: |
   - 台本の Google ドキュメントを読み上げで聞き、その場で直し、コメントでダンとやり取りする画面です。
   - 撮る時に開くのは中村さんの台本（④2本目）。開くだけでは台本は変わらない。直す確かめは消してよい写しで scripts/check_script_listen.py を使う。
 shows: []
-fingerprint: 40aa9ea5820c4f8d
+fingerprint: d85fadb1a6f32a86
 described: 4d0ad48a7ae45df4
+last_review: "2026-11-21 説明は変えない: main の開く速さの直しを取り込んだだけ。説明は今回のサムネの会話の分で書き直し済み"
 ---
 # 台本を聞いて直す画面
 
@@ -47,5 +48,5 @@ described: 4d0ad48a7ae45df4
 - ボタンの字: 「開く」、「やめる」
 - 見出し: 「台本を聞く」
 
-<!-- place_map:files {"app/api/script_listen_screen.py": "ad40df4eeb", "app/services/script_listen.py": "9eff87c6a8", "frontend/src/app/script-listen/page.tsx": "3f1dbf07f6", "frontend/src/components/script-listen/editor-dom.ts": "7101a9b8f2", "frontend/src/components/script-listen/listen-cards.tsx": "88aedbadb9", "frontend/src/components/script-listen/listen-screen.tsx": "807dee8758", "frontend/src/lib/script-listen-api.ts": "8ba160d28e"} -->
+<!-- place_map:files {"app/api/script_listen_screen.py": "58e19a68f9", "app/services/script_listen.py": "bcf1c94c54", "frontend/src/app/script-listen/page.tsx": "3e527407c1", "frontend/src/components/script-listen/editor-dom.ts": "7101a9b8f2", "frontend/src/components/script-listen/listen-cards.tsx": "88aedbadb9", "frontend/src/components/script-listen/listen-screen.tsx": "fa93d02a3f", "frontend/src/lib/script-listen-api.ts": "8ba160d28e"} -->
 <!-- place_map:auto:end -->

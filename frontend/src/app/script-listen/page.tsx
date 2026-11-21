@@ -4,6 +4,7 @@
 // 中身は components/script-listen/listen-screen.tsx、裏側は app/api/script_listen_screen.py。
 import { Suspense, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { IsRestoringProvider } from '@tanstack/react-query';
 
 import { ListenScreen } from '@/components/script-listen/listen-screen';
 
@@ -42,7 +43,10 @@ function Picker() {
 function Inner() {
   const params = useSearchParams();
   const doc = docIdFrom(params.get('doc') || '');
-  return doc ? <ListenScreen key={doc} docId={doc} /> : <Picker />;
+  // The side chat (and the thumbnail editor) ask the network at once instead of waiting until the chat's kept copy is
+  // read back from IndexedDB (11/21: 4–8 s on the owner's Chrome). The kept copy still comes in when it is read; a newer
+  // answer from the network is not replaced by it.
+  return doc ? <IsRestoringProvider value={false}><ListenScreen key={doc} docId={doc} /></IsRestoringProvider> : <Picker />;
 }
 
 export default function ScriptListenPage() {
