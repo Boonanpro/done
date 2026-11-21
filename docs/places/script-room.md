@@ -17,8 +17,9 @@ watches:
   - frontend/src/components/script-listen/listen-screen.tsx
   - frontend/src/components/script-listen/listen-chat.tsx
   - app/services/script_rooms.py
-fingerprint: 3ffcf49676d86b4c
+fingerprint: 45584de4d8b6e505
 described: 2185a2f3cba42415
+last_review: "2026-11-21 説明は変えない: 11/21 開く速さの直しだけ（前回の台本の控えを localStorage へ・サムネの絵は住所で読む・開く速さの印）。見える物・押す物・置き場所は変わらない"
 ---
 # 台本を聞く画面の「ダンと台本」
 
@@ -52,5 +53,5 @@ described: 2185a2f3cba42415
 - ラベル: 「書き方」、「画像を入れる」、「声」、「ドキュメント」、「ダンの作業の様子を見る」、「前の文」、「次の文」、「ダンと台本」、「閉じる」、「ダンが直している所へ」、「コメントを追加」
 - 試験の印: 「script-editor」、「chat-toggle」、「compare-toggle」、「image-add」、「dan-bar」、「ref-panel」、「listen-thumb」、「dan-glow」
 
-<!-- place_map:files {"app/services/script_rooms.py": "56c20031cd", "frontend/src/components/script-listen/listen-screen.tsx": "7057a47685"} -->
+<!-- place_map:files {"app/services/script_rooms.py": "56c20031cd", "frontend/src/components/script-listen/listen-screen.tsx": "26c6949a35"} -->
 <!-- place_map:auto:end -->
