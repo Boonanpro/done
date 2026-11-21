@@ -106,6 +106,8 @@ export function installLiveGuard(opts: LiveGuardOptions): void {
   const busyReason = function () {
     if (pendingWrites > 0) return 'saving';
     if (w.__danUnsaved || document.documentElement.hasAttribute('data-dan-unsaved')) return 'unsaved';
+    // 会話の入力中・送った文が届く前・ダンの作業中（lib/chat-outbox.ts が付ける印）
+    if (document.documentElement.hasAttribute('data-dan-chat-busy')) return 'chat';
     if (editingNow()) return 'typing';
     if (lastInput && Date.now() - lastInput < INPUT_QUIET_MS) return 'typing';
     return '';
@@ -367,7 +369,7 @@ export function installLiveGuard(opts: LiveGuardOptions): void {
     // 裏に回った時は、保存中・未保存でなければ読み直してよい
     if ((guard.state === 'stale' || guard.state === 'checking') && guard.mismatchSince) {
       const reason = busyReason();
-      if (reason !== 'saving' && reason !== 'unsaved') refresh(false);
+      if (reason !== 'saving' && reason !== 'unsaved' && reason !== 'chat') refresh(false);
     }
     report();
   });
