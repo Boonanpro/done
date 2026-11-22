@@ -115,7 +115,8 @@ async def test_site_work_goes_to_chat_dan_with_the_calls_transcript(monkeypatch)
     assert '本人: しゅんさんとみひろさんなんですけど' in transcript and '【途中】' in transcript
     # a state, given silently after Dan's own acknowledgement, with the name of the work (2026-11-22)
     assert sent[-1]['type'] == 'session.thinking.append' and sent[-1]['delegation_id'] == 'del_2'
-    assert time.monotonic() - created >= voice_router.ACK_DELAY_MS / 1000 and 'しゅんさん' in sent[-1]['content']
+    assert time.monotonic() - created >= voice_router.ACK_DELAY_MS / 1000
+    assert '{label}' not in sent[-1]['content']
     assert r.jobs == {'job-1': voice_router.label_of('しゅんさんとみひろさんなんですけど六日までに両方空いてる時間を、続けて入れられる所で')}
 
 
