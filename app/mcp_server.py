@@ -248,7 +248,11 @@ async def _call_tool(name: str, arguments: dict):
                 s['last_tool'] = {'name':name,'action':arguments.get('action') if name=='browser' else None,
                     'elapsed_ms':round((time.perf_counter()-tool_started)*1000),'at':job_state.now(),
                     **({'touch':touch} if touch else {})}
-                job_state.event(s,'tool',name + (':'+str(arguments.get('action','')) if name=='browser' else ''))
+                from app.agent.activity_line import activity_phrase, own_activity, done_note
+                activity = own_activity(name, arguments) or done_note(name, arguments) or activity_phrase(name, arguments)
+                skill = arguments.get('skill_name') or arguments.get('name')
+                job_state.event(s, 'tool', name, activity=activity, ms=s['last_tool']['elapsed_ms'],
+                                prompt='skill/' + skill if name == 'check_skill' and isinstance(skill, str) else None)
             job_state.change(job_id, observed)
 
     # format_tool_result で整形（Progressive Disclosure 対応）

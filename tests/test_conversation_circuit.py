@@ -71,3 +71,19 @@ async def test_preview_sdp_never_registers_room_or_attaches_worker(monkeypatch):
     for guard in guards:
         guard.assert_not_called()
 
+
+
+def test_job_tool_event_keeps_activity_and_elapsed_time():
+    from app.services.command_job_state import event
+    job = dict(created_at='01', task='字幕を直して', events=[])
+    event(job, 'tool', 'browser', activity='字幕の大きさを確認しています', ms=820)
+    event(job, 'tool', 'read_file')
+    received, browser, document = circuit.job_steps(job)
+    assert received['handoff'] == job['task']
+    assert (browser['activity'], browser['ms']) == ('字幕の大きさを確認しています', 820)
+    assert document['activity'] == '資料を読んでいます'
+
+
+def test_old_job_events_with_tool_names_get_readable_labels():
+    job = dict(created_at='01', task='前の会話を確認', events=[dict(at='02', kind='tool', text='lookup')])
+    assert circuit.job_steps(job)[1]['activity'] == '記録を見ています'

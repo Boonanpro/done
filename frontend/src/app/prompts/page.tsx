@@ -5,13 +5,12 @@
 // ダンの画面は html と body のスクロールを止めているので、この画面は自分の枠でスクロールする（11/17 まではスクロールできず、
 // 全文の欄まで行けなかった＝本人「見るだけで編集できない」）。
 import { Suspense } from 'react';
-import { usePathname, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 
 import { PromptsScreen } from '@/components/prompts/prompts-screen';
 
 function PromptsInner() {
   const params = useSearchParams();
-  const path = usePathname();
   const go = (next: { place: string; id?: string }) => {
     const q = new URLSearchParams(window.location.search);
     q.delete('id');
@@ -21,7 +20,7 @@ function PromptsInner() {
   };
   return (
     <div className="h-dvh overflow-y-auto overscroll-contain bg-[#faf8f4] text-stone-900 lg:overflow-hidden">
-      <PromptsScreen initialCircuit={path === '/prompts/circuit' || params.get('circuit') === '1'} place={params.get('place') || ''} id={params.get('id') || ''} onGo={go} />
+      <PromptsScreen place={params.get('place') || ''} id={params.get('id') || ''} onGo={go} />
     </div>
   );
 }

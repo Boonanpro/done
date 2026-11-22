@@ -1238,8 +1238,10 @@ def _save_execution_event_sync(
             from app.agent.activity_line import activity_phrase, done_note, own_activity
             args = tool_input or {}
             name = tool_name.split('__')[-1]
+            if name == 'parallel_work' and args.get('action') == 'start' and isinstance(args.get('task'), str):
+                metadata['handoff'] = args['task']
             if name in ('Skill', 'check_skill'):
-                skill = args.get('name') or args.get('skill')
+                skill = args.get('skill_name') or args.get('name') or args.get('skill')
                 if isinstance(skill, str) and re.fullmatch(r'[a-zA-Z0-9_-]+', skill):
                     metadata['skill_requested'] = 'skill/' + skill
             elif name in ('read_file', 'Read'):

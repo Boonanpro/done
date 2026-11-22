@@ -36,6 +36,11 @@ async def rooms(user=Depends(owner)):
     return await asyncio.to_thread(circuit.owner_rooms, get_supabase_client().client, user)
 
 
+@router.get('/active')
+async def active_requests(user=Depends(owner)):
+    return await asyncio.to_thread(circuit.active_requests, get_supabase_client().client, user)
+
+
 @router.get('/history')
 async def history(room: str, selected: str = '', user=Depends(owner)):
     await check_room(room, user)

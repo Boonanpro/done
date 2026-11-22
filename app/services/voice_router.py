@@ -480,13 +480,14 @@ class Router:
 
     async def to_chat_dan(self, words, route, delegation_id, created, carried=''):
         label = label_of(words)
-        out = await start_chat_dan(self.user_id, self.room_id, self.dialogue, words, carried=carried)
+        with prompt_store.observed_reads() as reads:
+            out = await start_chat_dan(self.user_id, self.room_id, self.dialogue, words, carried=carried)
         if not out.get('accepted'):
             self.record('route_job_refused', route=route)
             return await self.reply(delegation_id, created, f'「{label}」を始められなかった。{out.get("error") or ""}')
         job_id = (out.get('receipt') or {}).get('id')
         if job_id: self.jobs[job_id] = label
-        self.record('route_job_started', route=route, job_id=str(job_id)[:8])
+        self.record('route_job_started', route=route, job_id=str(job_id), prompts=list(reads))
         await self.reply(delegation_id, created, prompt_store.fill('call/router-job-started', label=label), spoken=False)
 
     async def stop(self, route, delegation_id, created):

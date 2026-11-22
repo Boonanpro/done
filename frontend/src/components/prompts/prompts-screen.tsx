@@ -158,11 +158,12 @@ function Diagram({ skills, onSkills, counts, active, glow, onPick, trace }: { tr
               const key = e.from + '/' + e.to;
               const line = trace?.lines.get(key);
               const arrow = 'url(#' + marker + (line ? '-trace' : '') + ')';
-              return <path key={key} d={d} data-trace-edge={line ? key : undefined}
-                fill="none" stroke={line ? '#047857' : '#a8a29e'} strokeWidth={line ? 4 : 2}
+              return <path key={key} d={d} data-flow-path={key} data-trace-edge={line ? key : undefined}
+                fill="none" stroke={line ? '#68a891' : '#a8a29e'} strokeWidth={line ? 4 : 2}
                 strokeDasharray={line ? (line.inferred ? '6 5' : undefined) : e.dashed ? '6 5' : undefined}
                 markerStart={line?.reverse ? arrow : undefined} markerEnd={line?.reverse ? undefined : arrow} />;
             })}
+            {trace && <circle data-flow-particle r={7} fill="#10b981" stroke="#034b37" strokeWidth={2} visibility="hidden" />}
           </svg>
           {edges.filter(x => x.e.label).map(({ e, mx, my }) => (
             <span key={`l-${e.from}-${e.to}`} className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-white/95 px-1 text-[11px] leading-tight text-stone-500"
@@ -172,7 +173,7 @@ function Diagram({ skills, onSkills, counts, active, glow, onPick, trace }: { tr
             const on = n.id === active, count = counts[n.id] || 0;
             return (
               <div key={n.id}>
-              <button type="button" data-arch-node={n.id} data-trace-state={trace?.current === n.id ? 'current' : trace?.visits.has(n.id) ? 'visited' : undefined} onClick={() => onPick(n.id)}
+              <button type="button" data-arch-node={n.id} data-trace-state={trace?.current === n.id ? 'current' : trace?.visits.has(n.id) ? 'visited' : undefined} onClick={() => { const i = trace?.visits.get(n.id); if (i != null && trace?.inspect) trace.inspect(n.id, i); else onPick(n.id); }}
                 style={{ left: n.x, top: n.y, width: n.w, height: BOX_H }}
                 className={cn('absolute flex items-center gap-2 rounded-xl border-2 bg-white p-1.5 text-left shadow-sm transition hover:border-amber-400 hover:bg-amber-50',
                   on ? 'border-amber-500 bg-amber-50 ring-4 ring-amber-200' : 'border-stone-300',
@@ -190,6 +191,10 @@ function Diagram({ skills, onSkills, counts, active, glow, onPick, trace }: { tr
                     : n.same ? <span className="mt-1 inline-block text-[11px] text-stone-400">{BY_ID.get(n.same)?.name}と同じ文</span> : null}
                 </span>
               </button>
+              {trace?.current === n.id && trace.activity && <span data-flow-bubble title={trace.activity}
+                className="pointer-events-none absolute z-10 max-w-[260px] truncate rounded-lg bg-emerald-950 px-3 py-1.5 text-xs font-semibold text-white shadow"
+                style={{left:n.x + n.w / 2 < W / 2 ? n.x + n.w + 7 : undefined,
+                        right:n.x + n.w / 2 >= W / 2 ? W - n.x + 7 : undefined, top:n.y+16}}>{trace.activity}</span>}
               {(previews[n.id] || n.id === 'voice') && <div style={{left:n.x + 3, top:n.y + BOX_H, width:n.w - 6, height:84}}
                 className="absolute flex flex-col justify-center rounded-b-xl border border-t-0 border-teal-300 bg-teal-50 px-2 text-teal-950">
                 {n.id === 'voice' ? <button type="button" className="text-left hover:underline" onClick={() => onSkills('parallel')}>
@@ -573,20 +578,9 @@ const GLOW_CSS = `
 .dan-working-glow { animation: dan-working-ring 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .dan-working-line, .dan-working-glow, .dan-changed-line { animation: none; background-color: rgba(167, 139, 250, 0.3); } }
 `;
-export function PromptsScreen({ place, id, onGo, embedded = false, initialCircuit = false }: {
-  place: string; id: string; onGo: (next: { place: string; id?: string }) => void; embedded?: boolean; initialCircuit?: boolean;
+export function PromptsScreen({ place, id, onGo, embedded = false }: {
+  place: string; id: string; onGo: (next: { place: string; id?: string }) => void; embedded?: boolean;
 }) {
-  const [circuit, setCircuit] = useState(initialCircuit);
-  function showCircuit(next: boolean) {
-    setCircuit(next);
-    if (!embedded) {
-      const url = new URL(window.location.href);
-      url.pathname = '/prompts';
-      if (next) url.searchParams.set('circuit', '1');
-      else url.searchParams.delete('circuit');
-      window.history.replaceState(null, '', url);
-    }
-  }
   const [prompts, setPrompts] = useState<PromptSummary[]>([]);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
@@ -706,11 +700,11 @@ export function PromptsScreen({ place, id, onGo, embedded = false, initialCircui
 
   useEffect(() => {   // 狭い画面では、選んだ物の所まで送る
     if (reader && !id) { mapTop.current?.scrollIntoView({ block: 'start' }); return; }
-    if (typeof window === 'undefined' || (!circuit && !reader && !library && window.innerWidth >= 1280)) return;
+    if (typeof window === 'undefined' || (!reader && !library && window.innerWidth >= 1280)) return;
     if (library && !id) return;
     const target = id ? detail.current : place ? list.current : null;
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [id, place, library, reader, circuit]);
+  }, [id, place, library, reader]);
 
   const navigate = (next: { place: string; id?: string }) => {
     if (shown && open.draft !== shown.text && next.id !== id &&
@@ -747,16 +741,12 @@ export function PromptsScreen({ place, id, onGo, embedded = false, initialCircui
       <header>
         <h1 className="text-xl font-bold">ダンを動かしている指示文</h1>
         <nav className="my-3 inline-flex gap-1 rounded-xl border border-stone-300 bg-white p-1" aria-label="指示文の表示">
-          {[{ label: '構成図', active: !library && !circuit, icon: Network, target: '' }, { label: 'スキル', active: library, icon: BookOpen, target: 'skills' }].map(({ label, active, icon: Icon, target }) => (
-            <button key={label} type="button" aria-label={label} aria-pressed={active} onClick={() => { if (navigate({ place: target })) showCircuit(false); }}
+          {[{ label: '構成図', active: !library, icon: Network, target: '' }, { label: 'スキル', active: library, icon: BookOpen, target: 'skills' }].map(({ label, active, icon: Icon, target }) => (
+            <button key={label} type="button" aria-label={label} aria-pressed={active} onClick={() => { navigate({ place: target }); }}
               className={cn('inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold', active ? 'bg-stone-800 text-white' : 'text-stone-700 hover:bg-amber-50')}>
               <Icon className="size-4" />{label}
             </button>
           ))}
-          <button type="button" aria-pressed={circuit && !reader && !library} onClick={() => {
-            if ((reader || library) && !navigate({ place: '' })) return;
-            showCircuit(!circuit || !!reader || library);
-          }} className={cn('inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold', circuit && !reader && !library ? 'bg-emerald-800 text-white' : 'text-stone-700 hover:bg-amber-50')}><Network className="size-4" />会話の回路図</button>
         </nav>
         {!library && !reader && <p className="text-sm text-stone-600">箱を押すと指示文が開きます。緑の枝では、頼みごとに使うスキルを開けます。</p>}
       </header>
@@ -783,12 +773,11 @@ export function PromptsScreen({ place, id, onGo, embedded = false, initialCircui
               </select></label>}
           </div>
         : <ReaderSkills node={reader} groups={groups} onBack={() => navigate({place: ''})} onPick={pid => navigate({place, id:pid})} />}</div>}
-      {circuit && <div hidden={!!reader || library}><ConversationCircuit renderDiagram={renderDiagram}
+      <div hidden={!!reader || library}><ConversationCircuit visible={!reader && !library} onEdit={p => { if (navigate({place:p})) requestAnimationFrame(() => list.current?.scrollIntoView({block:"start"})); }} renderDiagram={renderDiagram}
         onPrompt={(pid, source) => {
           const owner = NODES.find(n => n.id === source && n.prompts?.includes(pid)) || NODES.find(n => n.prompts?.includes(pid));
           navigate({place: pid.startsWith('skill/') ? 'skills' : owner?.id || source, id: pid});
-        }} /></div>}
-      {!circuit && !library && !reader && renderDiagram()}
+        }} /></div>
 
 
       {(!reader || id) && <div className={cn('grid items-start gap-4', !reader && 'xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]')}>
