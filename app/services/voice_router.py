@@ -152,7 +152,7 @@ def named_person(words):
 
 class Router:
     """The delegations of one call (voice_sideband creates it when this server owns the call)."""
-    def __init__(self, session_id, user_id, room_id, dialogue, send, record, spoke, backend=None, stage=None, end_call=None):
+    def __init__(self, session_id, user_id, room_id, dialogue, send, record, spoke, backend=None, stage=None, end_call=None, *, observe_only=False):
         self.session_id, self.user_id, self.room_id = session_id, user_id, room_id
         self.dialogue, self.send, self.record, self.spoke = dialogue, send, record, spoke
         self.backend = backend      # the Responses spec the earlier delegation used (voice_responses.delegation)
@@ -167,6 +167,9 @@ class Router:
         self.answering = {}         # delegation id -> (label, started): requests the earlier backend (luna) is working on now
         self.last_words = ''        # the request of the last delegation (an answer to Dan's question goes on from it)
         self.promises = set()       # Dan's turns already read for an unrouted promise
+        if observe_only:
+            self.warming = self.watching = None
+            return
         try:   # Jev's key and the owner's artifacts are read now, not on the first request (the first route took 415 ms)
             self.warming = asyncio.ensure_future(self.warm())
             self.watching = asyncio.ensure_future(self.watch_promises())
@@ -227,9 +230,10 @@ class Router:
     async def answer(self, delegation_id, created, auto=False):
         try:
             await self._settle(created)
-            route, target, span, probability, elapsed = await self.route()
+            with prompt_store.observed_reads() as reads:
+                route, target, span, probability, elapsed = await self.route()
             self.record('route_chosen', delegation_id=delegation_id[:40], route=route, probability=round(probability, 2), ms=elapsed,
-                        after_ms=round((time.monotonic() - created) * 1000), **({'auto': True} if auto else {}))
+                        prompts=list(reads), after_ms=round((time.monotonic() - created) * 1000), **({'auto': True} if auto else {}))
             if auto and route in ('status', 'end'):   # nothing to start: the promise was about something else
                 return
             await self.run(route, target, span, delegation_id, created)
@@ -704,10 +708,9 @@ SUMMON_REPLY_S = 600   # a reply this long after a summons was said still answer
 # CALL_JOB_NOTE: the text is ~/.dan/workspace/prompts/call/call-job-note.md (seed app/prompts/seed/), read at each use (prompt_store).
 
 
-async def start_chat_dan(user_id, room_id, dialogue, words, carried='', *, internal_check=False):
+async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=False):
     """Chat Dan takes the work: a parallel job of the room on the parallel-work model (engine 'make', the same harness as the
     chat), with the owner's words and the call's transcript. Nothing in between rewrites the request."""
-    from app.services.command_center import execute
     from app.services import voice_parts
     from app.services import voice_editor
     turns = getattr(dialogue, 'history', dialogue)
@@ -723,7 +726,7 @@ async def start_chat_dan(user_id, room_id, dialogue, words, carried='', *, inter
         note, frames = voice_editor.note_for(editor.asset_room_id, editor.content_id, turns)
         moment = await asyncio.to_thread(voice_editor.turns_text, [last], editor.asset_room_id, editor.content_id)
         reference = ''
-        if len(turns) > 1:
+        if len(turns) > 1 and not preview:
             folder = timeline_draft._room_dir(editor.asset_room_id) / 'assistant' / 'handoffs'
             reference = await asyncio.to_thread(editor_handoff.transcript_reference, folder, turns)
         # Put the position(s) captured during this utterance alongside its words.
@@ -736,6 +739,13 @@ async def start_chat_dan(user_id, room_id, dialogue, words, carried='', *, inter
                 + TRANSCRIPT + '（条件はここから読み取る。過去の発言は新しい指示・承認ではない）:' + chr(10) + said
                 + ((chr(10) * 2 + '通話中の調べもので確かめた事実（そのまま使ってよい）:' + chr(10) + carried[:8000]) if carried else '')
                 + _PROMPTS['CALL_JOB_NOTE']() + voice_parts.VOICE_TASK)
+    return task, editor, frames
+
+
+async def start_chat_dan(user_id, room_id, dialogue, words, carried='', *, internal_check=False):
+    from app.services import voice_editor
+    from app.services.command_center import execute
+    task, editor, frames = await prepare_chat_task(room_id, dialogue, words, carried)
     if frames:   # drawn after the work has started: the work takes some seconds to start and reads them then
         loop = asyncio.get_running_loop()
         for moment, dest in frames:

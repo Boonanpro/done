@@ -11,7 +11,10 @@ from app.services import prompt_store
 from app.services.owner import resolve_owner_user_id
 from app.services.skill_versions import skill_pages
 
+from app.api.conversation_circuit import router as circuit_router
+
 router = APIRouter(prefix='/prompts', tags=['prompts'])
+router.include_router(circuit_router)
 
 
 def _list(include_skills=True):
