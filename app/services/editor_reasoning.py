@@ -60,7 +60,8 @@ def tools_for_conversation(original):
             t['parameters']['properties'].pop('task_kind',None)
             t['parameters']['properties']['destination']={'type':'string','enum':['timeline','presentation'],'description':'成果を置く場所。既存タイムラインの変更はtimeline（省略時）。別の見本・比較案・調査結果を提示するだけならpresentation。presentationでも制作まで実行でき、元タイムラインは変更しない。'}
             t['parameters']['required']=[]
-            t['parameters']['properties']['instruction']['description']='必要な場合だけ短い作業上の補足。会話の要約や詳しい制作手順は不要。'
+            from app.services.editor_handoff import for_tool
+            t = for_tool(t)
         result.append({'type':'function','name':t['name'],'description':t['description'],
                        'parameters':t['parameters'],'strict':False})
     result.append({'type':'function','name':'read_conversation','description':'この作品の会話原文を話者付きで読む。古い会話はbeforeで遡れる。通常チャットは自動で取り込まない。',

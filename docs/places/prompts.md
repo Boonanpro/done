@@ -9,8 +9,9 @@ speak: |
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: b8811c34fed08920
-described: 90cddec31518025e
+fingerprint: 7071da2df7466955
+described: 150712dd435ba0bc
+last_review: "2026-11-22 説明は変えない: スキルの学習結果を開く時に反映。画面の保存・復元の操作は記載どおり"
 ---
 # ダンを動かしている指示文
 
@@ -27,6 +28,7 @@ described: 90cddec31518025e
   - 入力欄の上の札に、今開いている文と、全文の中で選んだ所（何行目・何という文）が出る。発言ごとにそれを `<dan-context>` で添える（画面には出ない。本人の吹き出しの上に「どの文の何行目」だけ小さく出る）。保存していない書きかけがあれば、その違いも添える。
   - 会話欄の「チャットのモデル」で、指示文の会話が次の返答に使うモデルを選べます。
   - ダンは scripts/prompts.py save で直す（部屋の説明に書いてある）。会話のダンが動いている間は数秒ごとに版の印（/prompts/sha）を見て、変わったら全文がその場で新しい版になり、上に「ダンが直しました：理由」・変わった所（消した行は赤い線、足した行は緑）・「元に戻す」が出る。書きかけがある時は消さずに「ダンの版を開く」を出す。
+- 「手順書と案件ごとの参考」から、動画編集の手順書と各案件の決まりを開いて保存・復元できます。並行作業の「作業をほかのダンに頼む時」では、チャットと音声の編集依頼に共通する文を直せます。
 
 ## 行き方（みきさんから見て）
 
@@ -54,7 +56,7 @@ described: 90cddec31518025e
 - 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/lib/prompts-api.ts`
 - ラベル: 「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「ダンと話す」、「会話を閉じる」
 - 試験の印: 「dan-change」
-- 見出し: 「プログラムの中にあった頃に直された日」、「ダンを動かしている指示文」
+- 見出し: 「プログラムの中にあった頃に直された日」、「ダンを動かしている指示文」、「動画編集の共通手順」、「案件ごとの編集方針」、「その他の手順書」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "fc18514fc8", "app/prompts/catalog.json": "5783d85ce3", "app/services/prompt_store.py": "39ec565b16", "frontend/src/app/prompts/page.tsx": "486f5c8762", "frontend/src/components/prompts/architecture.ts": "3146ba5f1b", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "9d705794fe", "frontend/src/components/prompts/prompts-screen.tsx": "6a037aa375", "frontend/src/lib/prompts-api.ts": "cb53e5f819"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "1bc7142ae0", "app/prompts/catalog.json": "4aa42a6ca8", "app/services/prompt_store.py": "bd0b97403e", "frontend/src/app/prompts/page.tsx": "486f5c8762", "frontend/src/components/prompts/architecture.ts": "63ac2258bd", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "9d705794fe", "frontend/src/components/prompts/prompts-screen.tsx": "69249955bc", "frontend/src/lib/prompts-api.ts": "cb53e5f819"} -->
 <!-- place_map:auto:end -->

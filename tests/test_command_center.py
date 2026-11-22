@@ -164,3 +164,15 @@ class DispatchRelayTests(unittest.IsolatedAsyncioTestCase):
         with patch('app.services.command_handoff.start', new_callable=AsyncMock) as start:
             await _fire_handoff(row)
         start.assert_awaited_once_with(row)
+
+
+def test_chat_handoff_keeps_verified_words_and_report_only():
+    import asyncio
+    from app.services import editor_handoff
+    room = AsyncMock()
+    room.get_messages.return_value = [{'sender_type': 'human', 'content': '回想が静止画ばかり。面白くしたい。'}]
+    params = {'task': '1分の切り替え回数を先に決め、9段の手順で編集',
+              'owner_quotes': ['回想が静止画ばかり。面白くしたい。'], 'report_back': '開発室に完成版'}
+    with patch('app.services.chat_service.ChatService', return_value=room):
+        task = asyncio.run(editor_handoff.from_chat(params, 'スヤさん2本目', 'source', 'owner'))
+        assert task.splitlines() == ['対象: スヤさん2本目', params['owner_quotes'][0], '報告: 開発室に完成版']

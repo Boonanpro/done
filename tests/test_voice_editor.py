@@ -65,9 +65,9 @@ def test_a_spot_the_mouse_left_long_ago_is_not_pointed_at():
 
 
 @pytest.mark.asyncio
-async def test_the_work_gets_the_moments_the_frames_and_says_first_what_it_will_fix(monkeypatch, room):
+async def test_work_gets_verbatim_request_pointer_and_frame(monkeypatch, room):
     started = []
-    async def execute(params, room_id, user_id, voice_handoff=False):
+    async def execute(params, room_id, user_id, voice_handoff=False, internal_check=False):
         started.append(params)
         return {'accepted': True, 'receipt': {'id': 'job-1'}}
     monkeypatch.setattr('app.services.command_center.execute', execute)
@@ -82,7 +82,7 @@ async def test_the_work_gets_the_moments_the_frames_and_says_first_what_it_will_
     await asyncio.sleep(.05)
     task = started[0]['task']
     assert '〔エディター: 再生位置 0:12.3' in task and '押した所' in task
-    assert '【途中】' in task and '直す場所と中身' in task and 'call_frames' in task
+    assert task.count('このテロップ赤くして') == 1 and 'call_frames' in task
     assert drawn and drawn[0][2]['playhead'] == 12.3
 
 
@@ -90,7 +90,7 @@ async def test_the_work_gets_the_moments_the_frames_and_says_first_what_it_will_
 async def test_a_call_not_from_the_editor_is_as_before(monkeypatch):
     monkeypatch.setattr(voice_editor, 'call_editor', lambda room_id: None)
     started = []
-    async def execute(params, room_id, user_id, voice_handoff=False):
+    async def execute(params, room_id, user_id, voice_handoff=False, internal_check=False):
         started.append(params)
         return {'accepted': True, 'receipt': {'id': 'job-1'}}
     monkeypatch.setattr('app.services.command_center.execute', execute)
@@ -129,7 +129,7 @@ async def test_a_send_without_the_owners_voice_gives_at_once():
 async def test_work_handed_over_by_the_general_backend_still_gets_the_moments(monkeypatch, room):
     """start_work (the general backend) passes the call's turns, not the call: the room tells it is a work's room."""
     started = []
-    async def execute(params, room_id, user_id, voice_handoff=False):
+    async def execute(params, room_id, user_id, voice_handoff=False, internal_check=False):
         started.append(params)
         return {'accepted': True, 'receipt': {'id': 'job-1'}}
     monkeypatch.setattr('app.services.command_center.execute', execute)
@@ -141,7 +141,7 @@ async def test_work_handed_over_by_the_general_backend_still_gets_the_moments(mo
     write_state(room)
     d.add('user', 'この字幕直して')
     await voice_router.start_chat_dan('u', 'r', [dict(t) for t in d.history], 'この字幕直して')
-    assert '〔エディター: 再生位置 0:12.3' in started[0]['task'] and '直す場所と中身' in started[0]['task']
+    assert '〔エディター: 再生位置 0:12.3' in started[0]['task'] and started[0]['task'].count('この字幕直して') == 1
 
 
 @pytest.mark.asyncio

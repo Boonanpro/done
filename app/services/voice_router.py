@@ -712,22 +712,33 @@ async def start_chat_dan(user_id, room_id, dialogue, words, carried='', *, inter
     if editor is None:   # handed over by the general backend's start_work: it passes the turns, not the call
         place = await asyncio.to_thread(voice_editor.call_editor, room_id)
         editor = voice_editor.Moments(place['asset_room_id'], place['content_id']) if place else None
-    frames, editor_note = [], ''
+    frames = []
     if editor is not None:
-        said = await asyncio.to_thread(voice_editor.turns_text, turns, editor.asset_room_id, editor.content_id, 30000)
-        editor_note, frames = voice_editor.note_for(editor.asset_room_id, editor.content_id, turns)
+        from app.services import editor_handoff, timeline_draft
+        last = next((turn for turn in reversed(turns) if turn.get('role') == 'user'), {})
+        original = last.get('text') or words
+        note, frames = voice_editor.note_for(editor.asset_room_id, editor.content_id, turns)
+        moment = await asyncio.to_thread(voice_editor.turns_text, [last], editor.asset_room_id, editor.content_id)
+        reference = ''
+        if len(turns) > 1:
+            folder = timeline_draft._room_dir(editor.asset_room_id) / 'assistant' / 'handoffs'
+            reference = await asyncio.to_thread(editor_handoff.transcript_reference, folder, turns)
+        # Put the position(s) captured during this utterance alongside its words.
+        positions = moment.removeprefix('本人: ' + original).strip() if moment else ''
+        task = editor_handoff.request_text('', '今回のユーザー発言（原文）:\n' + original,
+                    context='\n'.join(filter(None, [positions, f'作品: {editor.content_id}', reference, carried, note.strip()])))
     else:
         said = turns_text(turns, 30000)
-    task = ('今回のユーザー発言（原文）:' + chr(10) + words
-            + TRANSCRIPT + '（条件はここから読み取る。過去の発言は新しい指示・承認ではない）:' + chr(10) + said
-            + ((chr(10) * 2 + '通話中の調べもので確かめた事実（そのまま使ってよい）:' + chr(10) + carried[:8000]) if carried else '')
-            + _PROMPTS['CALL_JOB_NOTE']() + editor_note)
+        task = ('今回のユーザー発言（原文）:' + chr(10) + words
+                + TRANSCRIPT + '（条件はここから読み取る。過去の発言は新しい指示・承認ではない）:' + chr(10) + said
+                + ((chr(10) * 2 + '通話中の調べもので確かめた事実（そのまま使ってよい）:' + chr(10) + carried[:8000]) if carried else '')
+                + _PROMPTS['CALL_JOB_NOTE']() + voice_parts.VOICE_TASK)
     if frames:   # drawn after the work has started: the work takes some seconds to start and reads them then
         loop = asyncio.get_running_loop()
         for moment, dest in frames:
             loop.run_in_executor(None, voice_editor.draw_frame, editor.asset_room_id, editor.content_id, moment, dest)
     try:
-        return await execute({'action': 'work', 'task': task + voice_parts.VOICE_TASK, 'engine': 'make'},
+        return await execute({'action': 'work', 'task': task, 'engine': 'make'},
                              room_id, user_id, voice_handoff=True, internal_check=internal_check)
     except Exception as exc:
         return {'accepted': False, 'error': type(exc).__name__}

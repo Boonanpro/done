@@ -169,6 +169,9 @@ def _code_value(item):
 def text(prompt_id):
     """The prompt as the code uses it, read at each use (cached until the file changes)."""
     item = entry(prompt_id)
+    if item.get('kind') == 'skill' and item.get('source_file'):
+        from app.services.skill_versions import version
+        return version(item)
     if item.get('readonly') and item.get('module'):
         return _code_value(item)
     with _lock:
@@ -257,6 +260,9 @@ def save(prompt_id, value, by='dan', note='', base_sha=None):
     found = problems(prompt_id, value)
     if found:
         raise ValueError(' '.join(found))
+    if item.get('kind') == 'skill' and item.get('source_file'):
+        from app.services.skill_versions import version
+        return version(item, value, by, note, base_sha)
     with _lock:
         current = text(prompt_id)
         if base_sha and sha(current) != base_sha:
@@ -278,7 +284,7 @@ def history(prompt_id):
     """Versions, newest first."""
     if not entry(prompt_id).get('readonly'):
         text(prompt_id)
-    return list(reversed(_read_history(prompt_id)))
+    return [{k: v for k, v in row.items() if k != 'source_text'} for row in reversed(_read_history(prompt_id))]
 
 
 def revert(prompt_id, version_sha, by='owner'):

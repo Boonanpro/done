@@ -237,10 +237,12 @@ def tools():
                              'required': ['id', 'values', 'task'], 'additionalProperties': False}}
     from app.services import dan_tools
     every = [{'type': 'function', **dan_tools.HELP}, {'type': 'function', **dan_tools.USE}]   # the rest of Dan's tools, disclosed in steps
+    from app.services.editor_handoff import for_tool
+    current = [for_tool(t) if t['name'] == 'start_work' else t for t in TOOLS]
     if background():   # the reading and the browser are the background's (voice_lookup); the delegation hands them over
-        return [*(t for t in TOOLS if t['name'] not in MOVED), *BACKGROUND_TOOLS, listing, replay]
+        return [*(t for t in current if t['name'] not in MOVED), *BACKGROUND_TOOLS, listing, replay]
     from app.services import voice_plain
-    return [*TOOLS, *(PLAIN_TOOLS if voice_plain.enabled() else []), listing, replay, *every]
+    return [*current, *(PLAIN_TOOLS if voice_plain.enabled() else []), listing, replay, *every]
 
 
 def background():
@@ -432,7 +434,9 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None, *, in
         running = [s for s in await asyncio.to_thread(list_owned, user_id, room_id) if s['state'] not in ('completed', 'failed', 'cancelled')]
         from app.services import voice_router
         if voice_router.enabled():   # work asked on a routed call is chat Dan's, with the call's transcript (voice_router)
-            out = await voice_router.start_chat_dan(user_id, room_id, dialogue, str(args.get('task') or ''),
+            turns = getattr(dialogue, 'history', dialogue)
+            words = next((t.get('text') for t in reversed(turns) if t.get('role') == 'user' and t.get('text')), '')
+            out = await voice_router.start_chat_dan(user_id, room_id, dialogue, words or str(args.get('task') or ''),
                                                     internal_check=internal_check)
             if not out.get('accepted'):
                 return {'accepted': False, 'error': '作業を開始できませんでした。', 'note': '実行中とは言わない。'}
