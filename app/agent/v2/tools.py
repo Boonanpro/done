@@ -2536,6 +2536,12 @@ async def execute_tool(
 
         # SKILL.md本文を取得
         skill_content = skill.markdown_content or skill.raw_content or ""
+        from app.services import prompt_store
+        prompt_id = f'skill/{check_skill_name}'
+        try:
+            skill_content = prompt_store.text(prompt_id)
+        except KeyError:
+            pass
 
         # actions/*.md を全て取得
         action_manuals = []

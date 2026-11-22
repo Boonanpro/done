@@ -33,7 +33,7 @@ SEED = REPO / 'app' / 'prompts' / 'seed'
 CATALOG = REPO / 'app' / 'prompts' / 'catalog.json'
 WORKSPACE = Path.home() / '.dan' / 'workspace'
 _lock = threading.RLock()
-_cache: dict[str, tuple] = {}    # id -> (mtime_ns, size, text)
+_cache: dict[str, tuple] = {}    # id -> ((path, mtime_ns, size), text)
 SECTION = re.compile(r'^##\s+(\S+)\s*$', re.M)
 WHO = {'owner': 'みきさん', 'dan': 'ダン', 'seed': 'プログラムから移した元の文'}
 
@@ -116,12 +116,17 @@ def _append(prompt_id, record, check_sha=None):
 
 
 def _seed_text(prompt_id):
-    return (SEED / f'{prompt_id}.md').read_text(encoding='utf-8').strip('\n')
+    source = entry(prompt_id).get('source_file')
+    path = REPO / source if source else SEED / f'{prompt_id}.md'
+    return path.read_text(encoding='utf-8').strip('\n')
 
 
 def _ensure(prompt_id):
     path = path_of(prompt_id)
-    if not path.exists() and not entry(prompt_id).get('workspace_file') and not entry(prompt_id).get('readonly'):
+    item = entry(prompt_id)
+    if not path.exists() and item.get('source_file') and not item.get('readonly'):
+        return REPO / item['source_file']
+    if not path.exists() and not item.get('workspace_file') and not item.get('readonly'):
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix('.tmp')
         tmp.write_text(_seed_text(prompt_id) + '\n', encoding='utf-8')
@@ -174,15 +179,16 @@ def text(prompt_id):
     with _lock:
         path = _ensure(prompt_id)
         st = path.stat()
+        stamp = (path, st.st_mtime_ns, st.st_size)
         cached = _cache.get(prompt_id)
-        if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
-            return cached[2]
+        if cached and cached[0] == stamp:
+            return cached[1]
         raw = _clean(path.read_text(encoding='utf-8'))
         value = raw if entry(prompt_id).get('workspace_file') or entry(prompt_id).get('readonly') else raw.strip('\n')
         if not entry(prompt_id).get('readonly'):
             try: _record_outside_edit(prompt_id, value, st.st_mtime)
             except OSError: pass
-        _cache[prompt_id] = (st.st_mtime_ns, st.st_size, value)
+        _cache[prompt_id] = (stamp, value)
         return value
 
 
@@ -264,6 +270,7 @@ def save(prompt_id, value, by='dan', note='', base_sha=None):
         if value == current:
             return {'saved': False, 'sha': sha(value)}
         path = path_of(prompt_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         record = {'at': _now(), 'by': by if by in WHO else 'dan', 'note': note[:500], 'sha': sha(value), 'text': value}
         _append(prompt_id, record)
         tmp = path.with_name(path.name + '.saving')

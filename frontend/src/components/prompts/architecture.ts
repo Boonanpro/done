@@ -74,7 +74,7 @@ export const NODES: ArchNode[] = [
     prompts: ['call/backend-instructions', 'call/backend-plain-rules', 'call/backend-background-rules', 'call/luna-rules', 'call-code/backend-tools', 'call-code/backend-background-lines', 'call/editor-place'],
     line: '迷う頼み・連絡・文書を、道具を使って判断し、下書きを書く（OpenAI のモデル）。' },
   { id: 'parallel', name: '並行作業', model: 'Claude Code', icon: 'parallel', x: 355, y: 916, w: 290, group: 'work',
-    prompts: ['work/parallel-job-rules', 'work/confirmation-rule', 'call/call-job-note', 'call/editor-call-note', 'call/voice-task', 'call/make-origin-note'], same: 'chat',
+    prompts: ['work/parallel-job-rules', 'work/confirmation-rule', 'call/call-job-note', 'call/editor-call-note', 'work/editor-handoff', 'call/voice-task', 'call/make-origin-note'], same: 'chat',
     line: '頼んだ部屋の会話を引き継いだ別のダンが、時間のかかる制作・調べものをする。起こすのはチャットのダン（並行作業の道具）と、振り分け（作る・直す）。' },
   { id: 'codex', name: '別の部屋への頼み', model: 'Codex（GPT-6 Astra）', icon: 'codex', x: 30, y: 916, w: 290, group: 'work',
     prompts: ['work/codex-job-rules', 'work/confirmation-rule', 'work/relay-header'],

@@ -208,7 +208,7 @@ function Editor({ id, pulse, onBack, onSaved, onState, onSelection }: {
   useEffect(() => {
     if (!pulse || checking.current) return;
     const now = itemRef.current;
-    if (!now || now.id.startsWith('skill/')) return;
+    if (!now || now.readonly) return;
     checking.current = true;
     promptsApi.sha(now.id)
       .then(async got => {
@@ -616,7 +616,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           ) : null}
           {node?.skills && skills.length ? (
             <details>
-              <summary className="cursor-pointer text-sm text-stone-600">手順書（作業に要る時だけ読む・読むだけ・{skills.length}）</summary>
+              <summary className="cursor-pointer text-sm text-stone-600">手順書と案件ごとの参考（{skills.length}）</summary>
               <ul className="mt-2 space-y-2">{skills.map(row)}</ul>
             </details>
           ) : null}

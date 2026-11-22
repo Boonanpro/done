@@ -55,7 +55,7 @@ TOOL = {
             "days": {"type": "integer", "minimum": 1, "maximum": 3650, "description": "overviewの対象期間。既定30日。"},
             "offset": {"type": "integer", "minimum": 0, "description": "overview/searchの続き。next_offsetを指定。"},
             "project_id": {"type": "string", "description": "search/list/overviewの対象プロジェクトのid（room_idではない）。read/status/delegate/reportに必要。searchではそのプロジェクト内だけを検索する任意の絞り込み。"},
-            "task": {"type": "string", "description": "delegateの作業指示、またはreportの報告本文。"},
+            "task": {"type": "string", "description": "delegateは本人の依頼・決めた条件・必要な参照先を渡す。動画制作では編集手順や案件のテイストを書き写さない。reportは報告本文。"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             "before": {"type": "string", "description": "readの続き。返されたnext_beforeを指定する。"},
         },
@@ -260,6 +260,17 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
         return {"reported": True, "message_id": message["id"], "project": summary(target)}
     if target_room == room_id and action != 'work':
         raise ValueError("今の部屋の作業は自分の作業モードで実行してください")
+    if action == 'delegate' or voice_handoff:
+        from app.services.editor_rooms import room_info
+        editor = await asyncio.to_thread(room_info, target_room)
+        if editor and editor.get('content_id'):
+            original = ''
+            if not voice_handoff:
+                recent = await chat.get_messages(room_id, user_id, limit=12)
+                original = next((m.get('content') or '' for m in recent
+                                 if m.get('sender_type') in {'human', 'user'}), '')
+            from app.services.editor_handoff import editor_task
+            task = editor_task(str(target.get('title') or editor['content_id']), task, original)
     # Immediate work has one durable owner. The shared watch table can be
     # consumed by older notification workers, which cannot execute this job.
     from app.services import command_job_state

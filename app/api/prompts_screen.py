@@ -13,10 +13,12 @@ router = APIRouter(prefix='/prompts', tags=['prompts'])
 SKILLS = prompt_store.REPO / '.claude' / 'skills'
 
 
-def _skills():
+def _skills(registered):
     """The skills, read only here: they are files of Dan's code (a change goes through a worktree)."""
     out = []
     for path in sorted(SKILLS.glob('*/SKILL.md')):
+        if f'skill/{path.parent.name}' in registered:
+            continue
         try: head = path.read_text(encoding='utf-8')[:1500]
         except OSError: continue
         desc = ''
@@ -45,17 +47,20 @@ def _list():
         try: items.append(prompt_store.summary(item['id']))
         except Exception as exc:
             items.append({**item, 'error': type(exc).__name__})
-    items.extend(_skills())
+    items.extend(_skills({item['id'] for item in data['prompts']}))
     return {'places': data['places'], 'prompts': items}
 
 
 def _item(prompt_id):
-    if prompt_id.startswith('skill/'):
-        skill = next((s for s in _skills() if s['id'] == prompt_id), None)
-        if skill is None: raise KeyError(prompt_id)
+    try:
+        item = prompt_store.entry(prompt_id)
+    except KeyError:
+        registered = {item['id'] for item in prompt_store.catalog()['prompts']}
+        skill = next((s for s in _skills(registered) if s['id'] == prompt_id), None)
+        if skill is None:
+            raise
         value = _skill_text(prompt_id)
         return {**skill, 'text': value, 'sha': prompt_store.sha(value), 'chars': len(value), 'history': []}
-    item = prompt_store.entry(prompt_id)
     value = prompt_store.text(prompt_id)
     hist = [] if item.get('readonly') else prompt_store.history(prompt_id)
     return {**item, 'text': value, 'sha': prompt_store.sha(value), 'chars': len(value), 'history': hist}
@@ -73,7 +78,12 @@ async def get_prompt(id: str, current_user: TokenData = Depends(get_current_user
 
 
 def _sha(prompt_id):
-    value = _skill_text(prompt_id) if prompt_id.startswith('skill/') else prompt_store.text(prompt_id)
+    try:
+        value = prompt_store.text(prompt_id)
+    except KeyError:
+        if not prompt_id.startswith('skill/'):
+            raise
+        value = _skill_text(prompt_id)
     return {'id': prompt_id, 'sha': prompt_store.sha(value)}
 
 
@@ -128,7 +138,7 @@ CHAT_DESCRIPTION = """この部屋は、みきさんがダンを動かしてい�
 - 直してと頼まれた時だけ直します。直し方は1つだけです: `python /Users/mikihonda/done/scripts/prompts.py save <id> --note "<なぜ直したか。みきさんのどの言葉か>"` に新しい全文を標準入力で渡します。ファイルを直接書き換えたり、Python のコードの中に文を足したりしません。
 - 保存すると、みきさんの画面の全文が数秒で新しい版に替わり、変わった所と「元に戻す」が出ます。返事には、何をどう変えたかを1〜3文で書きます（全文を貼り直さない）。
 - みきさんが書きかけを保存していない時は、その書きかけを消さないよう、直す前にどちらを生かすか聞きます。
-- 「読むだけ」の文（まだプログラムの中にある文）と手順書は、この部屋では書き換えません。直したいと言われたら、画面で直せる形に移す作業になると伝えて、やってよいか聞きます。
+- 「読むだけ」の文（まだプログラムの中にある文）は、この部屋では書き換えません。直したいと言われたら、画面で直せる形に移す作業になると伝えて、やってよいか聞きます。
 - 指示文を書き換えるのは取り返しのつく操作です（履歴から戻せます）。頼まれた直しは、聞き返さずにそのまま進めます。"""
 CHAT_FILE = 'chat.json'
 

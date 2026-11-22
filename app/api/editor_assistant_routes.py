@@ -878,7 +878,9 @@ async def _tool(request: Request, body: ToolRequest):
         # Keep every utterance verbatim, but don't duplicate hundreds of old
         # screen snapshots into every job. The source turn retains those views.
         transcript=[{k:r[k] for k in ('role','text') if k in r} for r in rows['messages']]
-        args['instruction']='依頼を達成するまで、必要な調査・接続確認・制作・検品・表示を同じ仕事で続けてください。許可された範囲の確認が済んだら、そのまま実行します。本人の新しい条件を優先し、補足を本人の制約と取り違えないでください。\n作業上の補足: '+str(args.get('instruction',''))+'\n話者付き会話原文:\n'+json.dumps(transcript,ensure_ascii=False)+'\n画面観測を含む元記録（必要時のみ読む）: '+str(path)
+        original = '話者付き会話原文:\n' + json.dumps(transcript, ensure_ascii=False)
+        original += '\n画面観測を含む元記録（必要時のみ読む）: ' + str(path)
+        args['instruction'] = original + ('\n作業上の補足: ' + str(args['instruction']) if args.get('instruction') else '')
         body=ToolRequest(room_id=body.room_id,turn_id=body.turn_id,name='delegate_edit',args=args)
     preparing = body.name == 'delegate_edit' and args.get('task_kind') == 'prepare'
     presentation_only = body.name == 'delegate_edit' and args.get('destination') == 'presentation'
@@ -1088,6 +1090,12 @@ async def _tool(request: Request, body: ToolRequest):
         from app.agent.v2.tools import SkillRegistry
         name = args.get('name')
         if name:
+            from app.services import prompt_store
+            prompt_id = f'skill/{name.removesuffix(".md")}'
+            try:
+                return {'text': prompt_store.text(prompt_id)}
+            except KeyError:
+                pass
             text=SkillRegistry.get_prompt(name)
             if text:return {'text':text[:22000]}
             # Codex also advertises user-installed skills. Resolve the same
@@ -1109,6 +1117,10 @@ async def _tool(request: Request, body: ToolRequest):
         original=[s for s in original if s]
         args['instruction']=str(args.get('instruction',''))+'\nユーザーの発言（要約で固有名詞・指定条件を落とさない。後の訂正を優先）:\n'+'\n'.join(original)[-16000:]
     if body.name == 'delegate_edit':
+        if not independent:
+            from app.services.editor_handoff import editor_task
+            content, _ = tl.live_sequence(body.room_id, cid)
+            args['instruction'] = editor_task(str((content or {}).get('title') or cid), args['instruction'])
         from app.services.timeline_agent import content_busy
         from app.services import editor_job_updates
         active=content_busy(cid)
