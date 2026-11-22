@@ -4,9 +4,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 
-import { VoiceOrb } from './voice-orb';
+import { VoiceEdgeGlow } from './voice-edge-glow';
 
-import { LiveJobs, type LiveJob } from './live-jobs';
+import type { LiveJob } from './live-jobs';
 import { VoiceStage } from './voice-stage';
 import { WorkWaiting, isWorking } from './work-waiting';
 import { WaitingAudio } from './waiting-audio';
@@ -19,16 +19,14 @@ interface VoiceSessionProps {
   roomId: string;
   chatTitle?: string;
   onClose: () => void;
+  /** ダンが画面に出す物の札の幅（エディターの会話は狭い） */
+  stageWidthClass?: string;
 }
 
-export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
+export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }: VoiceSessionProps) {
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [speaking, setSpeaking] = useState(false);
-  const [stageShown, setStageShown] = useState(false);   // a scene is on the stage: the orb goes small
-  const [currentActivity, setCurrentActivity] = useState<string | null>(null);
-  /** オーブ下に出す活動フィード（ツール実行・委譲の進行を1行ずつ）。文字起こしは出さない。 */
-  const [activity, setActivity] = useState<string[]>([]);
+  const [stageShown, setStageShown] = useState(false);   // a scene is on the stage: its card shows bottom-right
   const liveSessionIdRef = useRef('');
   const workingJobsRef = useRef(false);
   const waitingAudioRef = useRef<WaitingAudio | null>(null);
@@ -60,10 +58,6 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
       flush();
     };
   }, [logSession]);
-
-  const pushActivity = useCallback((line: string) => {
-    setActivity((a) => [...a, line].slice(-5));
-  }, []);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
@@ -117,10 +111,10 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
     if (dc && dc.readyState === 'open') dc.send(JSON.stringify(obj));
   }, []);
 
-  // The server speaks job results into the call itself; the screen only shows the activity.
+  // The server speaks job results into the call itself, and the chat shows the work; this only tracks whether work runs
+  // (the waiting sound plays while it does).
   useEffect(() => {
     if (status !== 'connected') return;
-    const jobs = new LiveJobs();
     let polling = false;
     let disposed = false;
     const poll = async () => {
@@ -134,15 +128,13 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
         const data = await response.json();
         const rows: LiveJob[] = data.jobs || [];
         workingJobsRef.current = rows.some(job => ['queued','running'].includes(job.state));
-        setCurrentActivity(workingJobsRef.current ? '作業中' : null);
-        for (const {event} of jobs.updates(rows)) pushActivity(event.text);
       } catch (error) { pushLog('⚠', '作業状況の同期に失敗しました'); }
       finally { polling = false; }
     };
     void poll();
     const timer = window.setInterval(() => { void poll(); }, 1500);
     return () => { disposed = true; window.clearInterval(timer); };
-  }, [status,roomId,authHeaders,pushActivity,pushLog]);
+  }, [status,roomId,authHeaders,pushLog]);
 
   const disconnect = useCallback(() => {
     waitingAudioRef.current?.close(); waitingAudioRef.current = null;
@@ -178,8 +170,6 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
     audioCtxRef.current = null;
     micAnalyserRef.current = null;
     aiAnalyserRef.current = null;
-    setSpeaking(false);
-    setCurrentActivity(null);
     setStatus((s) => (s === 'error' ? 'error' : 'idle'));
   }, [authHeaders]);
 
@@ -191,7 +181,6 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
 
     setStatus('connecting');
     setError(null);
-    setActivity([]);
     let outputPlaying = false;
     let lastOutput = 0;
     let started = false;
@@ -377,7 +366,6 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
         else if (performance.now() - lastOutput > 500) outputPlaying = false;
         waiting.update(performance.now(), isWorking(undefined, workingJobsRef.current),
           outputPlaying || readLevel(micAnalyserRef.current) > .025, started && !ending);
-        setSpeaking(outputPlaying);
       }, 100);
     } catch (e) {
       cleanupLocal();
@@ -394,69 +382,39 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 音声モードの見た目（2026-11-22 本人）: 右下のオーブと作業の1行をやめ、画面全体のふちを声に合わせて光らせる。
+  // 作業の様子はチャットに出る。止めるのはチャットの上の「話す／音声」ボタン。ダンが画面に出す物（voice_stage）が
+  // ある時だけ、右下にその札を出す（VoiceStage は幅を測るので、隠す時も display:none にせず見えなくするだけ）。
   return (
-    <div className="flex flex-col items-center gap-3 p-4">
-      <div className="flex w-full items-center justify-between">
-        <span className="text-xs text-muted-foreground">
-          音声モード
-        </span>
-        <button
-          type="button"
-          onClick={() => {
-            disconnect();
-            onClose();
-          }}
-          className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-          aria-label="音声モードを閉じる"
-        >
-          <X className="h-4 w-4" />
-        </button>
+    <>
+      <VoiceEdgeGlow getUserLevel={getUserLevel} getAiLevel={getAiLevel} active={status === 'connected'} />
+
+      {(status === 'connecting' || status === 'error') && (
+        <div className="dark pointer-events-auto fixed left-1/2 top-3 z-[61] flex -translate-x-1/2 items-center gap-2 rounded-full border border-neutral-800 bg-neutral-950/90 px-3 py-1 text-xs text-neutral-300 shadow-lg" data-voice-status={status}>
+          {status === 'connecting' && <span>音声モードに接続中…</span>}
+          {status === 'error' && (
+            <>
+              <span className="max-w-[60vw] truncate text-red-400">{error}</span>
+              <button type="button" onClick={() => void connect()} className="rounded-full border border-neutral-700 px-2 py-0.5 hover:bg-neutral-800">再接続</button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => { disconnect(); onClose(); }}
+            className="rounded-full p-0.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+            aria-label="音声モードを閉じる"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      <div
+        className={`dark fixed bottom-4 right-4 z-50 ${stageWidthClass} max-h-[85vh] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-950 p-4 shadow-2xl ${stageShown ? '' : 'pointer-events-none invisible'}`}
+        data-voice-stage-card={stageShown ? 'shown' : 'hidden'}
+      >
+        <VoiceStage roomId={roomId} active={status === 'connected'} className="w-full" onShown={setStageShown} />
       </div>
-
-      {/* The stage: the caption and the scene the server draws while Dan talks (voice_stage). While a scene shows, the
-          orb shrinks into the status row so the scene has the panel (2026-10-26: the 150px orb stayed under every scene). */}
-      <VoiceStage roomId={roomId} active={status === 'connected'} className="w-full" onShown={setStageShown} />
-
-      {stageShown ? (
-        <div className="flex w-full items-center gap-2 text-xs text-muted-foreground" data-voice-orb="small">
-          <VoiceOrb size={40} getUserLevel={getUserLevel} getAiLevel={getAiLevel} active={status === 'connected'} />
-          <span className="min-h-5 truncate">
-            {status === 'error' && <span className="text-destructive">{error}</span>}
-            {status === 'connected' && currentActivity && `（${currentActivity}）`}
-          </span>
-        </div>
-      ) : (
-        <>
-          <VoiceOrb size={150} getUserLevel={getUserLevel} getAiLevel={getAiLevel} active={status === 'connected'} />
-
-          <div className="min-h-5 text-center text-xs text-muted-foreground">
-            {status === 'connecting' && '接続中…'}
-            {status === 'error' && <span className="text-destructive">{error}</span>}
-            {status === 'connected' && currentActivity && `（${currentActivity}）`}
-            {status === 'connected' && !currentActivity && (speaking ? '' : '')}
-          </div>
-        </>
-      )}
-
-      {activity.length > 0 && (
-        <div className="w-full space-y-1 border-t border-border pt-2">
-          {activity.map((line, i) => (
-            <p key={i} className="truncate text-center text-xs text-muted-foreground">
-              {line}
-            </p>
-          ))}
-        </div>
-      )}
-
-      {status === 'error' && (
-        <button
-          type="button"
-          onClick={() => void connect()}
-          className="rounded-md border border-border px-3 py-1 text-xs text-foreground hover:bg-accent"
-        >
-          再接続
-        </button>
-      )}
-    </div>
+    </>
   );
 }
