@@ -8,59 +8,36 @@ from pydantic import BaseModel
 
 from app.api.chat_routes import TokenData, get_current_user
 from app.services import prompt_store
+from app.services.owner import resolve_owner_user_id
+from app.services.skill_versions import skill_pages
 
 router = APIRouter(prefix='/prompts', tags=['prompts'])
-SKILLS = prompt_store.REPO / '.claude' / 'skills'
 
 
-def _skills(registered):
-    """The skills, read only here: they are files of Dan's code (a change goes through a worktree)."""
-    out = []
-    for path in sorted(SKILLS.glob('*/SKILL.md')):
-        if f'skill/{path.parent.name}' in registered:
-            continue
-        try: head = path.read_text(encoding='utf-8')[:1500]
-        except OSError: continue
-        desc = ''
-        for line in head.splitlines():
-            if line.startswith('description:'):
-                desc = line.split(':', 1)[1].strip().strip('"')
-                break
-        out.append({'id': f'skill/{path.parent.name}', 'title': f'手順書「{path.parent.name}」', 'place': 'chat', 'readonly': True,
-                    'reader': 'チャットのダン・作業の部屋のダン（その作業に要る時だけ読む）', 'when': '作業がこの手順書に当たる時',
-                    'source': f'.claude/skills/{path.parent.name}/SKILL.md', 'why': desc, 'kind': 'skill'})
-    return out
-
-
-def _skill_text(prompt_id):
-    name = prompt_id.split('/', 1)[1]
-    path = (SKILLS / name / 'SKILL.md').resolve()
-    if path.parent.parent != SKILLS.resolve() or not path.exists():
-        raise KeyError(prompt_id)
-    return path.read_text(encoding='utf-8')
-
-
-def _list():
+def _list(include_skills=True):
     data = prompt_store.catalog()
     items = []
+    registered = {}
     for item in data['prompts']:
+        if item.get('kind') == 'skill':
+            registered[item['id']] = item
+            continue
         try: items.append(prompt_store.summary(item['id']))
         except Exception as exc:
             items.append({**item, 'error': type(exc).__name__})
-    items.extend(_skills({item['id'] for item in data['prompts']}))
+    if include_skills:
+        # Opening a library should not create a history journal for every file.
+        items.extend(registered.get(page['id'], page) for page in skill_pages())
     return {'places': data['places'], 'prompts': items}
 
 
+def _check_skill_owner(prompt_id, current_user):
+    if prompt_id.startswith('skill/') and current_user.user_id != resolve_owner_user_id():
+        raise HTTPException(403, 'スキルは本人だけが開けます。')
+
+
 def _item(prompt_id):
-    try:
-        item = prompt_store.entry(prompt_id)
-    except KeyError:
-        registered = {item['id'] for item in prompt_store.catalog()['prompts']}
-        skill = next((s for s in _skills(registered) if s['id'] == prompt_id), None)
-        if skill is None:
-            raise
-        value = _skill_text(prompt_id)
-        return {**skill, 'text': value, 'sha': prompt_store.sha(value), 'chars': len(value), 'history': []}
+    item = prompt_store.entry(prompt_id)
     value = prompt_store.text(prompt_id)
     hist = [] if item.get('readonly') else prompt_store.history(prompt_id)
     return {**item, 'text': value, 'sha': prompt_store.sha(value), 'chars': len(value), 'history': hist}
@@ -68,28 +45,25 @@ def _item(prompt_id):
 
 @router.get('')
 async def list_prompts(current_user: TokenData = Depends(get_current_user)):
-    return await asyncio.to_thread(_list)
+    return await asyncio.to_thread(lambda: _list(current_user.user_id == resolve_owner_user_id()))
 
 
 @router.get('/item')
 async def get_prompt(id: str, current_user: TokenData = Depends(get_current_user)):
+    _check_skill_owner(id, current_user)
     try: return await asyncio.to_thread(_item, id)
     except KeyError: raise HTTPException(404, 'その指示文はありません。')
 
 
 def _sha(prompt_id):
-    try:
-        value = prompt_store.text(prompt_id)
-    except KeyError:
-        if not prompt_id.startswith('skill/'):
-            raise
-        value = _skill_text(prompt_id)
+    value = prompt_store.text(prompt_id)
     return {'id': prompt_id, 'sha': prompt_store.sha(value)}
 
 
 @router.get('/sha')
 async def prompt_sha(id: str, current_user: TokenData = Depends(get_current_user)):
     """Only the version mark: the screen asks this every few seconds while Dan works in the chat, to show Dan's change at once."""
+    _check_skill_owner(id, current_user)
     try: return await asyncio.to_thread(_sha, id)
     except KeyError: raise HTTPException(404, 'その指示文はありません。')
 
@@ -103,6 +77,7 @@ class SaveBody(BaseModel):
 
 @router.post('/item')
 async def save_prompt(body: SaveBody, current_user: TokenData = Depends(get_current_user)):
+    _check_skill_owner(body.id, current_user)
     try:
         out = await asyncio.to_thread(prompt_store.save, body.id, body.text, 'owner', body.note, body.base_sha or None)
     except KeyError: raise HTTPException(404, 'その指示文はありません。')
@@ -114,13 +89,16 @@ async def save_prompt(body: SaveBody, current_user: TokenData = Depends(get_curr
 class RevertBody(BaseModel):
     id: str
     sha: str
+    base_sha: str = ''
 
 
 @router.post('/revert')
 async def revert_prompt(body: RevertBody, current_user: TokenData = Depends(get_current_user)):
+    _check_skill_owner(body.id, current_user)
     try:
-        out = await asyncio.to_thread(prompt_store.revert, body.id, body.sha, 'owner')
+        out = await asyncio.to_thread(prompt_store.revert, body.id, body.sha, 'owner', body.base_sha or None)
     except KeyError: raise HTTPException(404, 'その版はありません。')
+    except RuntimeError as exc: raise HTTPException(409, str(exc))
     except ValueError as exc: raise HTTPException(422, str(exc))
     return {**out, 'item': await asyncio.to_thread(_item, body.id)}
 
