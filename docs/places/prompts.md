@@ -3,23 +3,23 @@ place: prompts
 name: ダンを動かしている指示文
 open: /prompts
 ready: 'textarea, button:has(img[src^="/prompts/arch/"])'
-watches: [frontend/src/app/prompts/page.tsx, frontend/src/components/prompts/prompts-screen.tsx, frontend/src/components/prompts/prompts-chat.tsx, frontend/src/components/prompts/reader-skills.tsx, frontend/src/components/prompts/skill-library.tsx, frontend/src/components/prompts/line-diff.ts, frontend/src/components/prompts/architecture.ts, frontend/src/lib/prompts-api.ts, app/api/prompts_screen.py, app/services/prompt_store.py, app/prompts/catalog.json]
+watches: [frontend/src/app/prompts/page.tsx, frontend/src/components/prompts/prompts-screen.tsx, frontend/src/components/prompts/prompts-chat.tsx, frontend/src/components/prompts/reader-skills.tsx, frontend/src/components/prompts/skill-library.tsx, frontend/src/components/prompts/line-diff.ts, frontend/src/components/prompts/architecture.ts, frontend/src/components/prompts/architecture-trace.ts, frontend/src/components/prompts/conversation-circuit.tsx, frontend/src/app/prompts/circuit/page.tsx, frontend/src/lib/prompts-api.ts, app/api/prompts_screen.py, app/services/prompt_store.py, app/prompts/catalog.json]
 errors: [ログインが切れています, 失敗しました]
 speak: |
-  - 上の「会話の回路図」で、実際のチャット・音声・並行作業の記録を開けます。「依頼を試す」では、担当に渡す直前までか、実際に作業を進めるかを選べます。
+  - 上の「会話の回路図」を押すと、構成図の同じ箱と線に、実際のチャット・音声・並行作業の記録が重なります。番号は記録の順で、「図の箱を追う」でその段階の箱まで自動で移り、箱を押すと指示文を開けます。失敗した場所が記録にある時はその箱が赤くなります。「依頼を試す」では、担当に渡す直前までか、実際に作業を進めるかを選べます。
   - 構成図の緑の枝には、ダンがどんな依頼で読むスキルかが出ます。「すべて」でそのダンの頼み別の枝を開けます。通話で制作を頼んだ時は並行作業につながります。
   - 画面上の「スキル」で全スキルの手順書と参考ページを検索し、編集・復元できます。
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: fbb0413e2db9ea73
-described: 235c1f27fcfd3f23
+fingerprint: 55263a5532e43db4
+described: efe6ea89b3f5408b
 last_review: "2026-11-22 説明は変えない: 一覧と全文の並びは記載どおり"
 ---
 # ダンを動かしている指示文
 
 上に、みきさんの頼みが流れる順の構成図（上から下：みきさん→画面のサーバー→入口→会話の本体／道具と通話のサーバー→チャットのダン・通話のダン・エディター→振り分け→調べもの係・画面係・判断役→作業の部屋）。箱には何の場所かの小さな絵、中で動くモデル、読む指示文の数。箱を押すとその箱が読む指示文の一覧、押すと全文がそのまま出て、その場で書き直して保存できる。誰が読むか・いつ効くか・なぜある文か・元の場所・履歴は全文の下にたたんである。
-開発室のボード（artifact:dev-lead）の上の切り替え「部屋／地図／指示文」の「指示文」でも同じ画面が出る（2026-11-17 本人「開発室の中に1要素として」）。
+開発室のボード（artifact:dev-lead）の上の切り替え「部屋／指示文」の「指示文」でも同じ画面が出る（2026-11-17 本人「開発室の中に1要素として」）。
 
 ## 中にある物
 
@@ -59,10 +59,10 @@ last_review: "2026-11-22 説明は変えない: 一覧と全文の並びは記�
 
 `python scripts/place_map.py stamp prompts` が書き直す。手で直さない。
 
-- 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
-- ラベル: 「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「指示文の表示」、「ダンと話す」、「会話を閉じる」、「スキル一覧」、「スキル・参考ページを検索」
+- 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/circuit/page.tsx`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/architecture-trace.ts`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/conversation-circuit.tsx`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
+- ラベル: 「時刻順の記録」、「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「指示文の表示」、「ダンと話す」、「会話を閉じる」、「スキル一覧」、「スキル・参考ページを検索」
 - 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」
 - 見出し: 「プログラムの中にあった頃に直された日」、「ダンを動かしている指示文」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "9201b26078", "app/prompts/catalog.json": "c75d3461c7", "app/services/prompt_store.py": "7d17a36062", "frontend/src/app/prompts/page.tsx": "91681f0b9d", "frontend/src/components/prompts/architecture.ts": "60757c7a1c", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "ceb98a46cb", "frontend/src/components/prompts/prompts-screen.tsx": "fa3c08b740", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "146206af99"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "6047951223", "app/prompts/catalog.json": "c75d3461c7", "app/services/prompt_store.py": "750e86435b", "frontend/src/app/prompts/circuit/page.tsx": "76c05249b6", "frontend/src/app/prompts/page.tsx": "ea917328ef", "frontend/src/components/prompts/architecture-trace.ts": "f84a185427", "frontend/src/components/prompts/architecture.ts": "60757c7a1c", "frontend/src/components/prompts/conversation-circuit.tsx": "81b57cdfba", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "ceb98a46cb", "frontend/src/components/prompts/prompts-screen.tsx": "92c413efba", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "93f3485b6b"} -->
 <!-- place_map:auto:end -->
