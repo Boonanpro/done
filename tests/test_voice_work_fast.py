@@ -116,7 +116,7 @@ async def test_live_interleaved_fragments_reach_worker_without_losing_conditions
 
 
 @pytest.mark.asyncio
-async def test_voice_article_revision_uses_room_selection_not_invented_opus(monkeypatch):
+async def test_voice_article_revision_uses_parallel_work_default(monkeypatch):
     from app.services import command_center, command_job_state, parallel_job_runner
     monkeypatch.setattr(command_job_state, 'list_owned', lambda *a: [])
     monkeypatch.setattr(parallel_job_runner, 'room_model', lambda room: 'astra')
@@ -129,7 +129,7 @@ async def test_voice_article_revision_uses_room_selection_not_invented_opus(monk
     # Actual failed call supplied model=opus despite the room selecting Astra.
     out = await R.run_function('start_work', {'task':'冒頭の修正を続ける','kind':'make','model':'opus'}, 'u','r',dialogue)
     assert out['accepted']
-    assert captured['engine'] == 'make' and captured['model'] == 'astra'
+    assert captured['engine'] == 'make' and 'model' not in captured
     assert dialogue[0]['text'] in captured['task']
     monkeypatch.setattr(R, 'remembered', lambda: '')
     monkeypatch.setattr(R, 'catalog', lambda: '')

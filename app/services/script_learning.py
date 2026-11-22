@@ -512,13 +512,13 @@ evidence の pending_suggestions で by=owner の物だけを、通常のDanブ�
 
 async def run_job(doc, job_id):
     from app.services import command_job_state as state, job_process
-    from app.services.parallel_job_runner import room_model
+    from app.services.parallel_job_runner import DEFAULT_MODEL
     if state.ROOT!=E.ROOT/'jobs':raise RuntimeError('Private job root required')
     saved=state.read(job_id)
     if not saved:
         spec={'origin_room_id':doc['room_id'],'origin_project_id':doc['project_id'],'task':prompt(doc,job_id)}
         state.create(job_id,user_id=doc['user_id'],room_id=doc['room_id'],**spec,
-                     engine='parallel',model=room_model(doc['room_id']),quiet=True,queue_owner='process',
+                     engine='parallel',model=DEFAULT_MODEL,quiet=True,queue_owner='process',
                      title='台本の添削から手順を改善',origin_note='内部の学習記録だけに残し、チャットへ通知しない。')
         row={'id':job_id,'room_id':doc['room_id'],'user_id':doc['user_id'],'spec':spec}
     else:

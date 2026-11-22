@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import time
@@ -82,6 +83,15 @@ class ParallelJobTests(_TempRoots):
     def test_model_words(self):
         self.assertEqual([runner.model_key(v) for v in ('GPT-6', 'gpt-6-astra', 'Opus', 'Fable', 'claude', '')],
                          ['astra', 'astra', 'opus', 'fable', 'opus', ''])
+
+    def test_jobs_menu_offers_its_default_model(self):
+        from app.api import parallel_job_routes as routes
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        with patch.object(routes, '_room', AsyncMock(return_value='R')):
+            menu = asyncio.run(routes.list_jobs('project', SimpleNamespace(user_id='U')))
+        self.assertEqual(menu['default_model'], 'astra')
+        self.assertIn('astra', [option['id'] for option in menu['models']])
 
     def test_room_list_has_this_rooms_parallel_jobs_only(self):
         mine = self.job()

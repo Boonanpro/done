@@ -9,8 +9,8 @@ speak: |
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: 9b24c3cb86f71721
-described: 91cecbb77739b303
+fingerprint: d06eb18036337569
+described: a9de1853c49d46bc
 ---
 # ダンを動かしている指示文
 
@@ -25,6 +25,7 @@ described: 91cecbb77739b303
 - スマホの幅では、一覧と全文が入れ替わり（「一覧に戻る」）。PC でも 1280 より狭い時（開発室の中など）は、一覧と全文が入れ替わり、右に会話の列が出る。
 - 「ダンと話して直す」の会話（2026-11-21 本人「指示文の見直しはお前と一緒にやった方が良いけど、ページにチャットが無いからやりにくい」）。PC は全文の横の列（スクロールしても見えたまま）、スマホは右下の「ダンと話す」で下から出る。部屋は1つ（「ダン開発室: 指示文の見直し」、一覧に出さない。app/api/prompts_screen.py の /prompts/chat、~/.dan/workspace/prompts/.chat/chat.json）で、/prompts と開発室の「指示文」が同じ部屋で話す。
   - 入力欄の上の札に、今開いている文と、全文の中で選んだ所（何行目・何という文）が出る。発言ごとにそれを `<dan-context>` で添える（画面には出ない。本人の吹き出しの上に「どの文の何行目」だけ小さく出る）。保存していない書きかけがあれば、その違いも添える。
+  - 会話欄の「チャットのモデル」で、指示文の会話が次の返答に使うモデルを選べます。
   - ダンは scripts/prompts.py save で直す（部屋の説明に書いてある）。会話のダンが動いている間は数秒ごとに版の印（/prompts/sha）を見て、変わったら全文がその場で新しい版になり、上に「ダンが直しました：理由」・変わった所（消した行は赤い線、足した行は緑）・「元に戻す」が出る。書きかけがある時は消さずに「ダンの版を開く」を出す。
 - 「手順書と案件ごとの参考」から、動画編集の手順書と各案件の決まりを開いて保存・復元できます。並行作業の「動画編集の依頼を渡す時」では、チャットと音声の編集依頼に共通する文を直せます。
 
@@ -56,5 +57,5 @@ described: 91cecbb77739b303
 - 試験の印: 「dan-change」
 - 見出し: 「プログラムの中にあった頃に直された日」、「ダンを動かしている指示文」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "1bc7142ae0", "app/prompts/catalog.json": "d98f5ccbf4", "app/services/prompt_store.py": "2b3738f448", "frontend/src/app/prompts/page.tsx": "486f5c8762", "frontend/src/components/prompts/architecture.ts": "1dbc20e9a9", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "bbea1ebe06", "frontend/src/components/prompts/prompts-screen.tsx": "4d0ccb9a88", "frontend/src/lib/prompts-api.ts": "cb53e5f819"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "1bc7142ae0", "app/prompts/catalog.json": "d98f5ccbf4", "app/services/prompt_store.py": "2b3738f448", "frontend/src/app/prompts/page.tsx": "486f5c8762", "frontend/src/components/prompts/architecture.ts": "1dbc20e9a9", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "9d705794fe", "frontend/src/components/prompts/prompts-screen.tsx": "4d0ccb9a88", "frontend/src/lib/prompts-api.ts": "cb53e5f819"} -->
 <!-- place_map:auto:end -->
