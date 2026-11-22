@@ -15,9 +15,9 @@ watches:
   - frontend/src/components/chat/chat-shapes.tsx
   - frontend/src/lib/chat-shapes/*.ts
   - frontend/src/app/globals.css
-fingerprint: 972ca0f6b8225a65
+fingerprint: 2846194f8fcdfa34
 described: 3767bfb73bb25b96
-last_review: "2026-11-21 説明は変えない: 別の作業（チャットを端末の控えを待たずに開く）の4行で、会話欄の部品と見え方は変わらない"
+last_review: "2026-11-22 説明は変えない: 会話がまだ無い時の案内文を消しただけ（11/21 PR1050）。地図に案内文の記述は無く、説明は変わらない"
 ---
 # ダンのチャット
 
@@ -62,5 +62,5 @@ last_review: "2026-11-21 説明は変えない: 別の作業（チャットを�
 - 見張るファイル: `frontend/src/app/globals.css`, `frontend/src/components/chat/chat-shapes.tsx`, `frontend/src/components/layout/project-chat-panel.tsx`, `frontend/src/lib/chat-shapes/answer-sends.ts`, `frontend/src/lib/chat-shapes/answers.ts`, `frontend/src/lib/chat-shapes/chart-geometry.ts`, `frontend/src/lib/chat-shapes/job-report.ts`, `frontend/src/lib/chat-shapes/live-line.ts`, `frontend/src/lib/chat-shapes/map-geometry.ts`, `frontend/src/lib/chat-shapes/no-openui-devtools.ts`, `frontend/src/lib/chat-shapes/plain.ts`, `frontend/src/lib/chat-shapes/schema.ts`, `frontend/src/lib/chat-shapes/split.ts`, `frontend/src/lib/chat-shapes/use-answer-send.ts`
 - ラベル: 「近づける」、「遠ざける」、「部品を準備中」、「このコメントを外す」、「添えた物を外す」、「タイムライン参照を外す」
 
-<!-- place_map:files {"frontend/src/app/globals.css": "b514a43252", "frontend/src/components/chat/chat-shapes.tsx": "28547ccd62", "frontend/src/components/layout/project-chat-panel.tsx": "5b52157dc7", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "7da7099871", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/map-geometry.ts": "b207ed80e8", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "5eecbe35bb", "frontend/src/lib/chat-shapes/schema.ts": "efdebee024", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
+<!-- place_map:files {"frontend/src/app/globals.css": "b514a43252", "frontend/src/components/chat/chat-shapes.tsx": "28547ccd62", "frontend/src/components/layout/project-chat-panel.tsx": "02aada413e", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "7da7099871", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/map-geometry.ts": "b207ed80e8", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "5eecbe35bb", "frontend/src/lib/chat-shapes/schema.ts": "efdebee024", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
 <!-- place_map:auto:end -->
