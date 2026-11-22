@@ -702,10 +702,9 @@ SUMMON_REPLY_S = 600   # a reply this long after a summons was said still answer
 
 
 async def start_chat_dan(user_id, room_id, dialogue, words, carried='', *, internal_check=False):
-    """Chat Dan takes the work: a parallel job of the room on the room's model (engine 'make', the same harness as the
+    """Chat Dan takes the work: a parallel job of the room on the parallel-work model (engine 'make', the same harness as the
     chat), with the owner's words and the call's transcript. Nothing in between rewrites the request."""
     from app.services.command_center import execute
-    from app.services.parallel_job_runner import room_model
     from app.services import voice_parts
     from app.services import voice_editor
     turns = getattr(dialogue, 'history', dialogue)
@@ -728,8 +727,7 @@ async def start_chat_dan(user_id, room_id, dialogue, words, carried='', *, inter
         for moment, dest in frames:
             loop.run_in_executor(None, voice_editor.draw_frame, editor.asset_room_id, editor.content_id, moment, dest)
     try:
-        model = await asyncio.to_thread(room_model, room_id)
-        return await execute({'action': 'work', 'task': task + voice_parts.VOICE_TASK, 'engine': 'make', 'model': model},
+        return await execute({'action': 'work', 'task': task + voice_parts.VOICE_TASK, 'engine': 'make'},
                              room_id, user_id, voice_handoff=True, internal_check=internal_check)
     except Exception as exc:
         return {'accepted': False, 'error': type(exc).__name__}

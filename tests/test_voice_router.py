@@ -109,7 +109,7 @@ async def test_site_work_goes_to_chat_dan_with_the_calls_transcript(monkeypatch)
     await r.answer('del_2', created)
     params, handoff, internal_check = started[0]
     assert not internal_check
-    assert params['engine'] == 'make' and params['model'] == 'opus' and handoff
+    assert params['engine'] == 'make' and 'model' not in params and handoff
     head, transcript = params['task'].split(voice_router.TRANSCRIPT, 1)
     assert 'しゅんさんとみひろさんなんですけど' in head and '六日までに' in head   # the request said over two turns
     assert '本人: しゅんさんとみひろさんなんですけど' in transcript and '【途中】' in transcript

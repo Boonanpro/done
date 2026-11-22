@@ -446,12 +446,7 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None, *, in
             return {'accepted': False, 'error': '会話が長いため、条件を省略せず作業へ渡せませんでした。',
                     'note': '開始したと言わない。条件を勝手に削らず、部屋の記録を参照できる形で引き継ぐ。'}
         making = args.get('kind') == 'make'
-        # The room's selected model is authoritative. Live used to invent
-        # model=opus from the tool's default, overriding the owner's selection.
-        from app.services.parallel_job_runner import room_model
-        model_params = {'model': await asyncio.to_thread(room_model, room_id)} if making else {}
-        out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': 'make' if making else WORK_ENGINE,
-                             **model_params}, room_id, user_id, voice_handoff=True, internal_check=internal_check)
+        out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': 'make' if making else WORK_ENGINE}, room_id, user_id, voice_handoff=True, internal_check=internal_check)
         if not out.get('accepted'):
             return {'accepted': False, 'error': '作業を開始できませんでした。', 'note': '実行中とは言わない。再送前に job_status で受付状況を確認する。'}
         # It used to say 「本人に今言うことはない」: after reading two mails and handing the EX check over, the call was silent

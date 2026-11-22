@@ -560,13 +560,13 @@ def _listen_anchors(batch):
 async def run_batch(doc, batch):
     from app.services import command_job_state as state
     from app.services import job_process
-    from app.services.parallel_job_runner import room_model
+    from app.services.parallel_job_runner import DEFAULT_MODEL
     # Private root excludes these jobs from all chat feeds/lists, including older Cores.
     if state.ROOT != ROOT/'jobs': raise RuntimeError('Private job root required')
     row = {'id': batch['id'], 'room_id': doc['room_id'], 'user_id': doc['user_id'],
            'spec': {'origin_room_id': doc['room_id'], 'origin_project_id': doc['project_id'], 'task': prompt(doc, batch)}}
     state.create(batch['id'], **{k: row[k] for k in ('user_id', 'room_id')}, **row['spec'],
-                 engine='parallel', model=room_model(doc['room_id']), quiet=True, queue_owner='process',
+                 engine='parallel', model=DEFAULT_MODEL, quiet=True, queue_owner='process',
                  **({'browser_room':doc['browser_room']} if doc.get('browser_room') else {}),
                  title='台本のコメント対応', origin_note='\nこの作業の結果は内部履歴だけに残す。チャットや通知には一切出さない。')
     with db() as c: c.execute('UPDATE batches SET status=? WHERE id=?', ('running', batch['id']))

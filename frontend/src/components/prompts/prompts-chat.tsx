@@ -20,6 +20,7 @@ import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys } from '@/lib/chat-shapes/answers';
 import { elapsedText, liveLineText, liveStartedAt, liveStepsFromEvents, sentSinceReply } from '@/lib/chat-shapes/live-line';
 import { oneLine } from '@/lib/one-line';
+import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { promptsChat, type ChatMessage, type ChatStep } from '@/lib/prompts-api';
 import { cn } from '@/lib/utils';
 
@@ -290,6 +291,7 @@ export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBus
   return (
     <div className="flex h-full min-h-0 flex-col">
       {header}
+      {room && <div className="flex shrink-0 justify-end px-3 pt-2"><ModelSwitcher roomId={room} disabled={busy || sending} /></div>}
       <div ref={list} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
         className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-3">
         {more ? (

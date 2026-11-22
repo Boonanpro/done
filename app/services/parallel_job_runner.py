@@ -32,6 +32,7 @@ def _dan_ws():
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MODEL = 'astra'
 MODELS = {'opus': 'opus', 'fable': 'fable', 'astra': 'gpt-6-astra'}   # 'astra' runs on the newest Astra (model_catalog.current)
 
 
@@ -542,7 +543,7 @@ async def start(room_id, user_id, task, model='', title='', quiet=False, receive
     quiet: asked from a site; the result is not posted in the room's chat (see deliver).
     receiver: the room's receiver of notices while the owner's work runs (room_receiver); its answer is posted as it is."""
     from app.services.command_center import execute
-    model = model_key(model) or room_model(room_id)
+    model = model_key(model) or DEFAULT_MODEL
     out = await execute({'action': 'work', 'engine': 'parallel', 'model': model, 'task': task, 'title': title, 'quiet': quiet,
                          'receiver': receiver}, room_id, user_id)
     if not out.get('accepted'):
