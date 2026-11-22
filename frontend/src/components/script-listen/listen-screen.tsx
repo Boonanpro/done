@@ -365,27 +365,6 @@ function quoteRange(root: HTMLElement, n: number, quote: string): Range | null {
 }
 
 const FLASH_MS = 2400;
-/** A soft yellow glow over words that fades away (11/20 本人「一瞬黄色くぼんやりと目立たせて、数秒したら消える」). */
-function flashRange(r: Range | null) {
-  const hl = (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
-  const H = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
-  if (!r || !hl || !H) return;
-  let style = document.getElementById('cm-flash-style') as HTMLStyleElement | null;
-  if (!style) { style = document.createElement('style'); style.id = 'cm-flash-style'; document.head.appendChild(style); }
-  hl.set('cm-flash', new H(r));
-  const t0 = performance.now();
-  const me = Symbol('flash');
-  (flashRange as unknown as { cur?: symbol }).cur = me;
-  const step = (now: number) => {
-    if ((flashRange as unknown as { cur?: symbol }).cur !== me) return;
-    const k = Math.min(1, (now - t0) / FLASH_MS);
-    // hold, then fade
-    const a = k < 0.35 ? 0.85 : 0.85 * (1 - (k - 0.35) / 0.65);
-    style!.textContent = `::highlight(cm-flash){background-color:rgb(253 224 71 / ${a.toFixed(3)})}`;
-    if (k < 1) requestAnimationFrame(step); else { hl.delete('cm-flash'); style!.textContent = ''; }
-  };
-  requestAnimationFrame(step);
-}
 
 /** The same glow around a card. */
 function flashCard(id: string) {
@@ -886,6 +865,38 @@ export function ListenScreen({ docId }: { docId: string }) {
   }, [draft, paintDraft]);
   useEffect(() => () => { (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights?.delete('cm-draft'); }, []);
 
+  // The words of the chosen card stay lit for as long as the card is chosen (11/22 本人「選択中はその本文をずっと光らせといて。
+  // 今数秒で消えちゃってる」). Painted again whenever the text is rebuilt.
+  const activeRef = useRef<string | null>(null);
+  const placeRef = useRef(place);
+  const threadsRef = useRef(threads);
+  const activeRange = useRef<Range | null>(null);
+  const paintActive = useCallback(() => {
+    const hl = (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
+    const H = (globalThis as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+    const root = editorRef.current;
+    const id = activeRef.current;
+    activeRange.current = null;
+    if (!hl || !H) return;
+    if (!root || !id) { hl.delete('cm-active'); return; }
+    let r: Range | null = null;
+    const spans = root.querySelectorAll(`[data-sug="${CSS.escape(id)}"]`);
+    if (spans.length) { r = document.createRange(); r.setStartBefore(spans[0]); r.setEndAfter(spans[spans.length - 1]); }
+    else {
+      const n = placeRef.current.get(id);
+      const t = threadsRef.current.find(x => x.id === id);
+      if (n != null && t) r = quoteRange(root, n, t.quote || '');
+    }
+    if (!r) { hl.delete('cm-active'); return; }
+    activeRange.current = r;
+    hl.set('cm-active', new H(r));
+  }, []);
+  useEffect(() => {
+    activeRef.current = active; placeRef.current = place; threadsRef.current = threads;
+    paintActive();
+  }, [active, place, threads, paintActive]);
+  useEffect(() => () => { (globalThis as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights?.delete('cm-active'); }, []);
+
   // Where the voice is and which words have comments: marks on the elements, so the text and the caret stay put.
   const applyMarks = useCallback(() => {
     const root = editorRef.current;
@@ -898,7 +909,8 @@ export function ListenScreen({ docId }: { docId: string }) {
     threadsAt.forEach((_, n) => root.querySelectorAll(`[data-n="${n}"]`).forEach(el => el.setAttribute('data-cm', '')));
     root.querySelectorAll('[data-dan]').forEach(el => el.removeAttribute('data-dan'));
     danUnits.forEach((_, n) => root.querySelectorAll(`[data-n="${n}"]`).forEach(el => el.setAttribute('data-dan', '')));
-  }, [says, cur, threadsAt, playing, danUnits]);
+    paintActive();
+  }, [says, cur, threadsAt, playing, danUnits, paintActive]);
   useEffect(() => { applyMarks(); }, [applyMarks]);
 
   const sayAtPos = useCallback((pos: Pos | null) => {
@@ -1654,19 +1666,10 @@ export function ListenScreen({ docId }: { docId: string }) {
     lastUserScroll.current = Date.now();
     revealUnit(n);
   }, []);
-  /** From a card to its words: they come into view and glow a moment (only when the card was not already the one). */
-  const goText = (id: string, n: number, quote?: string) => {
-    const again = active === id;
+  /** From a card to its words: they come into view (and stay lit while the card is chosen). */
+  const goText = (id: string, n: number) => {
     setActive(id);
     focusUnit(n);
-    if (again) return;
-    const root = editorRef.current;
-    if (!root) return;
-    let r: Range | null = null;
-    const spans = root.querySelectorAll(`[data-sug="${CSS.escape(id)}"]`);
-    if (spans.length) { r = document.createRange(); r.setStartBefore(spans[0]); r.setEndAfter(spans[spans.length - 1]); }
-    else r = quoteRange(root, n, quote || '');
-    flashRange(r);
   };
   /** From words to their card (PC: the card beside the text). */
   const showCard = (id: string) => {
@@ -1891,12 +1894,22 @@ export function ListenScreen({ docId }: { docId: string }) {
     if (!screenWide) { setPhoneChat(v => !v); return; }
     setChatOpen(v => { localStorage.setItem(CHAT_KEY, v ? '0' : '1'); return !v; });
   };
+  // A press anywhere that has nothing to do with the chosen card lets go of it (11/22 本人「カードと関係無い所をクリックしたら
+  // 選択解除して」): not on a card, not in the open sheet, not on the lit words themselves.
+  const letGoOfCard = (e: React.PointerEvent) => {
+    if (!active) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-card],[data-sheet]')) return;
+    const r = activeRange.current;
+    if (r && Array.from(r.getClientRects()).some(b => e.clientX >= b.left - 2 && e.clientX <= b.right + 2 && e.clientY >= b.top - 2 && e.clientY <= b.bottom + 2)) return;
+    setActive(null);
+  };
   const thumbTitle = thumb ? `${doc.title.replace(/\s*台本.*$/, '')} サムネ${thumb.order + 1}` : '';
 
   return (
     <DanLiveContext.Provider value={danLiveValue}>
-    <div className="flex h-dvh flex-col bg-[#faf8f4] text-stone-900">
-      <style>{'::highlight(cm-draft){background-color:rgb(252 211 77 / 0.75)}'}</style>
+    <div className="flex h-dvh flex-col bg-[#faf8f4] text-stone-900" onPointerDownCapture={letGoOfCard}>
+      <style>{'::highlight(cm-draft){background-color:rgb(252 211 77 / 0.75)}::highlight(cm-active){background-color:rgb(253 224 71 / 0.6)}'}</style>
       <header className="shrink-0 border-b border-stone-200 bg-white/90 px-3 py-2 backdrop-blur sm:px-6">
         <div className="mx-auto flex max-w-6xl items-center gap-2">
           <Volume2 className="h-4 w-4 shrink-0 text-amber-700" />
@@ -2135,7 +2148,7 @@ export function ListenScreen({ docId }: { docId: string }) {
               {visibleThreads.filter(t => place.has(t.id) && !talkOf.has(t.id)).map(t => (
                 <div key={t.id} ref={el => { if (el) cardRefs.current.set(t.id, el); else cardRefs.current.delete(t.id); }}
                   data-card={t.id} data-anchor={place.get(t.id)} className={cn('absolute inset-x-0', active === t.id && 'z-10')}>
-                  <ThreadCard thread={t} gone={gone.has(t.id)} active={active === t.id} onFocus={() => goText(t.id, place.get(t.id)!, t.quote)}
+                  <ThreadCard thread={t} gone={gone.has(t.id)} active={active === t.id} onFocus={() => goText(t.id, place.get(t.id)!)}
                     onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} />
                 </div>
               ))}
@@ -2292,7 +2305,7 @@ export function ListenScreen({ docId }: { docId: string }) {
       )}
 
       {!wide && sheet && (
-        <div className="fixed inset-x-0 bottom-0 z-40 max-h-[70dvh] overflow-y-auto rounded-t-2xl border-t border-stone-200 bg-[#faf8f4] px-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] pt-2 shadow-2xl">
+        <div data-sheet className="fixed inset-x-0 bottom-0 z-40 max-h-[70dvh] overflow-y-auto rounded-t-2xl border-t border-stone-200 bg-[#faf8f4] px-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] pt-2 shadow-2xl">
           <div className="mb-2 flex items-center justify-between">
             <div className="text-[13px] font-semibold text-stone-700">
               {sheet.kind === 'suggestion' ? '提案' : sheet.kind === 'compose' ? 'コメントを書く' : 'コメント'}
@@ -2319,7 +2332,7 @@ export function ListenScreen({ docId }: { docId: string }) {
           <div className="space-y-2">
             {sheetThreads.map(t => (
               <div key={t.id} data-card={t.id}><ThreadCard thread={t} gone={gone.has(t.id)} active={active === t.id || sheet.kind === 'threads'}
-                onFocus={() => { const n = place.get(t.id); if (n != null) { if (sheet.kind === 'all') setSheet(null); goText(t.id, n, t.quote); } else setActive(t.id); }}
+                onFocus={() => { const n = place.get(t.id); if (n != null) { if (sheet.kind === 'all') setSheet(null); goText(t.id, n); } else setActive(t.id); }}
                 onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} /></div>
             ))}
             {sheet.kind === 'all' && !sheetThreads.length && !suggestions.length && <div className="py-4 text-center text-[13px] text-stone-500">コメントはありません</div>}
