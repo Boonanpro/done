@@ -15,6 +15,7 @@ import remarkGfm from 'remark-gfm';
 import { ArrowUp, Loader2, MessageCircle, Square, X } from 'lucide-react';
 
 import { ShapeBlock } from '@/components/chat/chat-shapes';
+import { MediaGrid } from '@/components/chat/media-grid';
 import { parseMediaContent } from '@/lib/chat-media';
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys } from '@/lib/chat-shapes/answers';
@@ -89,8 +90,8 @@ const DanBody = memo(function DanBody({ body, messageId }: { body: string; messa
       {media.text && segments.map((x, i) => (x.kind === 'markdown'
         ? md(x.text, `m${i}`)
         : <div key={`s${x.index}`}><ShapeBlock code={x.code} complete={x.complete} messageId={messageId} part={keys[x.index] || `i${x.index}`} renderFallback={code => md('```\n' + code + '\n```', `f${i}`)} /></div>))}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      {media.images.map(url => <img key={url} src={url} alt="" className="mt-2 max-h-72 rounded-lg border" />)}
+      {/* 1枚ずつ縦横比のまま置き、押すと大きく開く（2026-11-22 本人「クリックしても大きく表示できない」） */}
+      {media.images.map(url => <MediaGrid key={url} items={[{ url, kind: 'image' }]} className="mt-2" />)}
       {media.videos.map(url => <video key={url} src={url} controls playsInline preload="metadata" className="mt-2 max-h-72 rounded-lg border" />)}
     </>
   );
@@ -293,7 +294,7 @@ export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBus
       {header}
       {room && <div className="flex shrink-0 justify-end px-3 pt-2"><ModelSwitcher roomId={room} disabled={busy || sending} /></div>}
       <div ref={list} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
-        className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-3">
+        data-media-gallery-scope className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-3">
         {more ? (
           <button type="button" onClick={() => void readOlder()} className="mx-auto block text-xs text-stone-500 underline">前の話を読む</button>
         ) : null}
