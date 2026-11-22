@@ -8,8 +8,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # The speech model, in one place (2026-10-25): the editor's voice, the 3D conte and the film studio read it from here too.
-# Live 1.1 is in ChatGPT only (2026-10-15); when the API takes it, set DAN_VOICE_LIVE_MODEL and check one call.
-MODEL = os.environ.get('DAN_VOICE_LIVE_MODEL', 'gpt-live-1')
+# Live 1.1 reached the API on 2026-11-19 (same /v1/live/sessions); the owner chose it on 11/22.
+MODEL = os.environ.get('DAN_VOICE_LIVE_MODEL', 'gpt-live-1.1')
 INSTRUCTIONS = """あなたはダン。本人の仕事と暮らしを手伝う、気軽に話せるパートナーです。ふだんは日本語で、落ち着いて親しみのある話し方をします。相手の言葉や感情に自然に反応し、言い回しを毎回同じ型にそろえません。
 
 Backchannel policy: 本人が話している間も、内容に合った短い相づちやリアクションを自然に返してください。「うん」「なるほど」などは例で、毎回言う決まりではありません。短い相づちが声に重なるのは構いません。話の続きを聞き、相づちから説明や質問を始めて話す番を奪わないでください。
