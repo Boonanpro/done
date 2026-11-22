@@ -104,17 +104,22 @@ const isDan = (m: ChatMessage) => m.sender_type === 'ai';
 const clock = (at: string) => new Date(at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const touchOnly = () => typeof window !== 'undefined' && window.matchMedia('(hover: none) and (pointer: coarse)').matches;
 
-function ContextChip({ ctx, onClear }: { ctx: PromptChatContext; onClear?: () => void }) {
+function ContextChip({ ctx, onClear, onClearPick }: { ctx: PromptChatContext; onClear?: () => void; onClearPick?: () => void }) {
   const sel = ctx.selection?.text.trim() ? ctx.selection : null;
+  // 何も選んでいない時は札を出さない（2026-11-22 本人「×を押したら選択解除」＝外したら札も消える）
+  if (!sel && !ctx.prompt && !ctx.place) return null;
+  // ×は一番細かい物から外す: 全文の中で選んだ行 → 開いている文と図の箱
+  const clear = sel ? onClear : onClearPick;
   return (
-    <div className="flex min-w-0 items-start gap-1.5 rounded-lg bg-amber-50 px-2 py-1.5 text-[12px] leading-snug text-amber-950">
+    <div className="flex min-w-0 items-start gap-1.5 rounded-lg bg-amber-50 px-2 py-1.5 text-[12px] leading-snug text-amber-950" data-prompts-chip>
       <span className="min-w-0 flex-1">
-        <span className="font-semibold">{ctx.prompt ? `「${ctx.prompt.title}」` : ctx.place ? `${ctx.place.name}の箱` : '図全体'}</span>
-        {sel ? <> の{linesText(sel)}：<span className="text-amber-900/80">「{sel.text.trim().replace(/\s+/g, ' ').slice(0, 60)}{sel.text.trim().length > 60 ? '…' : ''}」</span></> : ctx.prompt ? 'について' : 'について'}
+        <span className="font-semibold">{ctx.prompt ? `「${ctx.prompt.title}」` : `${ctx.place!.name}の箱`}</span>
+        {sel ? <> の{linesText(sel)}：<span className="text-amber-900/80">「{sel.text.trim().replace(/\s+/g, ' ').slice(0, 60)}{sel.text.trim().length > 60 ? '…' : ''}」</span></> : 'について'}
         {ctx.draftDiff ? <span className="ml-1 text-amber-800">（保存していない書きかけも見せます）</span> : null}
       </span>
-      {sel && onClear ? (
-        <button type="button" onClick={onClear} aria-label="選んだ所を外す" className="shrink-0 rounded p-0.5 text-amber-800 hover:bg-amber-100"><X className="h-3.5 w-3.5" /></button>
+      {clear ? (
+        <button type="button" onClick={clear} aria-label={sel ? '選んだ行を外す' : '選んだ所を外す'} data-prompts-chip-clear
+          className="shrink-0 rounded p-0.5 text-amber-800 hover:bg-amber-100"><X className="h-3.5 w-3.5" /></button>
       ) : null}
     </div>
   );
@@ -124,8 +129,8 @@ function ContextChip({ ctx, onClear }: { ctx: PromptChatContext; onClear?: () =>
  * 会話の中身（発言の一覧・作業中の1行・入力欄）。PC は全文の横の列に、スマホは下から出す欄に入れる。
  * onPulse: ダンが動いている間（数秒ごと）と、ダンの返事が来た時・作業が終わった時に呼ぶ（全文の欄が新しい版を見に行く）。
  */
-export function PromptsChat({ ctx, onClearSelection, onPulse, onBusy, header }: {
-  ctx: PromptChatContext; onClearSelection: () => void; onPulse: () => void; onBusy?: (busy: boolean) => void; header?: ReactNode;
+export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBusy, header }: {
+  ctx: PromptChatContext; onClearSelection: () => void; onClearPick?: () => void; onPulse: () => void; onBusy?: (busy: boolean) => void; header?: ReactNode;
 }) {
   const [room, setRoom] = useState('');
   const [error, setError] = useState('');
@@ -328,7 +333,7 @@ export function PromptsChat({ ctx, onClearSelection, onPulse, onBusy, header }: 
         ) : null}
       </div>
       <div className="space-y-1.5 border-t border-stone-200 bg-white p-2">
-        <ContextChip ctx={ctx} onClear={onClearSelection} />
+        <ContextChip ctx={ctx} onClear={onClearSelection} onClearPick={onClearPick} />
         <div className="flex items-end gap-1.5 rounded-xl border border-stone-300 bg-white p-1.5 focus-within:border-amber-500 focus-within:ring-2 focus-within:ring-amber-100">
           <textarea
             ref={area}

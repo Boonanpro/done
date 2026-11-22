@@ -143,8 +143,6 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const [finishJob, setFinishJob] = useState<ThumbFinishJob | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
-  // 会話の札を×で外した部品（もう一度押すまで添えない）
-  const [dismissedPart, setDismissedPart] = useState<string | null>(null);
 
   // ── 読み込み・ダンの直しを読み直す・保存 ──
   const load = useCallback(async (force = false) => {
@@ -346,7 +344,6 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       ev.preventDefault();
       (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
       setSelected(part.id);
-      setDismissedPart(null);
       drag.current = { kind: 'move', id: part.id, start: pt, orig: clone(part), before: clone(doc) };
     } else {
       setSelected(null);
@@ -682,7 +679,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const link = linkRef.current;
     if (!link) return;
     if (lastCtx.current !== partText) { lastCtx.current = partText; link.onContext?.(partText); }
-    const key = selPart && mode === 'select' && dismissedPart !== selPart.id ? `${selPart.id}|${partText}` : '';
+    const key = selPart && mode === 'select' ? `${selPart.id}|${partText}` : '';
     if (key === lastPartKey.current) return;
     lastPartKey.current = key;
     if (!key || !selPart || !selBox) { dropAttach(link.projectId, 'thumb-part'); return; }
@@ -694,9 +691,10 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       preview: selPart.type === 'image' ? selPart.src : undefined,
       detail: `- みきさんが選んだ部品（「これ」「この文字」「この絵」はこれ）: ${where} の ${partText}。添付の絵の赤い枠がこの部品。`,
       upload: () => link.snapshot({ box }),
-      onRemove: () => setDismissedPart(id),
+      // 札の×は部品の選択も外す（枠が消え、ダンにも選んだ部品を渡さない。もう一度押せばまた添わる）2026-11-22
+      onRemove: () => setSelected(cur => (cur === id ? null : cur)),
     });
-  }, [partText, selPart, selBox, mode, dismissedPart, where, putAttach, dropAttach]);
+  }, [partText, selPart, selBox, mode, where, putAttach, dropAttach]);
 
   const marksKey = useMemo(() => marks.map((m) => m.points.length).join(','), [marks]);
   useEffect(() => {

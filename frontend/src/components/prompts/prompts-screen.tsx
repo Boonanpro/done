@@ -5,7 +5,7 @@
 // 押すと全文がそのまま出て、その場で書き直せる。誰が読むか・いつ効くか・なぜある文か・履歴は全文の下にたたんである。
 // 使う所: /prompts（app/prompts/page.tsx）と、開発室のボードの「指示文」（artifacts/dev-lead）。
 // 裏側は app/api/prompts_screen.py、文の置き場所と履歴は app/services/prompt_store.py。
-import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { ArrowLeft, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, X } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -504,6 +504,23 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
     draftDiff,
   }), [node, shown, sel, draftDiff]);
   const bump = useCallback(() => setPulse(n => n + 1), []);
+  // 選んだ箱・文を外す（2026-11-22 本人「選択解除できないから、関係ない所を押したり札の×で外せるように」）。
+  // 保存していない書きかけがある時は、文を閉じると書きかけが消えるので、確かめてから閉じる
+  const clearPick = useCallback(() => {
+    if (!place && !id) return;
+    if (draftDiff && !window.confirm('保存していない書きかけがあります。閉じると消えます。閉じますか？')) return;
+    setPicked({ id: '', sel: null, cursor: null });
+    onGo({ place: '' });
+  }, [place, id, draftDiff, onGo]);
+  // 左の余白を押した時だけ外す。押せる物・全文の欄・文字をなぞって選んでいる最中は外さない
+  const onBlank = useCallback((e: ReactMouseEvent) => {
+    if (!place && !id) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('button, a, input, textarea, select, summary, label, [role="button"], main, details')) return;
+    if (window.getSelection()?.toString()) return;
+    if (draftDiff) { setPicked(v => ({ ...v, sel: null })); return; }   // 書きかけは消さない。選んだ行だけ外す
+    clearPick();
+  }, [place, id, draftDiff, clearPick]);
   // PC の会話の欄は右に常にいる（スクロールしても動かない）。左の表示との境目を引いて幅を変える（2026-11-21 本人）
   const [talkRef, side] = useSideWidth('dan-prompts-chat-width', 400);
   // スマホの「ダンと話す」は、全文の下に貼り付く保存の帯の上に出す
@@ -557,7 +574,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   return (
     <div className="lg:flex lg:h-full lg:min-h-0">
     {/* 左: 図・一覧・全文。PC はここだけがスクロールする */}
-    <div className={cn('space-y-4 lg:min-w-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain', embedded ? 'p-3 sm:p-4' : 'px-3 py-4 sm:px-6')}>
+    <div className={cn('space-y-4 lg:min-w-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain', embedded ? 'p-3 sm:p-4' : 'px-3 py-4 sm:px-6')} onClick={onBlank} data-prompts-left>
       <div className="mx-auto max-w-[1100px] space-y-4">
       <header>
         <h1 className="text-xl font-bold">ダンを動かしている指示文</h1>
@@ -632,7 +649,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
         'lg:relative lg:inset-auto lg:z-auto lg:flex lg:h-full lg:w-[var(--side-w)] lg:shrink-0 lg:overflow-visible lg:rounded-none lg:border-l lg:border-t-0 lg:border-stone-200 lg:shadow-none',
       )}>
       <SideResizeHandle side={side} className="hidden lg:block" />
-      <PromptsChat ctx={talkCtx} onPulse={bump} onBusy={setTalkBusy} onClearSelection={() => setPicked(v => ({ ...v, sel: null }))}
+      <PromptsChat ctx={talkCtx} onPulse={bump} onBusy={setTalkBusy} onClearSelection={() => setPicked(v => ({ ...v, sel: null }))} onClearPick={clearPick}
         header={(
           <div className="flex items-center justify-end border-b border-stone-200 px-2 py-1 lg:hidden">
             <button type="button" onClick={() => setTalkOpen(false)} aria-label="会話を閉じる" className="rounded p-1 text-stone-500 hover:bg-stone-100"><X className="h-5 w-5" /></button>
