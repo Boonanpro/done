@@ -71,7 +71,7 @@ def dialogue(room, content_id, limit=30, before=None):
         if ctx.get('content_id')==content_id and ctx.get('utterance') and tid not in spoken:
             rows.append({'at':timestamp(turn.get('created_at')),'role':'user','text':ctx['utterance'],
                          'turn_id':tid,'playhead':ctx.get('playhead')})
-        if ctx.get('content_id')==content_id and tid not in assistant_turns and turn.get('reasoning',{}).get('voice_model')!='gpt-live-1':
+        if ctx.get('content_id')==content_id and tid not in assistant_turns and not str(turn.get('reasoning',{}).get('voice_model') or '').startswith('gpt-live'):
             reply=turn.get('reasoning',{}).get('reply_text')
             if reply:
                 rows.append({'at':turn['reasoning'].get('reply_at',timestamp(turn.get('created_at'))+.001),

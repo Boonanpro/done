@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 PATH = Path.home() / '.dan' / 'voice-settings.json'
-DEFAULTS = {'model': 'gpt-live-1', 'backend_model': 'gpt-6.1-terra',
+DEFAULTS = {'model': 'gpt-live-1.1', 'backend_model': 'gpt-6.1-terra',
             'reasoning': 'medium', 'voice': 'shida'}
 # The plain call (voice_plain) follows OpenAI's advice for the Responses backend of GPT-Live: "Start with gpt-6-luna" and
 # "use lower reasoning effort when it completes the task reliably" (live-delegation). Terra at medium took 2.6-3.5 s a
