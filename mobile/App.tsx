@@ -82,6 +82,7 @@ import {ui, useUiLanguage, setUiLanguage} from './ui-language';
 import { reportLocation, watchLocation } from './location-report';
 import { CollabRoomsScreen, CollabChatScreen, type CollabRoomSummary } from './collab';
 import { ParallelJobsBar } from './parallel-jobs';
+import { ChatModelPicker, type RoomModel } from './chat-model-picker';
 import { BACK, RESTARTING, RestartCover, coverIfDown } from './restart-cover';
 import { oneLine } from './one-line';
 
@@ -1986,6 +1987,10 @@ function AppMain() {
   );
 
   const headerTitle = currentProject?.title || 'DAN';
+  const requestRoomModel = useCallback(
+    (path: string, init?: RequestInit) => apiRequest<RoomModel>(path, init, token ?? undefined),
+    [token],
+  );
 
   const markProjectReadLocally = useCallback((projectId: string) => {
     setProjects((current) =>
@@ -4363,6 +4368,14 @@ function AppMain() {
             <Text style={styles.appBarTitleSingle} numberOfLines={1}>
               {headerTitle}
             </Text>
+            {currentProject?.room_id && token ? (
+              <ChatModelPicker
+                key={currentProject.room_id}
+                roomId={currentProject.room_id}
+                disabled={streamingProjects.includes(currentProject.id)}
+                request={requestRoomModel}
+              />
+            ) : null}
           </View>
           <View style={styles.appBarRight}>
             {/* 新しい版があれば、チャットの上に段を足さずアプリバーの印にする。押すと更新が始まる。 */}
