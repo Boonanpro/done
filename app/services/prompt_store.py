@@ -18,6 +18,8 @@ Kinds (app/prompts/catalog.json):
 - sections: `## key` lines, each followed by its text; the code needs every key (a route name, an option).
 - words: one phrase per line, joined into a pattern by the code.
 """
+from contextlib import contextmanager
+from contextvars import ContextVar
 import fcntl
 import hashlib
 import json
@@ -169,7 +171,29 @@ def _code_value(item):
     return str(value).strip('\n')
 
 
+_observed_reads = ContextVar('observed_prompt_reads', default=None)
+
+
+@contextmanager
+def observed_reads():
+    """Collect successful reads within one request, including its asyncio.to_thread calls."""
+    reads = {}
+    token = _observed_reads.set(reads)
+    try:
+        yield reads
+    finally:
+        _observed_reads.reset(token)
+
+
 def text(prompt_id):
+    value = _text(prompt_id)
+    reads = _observed_reads.get()
+    if reads is not None:
+        reads[prompt_id] = None
+    return value
+
+
+def _text(prompt_id):
     """The prompt as the code uses it, read at each use (cached until the file changes)."""
     item = entry(prompt_id)
     if item.get('kind') == 'skill' and item.get('source_file'):

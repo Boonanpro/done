@@ -6,6 +6,7 @@ ready: 'textarea, button:has(img[src^="/prompts/arch/"])'
 watches: [frontend/src/app/prompts/page.tsx, frontend/src/components/prompts/prompts-screen.tsx, frontend/src/components/prompts/prompts-chat.tsx, frontend/src/components/prompts/skill-library.tsx, frontend/src/components/prompts/line-diff.ts, frontend/src/components/prompts/architecture.ts, frontend/src/lib/prompts-api.ts, app/api/prompts_screen.py, app/services/prompt_store.py, app/prompts/catalog.json]
 errors: [ログインが切れています, 失敗しました]
 speak: |
+  - 上の「会話の回路図」で、実際のチャット・音声・並行作業の記録を開けます。「依頼を試す」では、担当に渡す直前までか、実際に作業を進めるかを選べます。
   - 画面上の「スキル」で全スキルの手順書と参考ページを検索し、編集・復元できます。
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
