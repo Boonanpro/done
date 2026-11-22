@@ -137,3 +137,33 @@ def test_skill_save_tracks_learning_and_refuses_stale_edit(store, monkeypatch, t
     assert 'インタビューから始める' in SkillRegistry.get_prompt(name)
     store.revert(key, store.sha(edited))
     assert SkillRegistry.get_prompt(name) == edited
+
+
+def test_skill_library_discovers_manuals_and_nested_pages(store, monkeypatch, tmp_path):
+    from app.services.skill_versions import page_text, skill_pages
+    from app.agent.v2.tools import SkillRegistry
+
+    monkeypatch.setattr(store, 'REPO', tmp_path)
+    root = tmp_path / '.claude/skills'
+    skill = root / 'camera'
+    (skill / 'recipes').mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('# Camera')
+    (skill / 'recipes/撮影.md').write_text('# 撮影手順')
+    (skill / 'script.py').write_text('# executable')
+    (skill / 'outside.md').symlink_to(tmp_path / 'private.md')
+    (tmp_path / 'private.md').write_text('private')
+    assert {p['id'] for p in skill_pages()} == {'skill/camera', 'skill/camera/recipes/撮影'}
+    for path in ('camera/recipes/撮影', 'camera'):
+        key = 'skill/' + path
+        before = store.text(key)
+        store.save(key, before + ' 修正', by='owner', base_sha=store.sha(before))
+        assert SkillRegistry.get_prompt(path) == before + ' 修正'
+        assert page_text(tmp_path / store.entry(key)['source_file']) == before + ' 修正'
+        with pytest.raises(RuntimeError):
+            store.revert(key, store.sha(before), base_sha=store.sha(before))
+        store.revert(key, store.sha(before))
+        assert store.text(key) == before
+        assert len(store.history(key)) == 3
+    for invalid in ('camera/outside', 'camera/../private', 'camera/SKILL', 'camera//recipes/撮影'):
+        with pytest.raises(KeyError):
+            store.text('skill/' + invalid)

@@ -50,6 +50,9 @@ def entry(prompt_id):
     for item in catalog()['prompts']:
         if item['id'] == prompt_id:
             return item
+    if prompt_id.startswith('skill/'):
+        from app.services.skill_versions import skill_entry
+        return skill_entry(prompt_id)
     raise KeyError(prompt_id)
 
 
@@ -287,12 +290,12 @@ def history(prompt_id):
     return [{k: v for k, v in row.items() if k != 'source_text'} for row in reversed(_read_history(prompt_id))]
 
 
-def revert(prompt_id, version_sha, by='owner'):
+def revert(prompt_id, version_sha, by='owner', base_sha=None):
     for record in _read_history(prompt_id):
         if record.get('sha') == version_sha:
             from zoneinfo import ZoneInfo
             when = datetime.fromisoformat(record['at']).astimezone(ZoneInfo('Asia/Tokyo')).strftime('%-m/%-d %H:%M')
-            return save(prompt_id, record['text'], by=by, note=f'{when} の版（{WHO.get(record.get("by"), "")}）に戻した')
+            return save(prompt_id, record['text'], by=by, base_sha=base_sha, note=f'{when} の版（{WHO.get(record.get("by"), "")}）に戻した')
     raise KeyError(version_sha)
 
 

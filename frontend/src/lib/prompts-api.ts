@@ -62,7 +62,7 @@ export const promptsApi = {
   sha: (id: string) => call<{ id: string; sha: string }>(`/sha?id=${encodeURIComponent(id)}`),
   save: (id: string, text: string, note: string, baseSha: string) =>
     call<{ saved: boolean; item: PromptItem }>('/item', { id, text, note, base_sha: baseSha }),
-  revert: (id: string, sha: string) => call<{ saved: boolean; item: PromptItem }>('/revert', { id, sha }),
+  revert: (id: string, sha: string, baseSha: string) => call<{ saved: boolean; item: PromptItem }>('/revert', { id, sha, base_sha: baseSha }),
 };
 
 // ---- 指示文の画面の会話（2026-11-21）。部屋は1つ（app/api/prompts_screen.py の /prompts/chat）。発言はダン本体のチャットと同じ入口 ----

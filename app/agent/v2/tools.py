@@ -1610,7 +1610,9 @@ class Skill:
         action_file = self.skill_dir / "actions" / f"{action}.md"
         if action_file.exists():
             try:
-                return action_file.read_text(encoding="utf-8")
+                from app.services.skill_versions import page_text
+                manual = page_text(action_file)
+                return manual if manual is not None else action_file.read_text(encoding="utf-8")
             except Exception as e:
                 logger.warning(f"Failed to load action manual {action_file}: {e}")
                 return None
@@ -2082,7 +2084,10 @@ async def execute_tool(
             p = _work_path(path)
             if not p.exists():
                 return {"success": False, "error": f"ファイルが存在しません: {path}"}
-            content = p.read_text(encoding="utf-8")
+            from app.services.skill_versions import page_text
+            content = page_text(p)
+            if content is None:
+                content = p.read_text(encoding="utf-8")
             return {"success": True, "path": path, "content": content}
         except Exception as e:
             return {"success": False, "error": f"読み取りエラー: {e}"}
@@ -2530,7 +2535,7 @@ async def execute_tool(
                 "error": "skill_name が必要です",
             }
 
-        if '/references/' in check_skill_name:
+        if '/' in check_skill_name:
             manual = SkillRegistry.get_prompt(check_skill_name)
             if manual:
                 return {'success': True, 'skill_name': check_skill_name, 'manual': manual}

@@ -6,9 +6,10 @@
 // 使う所: /prompts（app/prompts/page.tsx）と、開発室のボードの「指示文」（artifacts/dev-lead）。
 // 裏側は app/api/prompts_screen.py、文の置き場所と履歴は app/services/prompt_store.py。
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { ArrowLeft, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Network, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, X } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { SkillLibrary } from './skill-library';
 import { Button } from '@/components/ui/button';
 import { SideResizeHandle, useSideWidth } from '@/components/ui/side-resize';
 import { ApiError } from '@/lib/api-client';
@@ -241,7 +242,7 @@ function Editor({ id, pulse, onBack, onSaved, onState, onSelection }: {
     if (!item || !change) return;
     setBusy(true); setError('');
     try {
-      const out = await promptsApi.revert(item.id, change.beforeSha);
+      const out = await promptsApi.revert(item.id, change.beforeSha, item.sha);
       setItem(out.item); setDraft(out.item.text); setChange(null);
       toast.success('ダンが直す前の文に戻しました。');
       onSaved();
@@ -302,7 +303,7 @@ function Editor({ id, pulse, onBack, onSaved, onState, onSelection }: {
     if (!window.confirm(`${when(v.at)}（${WHO[v.by] || v.by}）の版に戻しますか？今の文も履歴に残ります。`)) return;
     setBusy(true); setError('');
     try {
-      const out = await promptsApi.revert(item.id, v.sha);
+      const out = await promptsApi.revert(item.id, v.sha, item.sha);
       setItem(out.item); setDraft(out.item.text); setViewing(null);
       toast.success('戻しました。');
       onSaved();
@@ -476,7 +477,8 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const [prompts, setPrompts] = useState<PromptSummary[]>([]);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
-  const node = nodeOf(place);
+  const library = place === 'skills' || id.startsWith('skill/');
+  const node = library ? undefined : nodeOf(place);
   const detail = useRef<HTMLElement>(null);
   const list = useRef<HTMLElement>(null);
 
@@ -510,17 +512,17 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
     if (!place && !id) return;
     if (draftDiff && !window.confirm('保存していない書きかけがあります。閉じると消えます。閉じますか？')) return;
     setPicked({ id: '', sel: null, cursor: null });
-    onGo({ place: '' });
-  }, [place, id, draftDiff, onGo]);
+    onGo({ place: library ? 'skills' : '' });
+  }, [place, id, draftDiff, onGo, library]);
   // 左の余白を押した時だけ外す。押せる物・全文の欄・文字をなぞって選んでいる最中は外さない
   const onBlank = useCallback((e: ReactMouseEvent) => {
-    if (!place && !id) return;
+    if ((!place || library) && !id) return;
     const t = e.target as HTMLElement;
     if (t.closest('button, a, input, textarea, select, summary, label, [role="button"], main, details')) return;
     if (window.getSelection()?.toString()) return;
     if (draftDiff) { setPicked(v => ({ ...v, sel: null })); return; }   // 書きかけは消さない。選んだ行だけ外す
     clearPick();
-  }, [place, id, draftDiff, clearPick]);
+  }, [place, id, draftDiff, clearPick, library]);
   // PC の会話の欄は右に常にいる（スクロールしても動かない）。左の表示との境目を引いて幅を変える（2026-11-21 本人）
   const [talkRef, side] = useSideWidth('dan-prompts-chat-width', 400);
   // スマホの「ダンと話す」は、全文の下に貼り付く保存の帯の上に出す
@@ -552,14 +554,21 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const readonly = here.filter(p => p.readonly);
 
   useEffect(() => {   // 狭い画面では、選んだ物の所まで送る
-    if (typeof window === 'undefined' || window.innerWidth >= 1280) return;
+    if (typeof window === 'undefined' || (!library && window.innerWidth >= 1280)) return;
+    if (library && !id) return;
     const target = id ? detail.current : place ? list.current : null;
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [id, place]);
+  }, [id, place, library]);
+
+  const navigate = (next: { place: string; id?: string }) => {
+    if (shown && open.draft !== shown.text && next.id !== id &&
+      !window.confirm('保存していない書きかけがあります。閉じますか？')) return;
+    onGo(next);
+  };
 
   const row = (p: PromptSummary) => (
     <li key={p.id}>
-      <button type="button" onClick={() => onGo({ place, id: p.id })}
+      <button type="button" onClick={() => navigate({ place, id: p.id })}
         className={cn('w-full rounded-lg border px-3 py-2 text-left transition hover:border-amber-400 hover:bg-amber-50',
           p.id === id ? 'border-amber-500 bg-amber-50' : 'border-stone-200 bg-white')}>
         <div className="text-sm font-semibold leading-snug text-stone-900">{p.title}</div>
@@ -578,17 +587,26 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
       <div className="mx-auto max-w-[1100px] space-y-4">
       <header>
         <h1 className="text-xl font-bold">ダンを動かしている指示文</h1>
-        <p className="text-sm text-stone-600">上から下へ、みきさんの頼みが流れる順に並んでいます。箱を押すと、その箱が読む指示文が出ます。</p>
+        <nav className="my-3 inline-flex gap-1 rounded-xl border border-stone-300 bg-white p-1" aria-label="指示文の表示">
+          {[{ label: '構成図', active: !library, icon: Network, target: '' }, { label: 'スキル', active: library, icon: BookOpen, target: 'skills' }].map(({ label, active, icon: Icon, target }) => (
+            <button key={label} type="button" aria-label={label} aria-pressed={active} onClick={() => navigate({ place: target })}
+              className={cn('inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold', active ? 'bg-stone-800 text-white' : 'text-stone-700 hover:bg-amber-50')}>
+              <Icon className="size-4" />{label}
+            </button>
+          ))}
+        </nav>
+        {!library && <p className="text-sm text-stone-600">上から下へ、みきさんの頼みが流れる順に並んでいます。箱を押すと、その箱が読む指示文が出ます。</p>}
       </header>
       {error ? (
         <p className="rounded-md bg-rose-50 p-3 text-sm text-rose-800">
           {error} <a className="underline" href="/login?redirect=/prompts" target="_top">ログインする</a>
         </p>
       ) : null}
-      <Diagram counts={counts} active={node?.id || ''} onPick={p => onGo({ place: p })} />
+      {!library && <Diagram counts={counts} active={node?.id || ''} onPick={p => navigate({ place: p })} />}
 
       <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]">
-        <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block')}>
+        <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block', library && !id && 'xl:col-span-2')}>
+          {library ? <SkillLibrary pages={skills} selected={id} loaded={loaded} onPick={pid => navigate({ place: 'skills', id: pid })} /> : <>
           {node ? (
             <div className="flex items-start gap-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -614,17 +632,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
               ここは「<button type="button" className="font-semibold text-amber-800 underline" onClick={() => onGo({ place: node.same! })}>{BY_ID.get(node.same)?.name}</button>」と同じ決まりも読みます。
             </p>
           ) : null}
-          {node?.skills && skills.length ? (
-            <details>
-              <summary className="cursor-pointer text-sm text-stone-600">手順書と案件ごとの参考（{skills.length}）</summary>
-              <h3 className="mt-3 text-sm font-semibold">動画編集の共通手順</h3>
-              <ul className="mt-2 space-y-2">{skills.filter(p => !p.readonly && !p.id.includes('/references/')).map(row)}</ul>
-              <h3 className="mt-3 text-sm font-semibold">案件ごとの編集方針</h3>
-              <ul className="mt-2 space-y-2">{skills.filter(p => p.id.includes('/references/')).map(row)}</ul>
-              <h3 className="mt-3 text-sm font-semibold">その他の手順書</h3>
-              <ul className="mt-2 space-y-2">{skills.filter(p => p.readonly).map(row)}</ul>
-            </details>
-          ) : null}
+          {node?.skills && <button className="text-sm font-semibold text-amber-800 underline" type="button" onClick={() => navigate({ place: 'skills' })}>スキル一覧を開く</button>}
           {node && !here.length && !node.same && loaded && !error ? (
             <p className="text-sm text-stone-500">ここはプログラムだけで動いていて、モデルが読む指示文はありません。</p>
           ) : null}
@@ -634,12 +642,13 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
               <ul className="mt-2 space-y-2">{loose.map(row)}</ul>
             </details>
           ) : null}
+          </>}
         </aside>
-        <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && 'hidden xl:block')}>
+        <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && (library ? 'hidden' : 'hidden xl:block'))}>
           {id ? (
-            <Editor key={id} id={id} pulse={pulse} onBack={() => onGo({ place })} onSaved={load} onState={onState} onSelection={onSelection} />
+            <Editor key={id} id={id} pulse={pulse} onBack={() => navigate({ place: library ? 'skills' : place })} onSaved={load} onState={onState} onSelection={onSelection} />
           ) : (
-            <p className="text-sm text-stone-500">左の一覧から文を選ぶと、ここに全文がそのまま出ます。</p>
+            <p className="text-sm text-stone-500">{library ? '手順書か参考ページを選ぶと、ここで編集できます。' : '左の一覧から文を選ぶと、ここに全文がそのまま出ます。'}</p>
           )}
         </main>
       </div>
