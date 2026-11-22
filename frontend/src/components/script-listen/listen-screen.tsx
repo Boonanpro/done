@@ -173,7 +173,23 @@ function placeThreads(units: ListenUnit[], threads: Thread[]) {
       break;
     }
   }
-  return place;
+  // A comment whose words were rewritten since (a suggestion accepted or rejected) stays by the paragraph its words
+  // were in, the way Google Docs keeps it in its list; the card shows its words struck through (11/22 本人「本文の場所が
+  // 分からないコメントって何？」). Without even a position it goes by the last sentence.
+  const said = parts.filter(p => p.start != null);
+  const gone = new Set<string>();
+  for (const th of threads) {
+    if (place.has(th.id)) continue;
+    let at = said.length ? said[said.length - 1] : parts[parts.length - 1];
+    if (th.start != null && said.length) {
+      at = said[0];
+      for (const p of said) { if (p.start! <= th.start) at = p; else break; }
+    }
+    if (!at) continue;
+    place.set(th.id, at.n);
+    gone.add(th.id);
+  }
+  return { place, gone };
 }
 
 const unitN = (node: Node | null) => {
@@ -764,16 +780,16 @@ export function ListenScreen({ docId }: { docId: string }) {
   const units = useMemo(() => doc?.units || [], [doc]);
   const unitByN = useMemo(() => new Map(units.map(u => [u.n, u])), [units]);
   const visibleThreads = useMemo(() => threads.filter(t => showResolved || !t.resolved), [threads, showResolved]);
-  const place = useMemo(() => placeThreads(units, threads), [units, threads]);
+  const { place, gone } = useMemo(() => placeThreads(units, threads), [units, threads]);
   const threadsAt = useMemo(() => {
     const m = new Map<number, Thread[]>();
     for (const t of visibleThreads) {
       const n = place.get(t.id);
-      if (n == null) continue;
+      if (n == null || gone.has(t.id)) continue;
       m.set(n, [...(m.get(n) || []), t]);
     }
     return m;
-  }, [visibleThreads, place]);
+  }, [visibleThreads, place, gone]);
   const suggestions = useMemo(() => doc?.suggestions || [], [doc]);
   // Comments written on a suggestion's card stay with that suggestion. When Dan has put in a new suggestion for it
   // (the old one is gone), the open talk moves on to the suggestion now at the same place.
@@ -839,7 +855,6 @@ export function ListenScreen({ docId }: { docId: string }) {
     danFresh.forEach((v, sid) => { const n = sugN.get(sid); if (n != null && !m.has(n)) m.set(n, v.job); });
     return m;
   }, [jobs, units, suggestions, danFresh]);
-  const unplaced = visibleThreads.filter(t => !place.has(t.id) && !talkOf.has(t.id));
   const openCount = threads.filter(t => !t.resolved).length;
 
   // ---------------------------------------------------------------- the editing surface
@@ -2101,17 +2116,6 @@ export function ListenScreen({ docId }: { docId: string }) {
                 )}
               </button>
             ))}
-            {unplaced.length > 0 && (
-              <div className="mt-10 border-t border-stone-300 pt-3">
-                <div className="mb-2 text-[13px] font-semibold text-stone-600">本文の場所が分からないコメント</div>
-                <div className="space-y-2">
-                  {unplaced.map(t => (
-                    <ThreadCard key={t.id} thread={t} active={active === t.id} onFocus={() => setActive(t.id)}
-                      onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} />
-                  ))}
-                </div>
-              </div>
-            )}
             {(
               <div className="mt-8 text-center text-[12px] text-stone-400">
                 {touch ? '1回押すとそこで直せます。提案やコメントのある所を2回続けて押すとそのカードが開き、それ以外の文を2回続けて押すとそこから聞けます（もう一度2回押すと止まります）。' : '段落の左にマウスを乗せると出る再生ボタンで、そこから聞けます。提案やコメントのある所をダブルクリックすると、そのカードに移ります。Google ドキュメントと同じように直せて、打つのを止めると自動でドキュメントに入ります。'}
@@ -2131,7 +2135,7 @@ export function ListenScreen({ docId }: { docId: string }) {
               {visibleThreads.filter(t => place.has(t.id) && !talkOf.has(t.id)).map(t => (
                 <div key={t.id} ref={el => { if (el) cardRefs.current.set(t.id, el); else cardRefs.current.delete(t.id); }}
                   data-card={t.id} data-anchor={place.get(t.id)} className={cn('absolute inset-x-0', active === t.id && 'z-10')}>
-                  <ThreadCard thread={t} active={active === t.id} onFocus={() => goText(t.id, place.get(t.id)!, t.quote)}
+                  <ThreadCard thread={t} gone={gone.has(t.id)} active={active === t.id} onFocus={() => goText(t.id, place.get(t.id)!, t.quote)}
                     onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} />
                 </div>
               ))}
@@ -2314,7 +2318,7 @@ export function ListenScreen({ docId }: { docId: string }) {
           )}
           <div className="space-y-2">
             {sheetThreads.map(t => (
-              <div key={t.id} data-card={t.id}><ThreadCard thread={t} active={active === t.id || sheet.kind === 'threads'}
+              <div key={t.id} data-card={t.id}><ThreadCard thread={t} gone={gone.has(t.id)} active={active === t.id || sheet.kind === 'threads'}
                 onFocus={() => { const n = place.get(t.id); if (n != null) { if (sheet.kind === 'all') setSheet(null); goText(t.id, n, t.quote); } else setActive(t.id); }}
                 onReply={sendReply(t)} onSettle={settleThread(t)} canWrite={canComment} /></div>
             ))}
