@@ -79,9 +79,9 @@ function StateBadge({ p }: { p: Pick<PromptSummary, 'readonly' | 'last_by' | 'la
       </span>
     );
   }
-  if (p.last_by === 'owner') return <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] text-emerald-800">みきさんが直した {when(p.last_at)}</span>;
-  if (p.last_by === 'dan') return <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] text-amber-800">ダンが直した {when(p.last_at)}</span>;
-  return <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] text-sky-800">元の文のまま</span>;
+  // 誰が直したか・元の文のままかは札に出さない（2026-11-22 本人「最終更新日時だけ」）。一度も直していない文は札なし
+  if (!p.last_at || p.last_by === 'seed') return null;
+  return <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[11px] text-stone-600">最終更新 {when(p.last_at)}</span>;
 }
 
 // ---- 構成図 ----
