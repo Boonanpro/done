@@ -9,6 +9,7 @@ import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, use
 import { ArrowLeft, BookOpen, Network, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, Sparkles, X } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { READER_EXAMPLES, readerGroups, ReaderSkills } from './reader-skills';
 import { SkillLibrary } from './skill-library';
 import { Button } from '@/components/ui/button';
 import { SideResizeHandle, useSideWidth } from '@/components/ui/side-resize';
@@ -87,7 +88,7 @@ function StateBadge({ p }: { p: Pick<PromptSummary, 'readonly' | 'last_by' | 'la
 // ---- 構成図 ----
 function anchor(n: ArchNode, side: 't' | 'b' | 'l' | 'r', at?: number): [number, number] {
   if (side === 't') return [n.x + (at ?? n.w / 2), n.y];
-  if (side === 'b') return [n.x + (at ?? n.w / 2), n.y + BOX_H];
+  if (side === 'b') return [n.x + (at ?? n.w / 2), n.y + BOX_H + (n.id in READER_EXAMPLES || n.id === 'voice' ? 84 : 0)];
   if (side === 'l') return [n.x, n.y + BOX_H / 2];
   return [n.x + n.w, n.y + BOX_H / 2];
 }
@@ -106,13 +107,13 @@ function edgePath(e: ArchEdge) {
   return { d: `M${x1},${y1} C${c1[0]},${c1[1]} ${c2[0]},${c2[1]} ${x2},${y2}`, mx, my };
 }
 
-function Diagram({ counts, active, glow, onPick }: { counts: Record<string, number>; active: string; glow?: string; onPick: (id: string) => void }) {
+function Diagram({ skills, onSkills, counts, active, glow, onPick }: { skills: PromptSummary[]; onSkills: (reader: string, id?: string) => void; counts: Record<string, number>; active: string; glow?: string; onPick: (id: string) => void }) {
   const wrap = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   useLayoutEffect(() => {
     const el = wrap.current;
     if (!el) return;
-    const fit = () => setScale(Math.min(1, Math.max(0.62, el.clientWidth / W)));
+    const fit = () => setScale(Math.min(1, Math.max(0.85, el.clientWidth / W)));
     fit();
     const ro = new ResizeObserver(fit);
     ro.observe(el);
@@ -125,6 +126,10 @@ function Diagram({ counts, active, glow, onPick }: { counts: Record<string, numb
     const n = BY_ID.get(active) || BY_ID.get('voice')!;
     el.scrollTo({ left: Math.max(0, (n.x + n.w / 2) * scale - el.clientWidth / 2), behavior: 'smooth' });
   }, [active, scale]);
+  const previews = useMemo(() => Object.fromEntries(Object.entries(READER_EXAMPLES).map(([reader, example]) => {
+    const entries = readerGroups(reader, skills).flatMap(g => g.entries);
+    return [reader, { example: entries.find(e => e.page.id === 'skill/' + example), count: entries.length }];
+  })), [skills]);
   const edges = useMemo(() => EDGES.map(e => ({ e, ...edgePath(e) })), []);
   return (
     <div ref={wrap} className="w-full overflow-x-auto rounded-xl border border-stone-200 bg-white">
@@ -154,7 +159,8 @@ function Diagram({ counts, active, glow, onPick }: { counts: Record<string, numb
           {NODES.map(n => {
             const on = n.id === active, count = counts[n.id] || 0;
             return (
-              <button key={n.id} type="button" onClick={() => onPick(n.id)}
+              <div key={n.id}>
+              <button type="button" onClick={() => onPick(n.id)}
                 style={{ left: n.x, top: n.y, width: n.w, height: BOX_H }}
                 className={cn('absolute flex items-center gap-2 rounded-xl border-2 bg-white p-1.5 text-left shadow-sm transition hover:border-amber-400 hover:bg-amber-50',
                   on ? 'border-amber-500 bg-amber-50 ring-4 ring-amber-200' : 'border-stone-300',
@@ -168,6 +174,21 @@ function Diagram({ counts, active, glow, onPick }: { counts: Record<string, numb
                     : n.same ? <span className="mt-1 inline-block text-[11px] text-stone-400">{BY_ID.get(n.same)?.name}と同じ文</span> : null}
                 </span>
               </button>
+              {(previews[n.id] || n.id === 'voice') && <div style={{left:n.x + 3, top:n.y + BOX_H, width:n.w - 6, height:84}}
+                className="absolute flex flex-col justify-center rounded-b-xl border border-t-0 border-teal-300 bg-teal-50 px-2 text-teal-950">
+                {n.id === 'voice' ? <button type="button" className="text-left hover:underline" onClick={() => onSkills('parallel')}>
+                  <span className="block text-[12px]">通話で制作を頼んだ時</span><span className="text-[14px] font-bold">並行作業でスキルを読む →</span>
+                </button> : <>
+                  <button type="button" aria-label={n.name + 'が読むスキル'} onClick={() => onSkills(n.id)}
+                    className="flex min-h-7 items-center gap-1 text-[13px] font-bold hover:underline"><BookOpen size={14} />スキル {previews[n.id].count || ''}<span className="ml-auto">すべて ›</span></button>
+                  {previews[n.id].example && <button type="button" onClick={() => onSkills(n.id, previews[n.id].example!.page.id)}
+                    className="rounded border border-teal-200 bg-white px-2 py-1 text-left hover:border-teal-600">
+                    <span className="block truncate text-[13px] font-semibold">{previews[n.id].example!.request}</span>
+                    <span className="block truncate text-[11px] text-teal-800">{previews[n.id].example!.page.title}</span>
+                  </button>}
+                </>}
+              </div>}
+              </div>
             );
           })}
         </div>
@@ -542,8 +563,10 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const [prompts, setPrompts] = useState<PromptSummary[]>([]);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
-  const library = place === 'skills' || id.startsWith('skill/');
-  const node = library ? undefined : nodeOf(place);
+  const reader = place.startsWith('reader-') && place.slice(7) in READER_EXAMPLES ? nodeOf(place.slice(7)) : undefined;
+  const library = !reader && (place === 'skills' || id.startsWith('skill/'));
+  const mapTop = useRef<HTMLDivElement>(null);
+  const node = reader || (library ? undefined : nodeOf(place));
   const detail = useRef<HTMLElement>(null);
   const list = useRef<HTMLElement>(null);
 
@@ -637,6 +660,8 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
 
   const byId = useMemo(() => new Map(prompts.map(p => [p.id, p])), [prompts]);
   const skills = useMemo(() => prompts.filter(p => p.id.startsWith('skill/')), [prompts]);
+  const family = reader && id ? skills.filter(p => p.id.split('/')[1] === id.split('/')[1]) : [];
+  const groups = useMemo(() => reader ? readerGroups(reader.id, skills) : [], [reader, skills]);
   const counts = useMemo(() => {
     const out: Record<string, number> = {};
     for (const n of NODES) out[n.id] = (n.prompts || []).filter(pid => byId.has(pid)).length;
@@ -653,11 +678,12 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const readonly = here.filter(p => p.readonly);
 
   useEffect(() => {   // 狭い画面では、選んだ物の所まで送る
-    if (typeof window === 'undefined' || (!library && window.innerWidth >= 1280)) return;
+    if (reader && !id) { mapTop.current?.scrollIntoView({ block: 'start' }); return; }
+    if (typeof window === 'undefined' || (!reader && !library && window.innerWidth >= 1280)) return;
     if (library && !id) return;
     const target = id ? detail.current : place ? list.current : null;
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [id, place, library]);
+  }, [id, place, library, reader]);
 
   const navigate = (next: { place: string; id?: string }) => {
     if (shown && open.draft !== shown.text && next.id !== id &&
@@ -699,7 +725,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           ))}
           <a href={embedded ? 'https://dan.paina.info/prompts/circuit' : '/prompts/circuit'} target={embedded ? '_blank' : undefined} rel="noreferrer" className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-stone-700 hover:bg-amber-50"><Network className="size-4" />会話の回路図</a>
         </nav>
-        {!library && <p className="text-sm text-stone-600">上から下へ、みきさんの頼みが流れる順に並んでいます。箱を押すと、その箱が読む指示文が出ます。</p>}
+        {!library && !reader && <p className="text-sm text-stone-600">箱を押すと指示文が開きます。緑の枝では、頼みごとに使うスキルを開けます。</p>}
       </header>
       {error ? (
         <p className="rounded-md bg-rose-50 p-3 text-sm text-rose-800">
@@ -714,10 +740,20 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           <button type="button" aria-label="閉じる" onClick={() => setHidWork(workKey)} className="rounded p-1 text-violet-800 hover:bg-violet-100"><X className="h-4 w-4" /></button>
         </div>
       ) : null}
-      {!library && <Diagram counts={counts} active={node?.id || ''} glow={work?.state === 'editing' ? workNode : ''} onPick={p => navigate({ place: p })} />}
+      {reader && <div ref={mapTop}>{id
+        ? <div className="flex flex-wrap items-center justify-between gap-2">
+            <button type="button" onClick={() => navigate({ place })} className="inline-flex items-center gap-1 text-sm text-teal-800 hover:underline"><ArrowLeft size={16} />{reader.name}のスキルに戻る</button>
+            {family.length > 1 && <label className="flex min-w-0 max-w-full items-center gap-2 text-xs text-stone-600">
+              <span className="shrink-0">手順書・参考ページ</span>
+              <select className="min-w-0 max-w-64 rounded-md border bg-white px-2 py-1.5 text-sm" value={id} onChange={e => navigate({place, id:e.target.value})}>
+                {family.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+              </select></label>}
+          </div>
+        : <ReaderSkills node={reader} groups={groups} onBack={() => navigate({place: ''})} onPick={pid => navigate({place, id:pid})} />}</div>}
+      {!library && !reader && <Diagram skills={skills} onSkills={(name, pid) => navigate({ place: 'reader-' + name, id: pid })} counts={counts} active={node?.id || ''} glow={work?.state === 'editing' ? workNode : ''} onPick={p => navigate({ place: p })} />}
 
-      <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]">
-        <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block', library && !id && 'xl:col-span-2')}>
+      {(!reader || id) && <div className={cn('grid items-start gap-4', !reader && 'xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]')}>
+        {!reader && <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block', library && !id && 'xl:col-span-2')}>
           {library ? <SkillLibrary pages={skills} selected={id} loaded={loaded} onPick={pid => navigate({ place: 'skills', id: pid })} /> : <>
           {node ? (
             <div className="flex items-start gap-3">
@@ -744,7 +780,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
               ここは「<button type="button" className="font-semibold text-amber-800 underline" onClick={() => onGo({ place: node.same! })}>{BY_ID.get(node.same)?.name}</button>」と同じ決まりも読みます。
             </p>
           ) : null}
-          {node?.skills && <button className="text-sm font-semibold text-amber-800 underline" type="button" onClick={() => navigate({ place: 'skills' })}>スキル一覧を開く</button>}
+          {node && node.id in READER_EXAMPLES && <button className="text-sm font-semibold text-teal-800 underline" type="button" onClick={() => navigate({ place: 'reader-' + node.id })}>{node.name}が読むスキルを開く</button>}
           {node && !here.length && !node.same && loaded && !error ? (
             <p className="text-sm text-stone-500">ここはプログラムだけで動いていて、モデルが読む指示文はありません。</p>
           ) : null}
@@ -755,7 +791,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
             </details>
           ) : null}
           </>}
-        </aside>
+        </aside>}
         <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && (library ? 'hidden' : 'hidden xl:block'))}>
           {id ? (
             <Editor key={id} id={id} pulse={pulse} work={work?.id === id ? work : null} onBack={() => navigate({ place: library ? 'skills' : place })} onSaved={load} onState={onState} onSelection={onSelection} />
@@ -763,7 +799,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
             <p className="text-sm text-stone-500">{library ? '手順書か参考ページを選ぶと、ここで編集できます。' : '左の一覧から文を選ぶと、ここに全文がそのまま出ます。'}</p>
           )}
         </main>
-      </div>
+      </div>}
       </div>
     </div>
     {/* 右: ダンとの会話。PC は右に常にいて、境目を引いて幅を変える。スマホは下から出す。中身は1つだけ置く（会話の線を2本にしない） */}
