@@ -174,9 +174,10 @@ def test_where_dan_works_is_marked_and_a_save_ends_it(store):
     """2026-11-22: the screen lights the lines Dan is changing; Dan says where before he writes."""
     assert store.working() == {}
     routes = store.text('call/router-routes')
-    third = routes.split('\n')[2]
-    out = store.mark('call/router-routes', find=third, note='言い方')
-    assert (out['from'], out['to'], out['state']) == (3, 3, 'editing')
+    rows = routes.split('\n')
+    n = next(i for i, row in enumerate(rows) if i >= 2 and row.strip() and routes.count(row) == 1)
+    out = store.mark('call/router-routes', find=rows[n], note='言い方')
+    assert (out['from'], out['to'], out['state']) == (n + 1, n + 1, 'editing')
     assert store.working()['id'] == 'call/router-routes' and store.working()['title']
     with pytest.raises(ValueError):
         store.mark('call/router-routes', find='全文に無い文')
