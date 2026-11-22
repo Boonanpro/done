@@ -280,7 +280,69 @@ def save(prompt_id, value, by='dan', note='', base_sha=None):
         os.replace(tmp, path)
         _cache.pop(prompt_id, None)
         text(prompt_id)
+        if record['by'] == 'dan':
+            _working_write({'id': prompt_id, 'state': 'saved', 'at': record['at'], 'note': record['note']})
         return {'saved': True, 'sha': record['sha'], 'at': record['at']}
+
+
+# ---- Where Dan is working now (2026-11-22, the owner: 編集してる時に編集してる場所を光らせて分かるようにして) ----
+# The /prompts screen lights the lines Dan is about to change while he works, as the video and script editors do.
+# Dan says where with `scripts/prompts.py mark` before he writes; saving turns the mark into "saved" (the screen then
+# lights the changed lines from the two versions). One mark at a time; an old one is not shown.
+WORKING_S = {'editing': 300, 'saved': 600}
+
+
+def _working_path():
+    return root() / '.chat' / 'working.json'
+
+
+def _working_write(data):
+    path = _working_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def mark(prompt_id, find='', lines=None, note=''):
+    """Dan is working on this text now, at these lines (1-based, inclusive) or at the lines holding `find`.
+    With neither, the whole text. Returns the mark."""
+    item = entry(prompt_id)
+    if item.get('readonly'):
+        raise ValueError('この文はまだプログラムの中にあるので、ここでは直せません。')
+    rows = text(prompt_id).split('\n')
+    first, last = 1, len(rows)
+    if find:
+        whole = '\n'.join(rows)
+        at = whole.find(find.strip('\n'))
+        if at < 0:
+            raise ValueError('その文は今の全文の中にありません。')
+        first = whole.count('\n', 0, at) + 1
+        last = first + find.strip('\n').count('\n')
+    elif lines:
+        first, last = max(1, int(lines[0])), min(len(rows), int(lines[1]))
+        if last < first:
+            raise ValueError('行の範囲が全文の外です。')
+    data = {'id': prompt_id, 'title': item.get('title', ''), 'place': item.get('place', ''), 'state': 'editing',
+            'from': first, 'to': last, 'note': note[:200], 'at': _now()}
+    _working_write(data)
+    return data
+
+
+def working():
+    """The mark the screen shows now, or {} (none, or too old to be true)."""
+    try: data = json.loads(_working_path().read_text(encoding='utf-8'))
+    except (OSError, ValueError): return {}
+    try: age = (datetime.fromisoformat(_now()) - datetime.fromisoformat(data['at'])).total_seconds()
+    except (KeyError, ValueError, TypeError): return {}
+    if age > WORKING_S.get(data.get('state'), 0): return {}
+    if 'title' not in data:
+        try: data.update(title=entry(data['id']).get('title', ''), place=entry(data['id']).get('place', ''))
+        except KeyError: return {}
+    return data
 
 
 def history(prompt_id):

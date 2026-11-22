@@ -32,6 +32,8 @@ export interface PromptSummary {
   error?: string;
 }
 
+/** ダンが今直している所（state=editing: from〜to 行目）か、直し終えた印（saved）。無ければ id が無い */
+export interface PromptWorking { id?: string; title?: string; place?: string; state?: 'editing' | 'saved'; from?: number; to?: number; note?: string; at?: string }
 export interface PromptItem extends PromptSummary { text: string; sha: string; history: PromptVersion[] }
 
 async function call<T>(path: string, body?: Record<string, unknown>, base = '/api/v1/prompts'): Promise<T> {
@@ -59,6 +61,7 @@ async function call<T>(path: string, body?: Record<string, unknown>, base = '/ap
 export const promptsApi = {
   list: () => call<{ places: PromptPlace[]; prompts: PromptSummary[] }>(''),
   item: (id: string) => call<PromptItem>(`/item?id=${encodeURIComponent(id)}`),
+  working: () => call<PromptWorking>('/working'),
   sha: (id: string) => call<{ id: string; sha: string }>(`/sha?id=${encodeURIComponent(id)}`),
   save: (id: string, text: string, note: string, baseSha: string) =>
     call<{ saved: boolean; item: PromptItem }>('/item', { id, text, note, base_sha: baseSha }),
