@@ -98,6 +98,38 @@ def _message_datetime(email_message) -> Optional[datetime]:
 _HTML_NOISE_RE = re.compile(r'<(style|script|head)[^>]*>.*?</\1>', re.S | re.I)
 _HTML_TAG_RE = re.compile(r'<[^>]+>')
 
+_HTML_ANCHOR_RE = re.compile(r'<a\b[^>]*?\bhref\s*=\s*(["\'])(.*?)\1[^>]*>(.*?)</a>', re.S | re.I)
+# リンクの中で、認証のリンクではない物（書体・画像・配信停止・案内）
+_NOT_AUTH_LINK_RE = re.compile(
+    r'(fonts\.googleapis|fonts\.gstatic|\.(?:css|js|png|jpe?g|gif|svg|webp|otf|ttf|woff2?)(?:[?#]|$)'
+    r'|unsubscribe|optout|opt-out|/privacy|/legal|/terms|/help|support\.|/support)', re.I)
+
+
+def _is_auth_link_candidate(url: str) -> bool:
+    return bool(url) and url.lower().startswith(("http://", "https://")) and not _NOT_AUTH_LINK_RE.search(url)
+
+
+def _message_html_links(email_message) -> List[Tuple[str, str]]:
+    """HTML の本文にある <a href> を (URL, ボタンの文字) で返す。
+
+    Claude（Anthropic）のサインインのメールのように、URL がボタンの裏にしか無く
+    本文の文字には出てこないメールから、ワンタイムURLを取り出すため（2026-11-22）。
+    """
+    import html as html_lib
+    out: List[Tuple[str, str]] = []
+    parts = email_message.walk() if email_message.is_multipart() else [email_message]
+    for part in parts:
+        if part.get_content_type() != "text/html":
+            continue
+        payload = part.get_payload(decode=True) or b""
+        text = payload.decode(part.get_content_charset() or "utf-8", errors="ignore")
+        text = _HTML_NOISE_RE.sub(" ", text)
+        for _, href, inner in _HTML_ANCHOR_RE.findall(text):
+            url = html_lib.unescape(href).strip()
+            label = re.sub(r'\s+', ' ', html_lib.unescape(_HTML_TAG_RE.sub(" ", inner))).strip()
+            out.append((url, label))
+    return out
+
 
 def _message_text(email_message) -> str:
     """メールから本文テキストを取り出す。
@@ -256,7 +288,7 @@ class OTPService:
         for url in urls:
             # SMSでは文末の句読点や括弧がURLに食い込むので落とす
             url = url.rstrip('.,;:!?)]｝』」）　')
-            if not url:
+            if not _is_auth_link_candidate(url):
                 continue
             host = url.split("//", 1)[-1].split("/", 1)[0].split("?", 1)[0].lower()
             trusted = any(host == h or host.endswith("." + h) for h in OTP_LINK_TRUSTED_HOSTS)
@@ -265,6 +297,23 @@ class OTPService:
                 return url
 
         return None
+
+    def _extract_link_from_email(self, email_message, subject: str = "") -> Optional[str]:
+        """メールからワンタイムURLを取り出す。
+
+        ボタンの裏にだけURLがあるHTMLのメールでは、ボタンの文字かURLに認証の言葉
+        （サインイン・確認など）があるリンクを選ぶ。書体・画像・配信停止のリンクは選ばない。
+        無ければ従来どおり本文の文字から探す。
+        """
+        def has_context(text: str) -> bool:
+            t = re.sub(r'[-_]', ' ', (text or "").lower())
+            return any(k.lower() in t for k in OTP_LINK_CONTEXT_KEYWORDS)
+
+        for url, label in _message_html_links(email_message):
+            if _is_auth_link_candidate(url) and (has_context(label) or has_context(url)):
+                return url
+        body = _message_text(email_message)
+        return self._extract_link_from_text(body) or self._extract_link_from_text(subject)
 
     def _row_to_result(self, otp_data: dict, source: Optional[OTPSource] = None) -> OTPResult:
         """otp_extractions の1行を OTPResult に変換（code / link_url 両対応）"""
@@ -557,7 +606,7 @@ class OTPService:
                 otp_code = None
                 link_url = None
                 if want_link:
-                    link_url = self._extract_link_from_text(body) or self._extract_link_from_text(subject)
+                    link_url = self._extract_link_from_email(email_message, subject)
                 else:
                     otp_code = self._extract_otp_from_text(subject) or self._extract_otp_from_text(body)
 
