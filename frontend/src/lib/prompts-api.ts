@@ -36,7 +36,7 @@ export interface PromptSummary {
 export interface PromptWorking { id?: string; title?: string; place?: string; state?: 'editing' | 'saved'; from?: number; to?: number; note?: string; at?: string }
 export interface PromptItem extends PromptSummary { text: string; sha: string; history: PromptVersion[] }
 
-async function call<T>(path: string, body?: Record<string, unknown>, base = '/api/v1/prompts'): Promise<T> {
+export async function promptRequest<T>(path: string, body?: Record<string, unknown>, base = '/api/v1/prompts'): Promise<T> {
   const send = (token: string | null) =>
     fetch(`${base}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
@@ -59,23 +59,23 @@ async function call<T>(path: string, body?: Record<string, unknown>, base = '/ap
 }
 
 export const promptsApi = {
-  list: () => call<{ places: PromptPlace[]; prompts: PromptSummary[] }>(''),
-  item: (id: string) => call<PromptItem>(`/item?id=${encodeURIComponent(id)}`),
-  working: () => call<PromptWorking>('/working'),
-  sha: (id: string) => call<{ id: string; sha: string }>(`/sha?id=${encodeURIComponent(id)}`),
+  list: () => promptRequest<{ places: PromptPlace[]; prompts: PromptSummary[] }>(''),
+  item: (id: string) => promptRequest<PromptItem>(`/item?id=${encodeURIComponent(id)}`),
+  working: () => promptRequest<PromptWorking>('/working'),
+  sha: (id: string) => promptRequest<{ id: string; sha: string }>(`/sha?id=${encodeURIComponent(id)}`),
   save: (id: string, text: string, note: string, baseSha: string) =>
-    call<{ saved: boolean; item: PromptItem }>('/item', { id, text, note, base_sha: baseSha }),
-  revert: (id: string, sha: string, baseSha: string) => call<{ saved: boolean; item: PromptItem }>('/revert', { id, sha, base_sha: baseSha }),
+    promptRequest<{ saved: boolean; item: PromptItem }>('/item', { id, text, note, base_sha: baseSha }),
+  revert: (id: string, sha: string, baseSha: string) => promptRequest<{ saved: boolean; item: PromptItem }>('/revert', { id, sha, base_sha: baseSha }),
 };
 
 // ---- 指示文の画面の会話（2026-11-21）。部屋は1つ（app/api/prompts_screen.py の /prompts/chat）。発言はダン本体のチャットと同じ入口 ----
 export interface ChatMessage { id: string; sender_type: string; content: string; created_at: string; client_message_id?: string | null }
 export interface ChatStep { id: string; event_type: string; tool_name: string | null; tool_label: string | null; content: string | null; seq: number | null; created_at: string; metadata?: Record<string, unknown> | null }
 
-const dan = <T,>(path: string, body?: Record<string, unknown>) => call<T>(path, body, '/api/v1');
+const dan = <T,>(path: string, body?: Record<string, unknown>) => promptRequest<T>(path, body, '/api/v1');
 
 export const promptsChat = {
-  room: () => call<{ project_id: string; room_id: string; title: string }>('/chat'),
+  room: () => promptRequest<{ project_id: string; room_id: string; title: string }>('/chat'),
   messages: (room: string, limit = 40, before?: string) =>
     dan<{ messages: ChatMessage[] }>(`/chat/rooms/${room}/messages?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`).then(r => r.messages),
   active: (room: string) => dan<{ active: boolean; started_at?: number | string | null }>(`/chat/dan/sessions/${room}/active`),

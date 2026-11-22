@@ -204,12 +204,19 @@ _EDITOR_TOOLS = [   # the editor assistant's shared definitions (the phone/web v
 
 
 class LiveSessionRequest(BaseModel):
+    preview_only: bool = False
     server_delegation: bool = True   # kept for older apps; the server's sideband always answers (Responses delegation)
     sdp: str = Field(default='', max_length=65536)
     room_id: str
     device: bool = False   # kept for older apps (the Atom speaker, retired 2026-10-25)
     provider: Literal['openai'] = 'openai'
     timezone: str = Field(default='Asia/Tokyo', max_length=128)
+
+
+@router.post('/live/preview-session')
+async def create_preview_session(request: Request, body: LiveSessionRequest):
+    body.preview_only = True
+    return await create_live_session(request, body)
 
 
 @router.post('/live/session')
@@ -241,10 +248,20 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         await asyncio.to_thread(shared, body.room_id, user.user_id)
     from app.services import voice_editor   # whether the room is a work's room in the editor, read off the loop (cached)
     await asyncio.to_thread(voice_editor.call_editor, body.room_id)
-    config = session_config(history, timezone=body.timezone, files=files, room_id=body.room_id, user_id=user.user_id)
+    from app.services import prompt_store
+    with prompt_store.observed_reads() as reads:
+        config = session_config(history, timezone=body.timezone, files=files, room_id=body.room_id, user_id=user.user_id)
     backend = config.pop('_backend', None)   # the Responses spec the server itself runs when Jev routes the delegations (voice_router)
+    if body.preview_only:
+        from app.services.owner import resolve_owner_user_id
+        from app.services.voice_router import session_delegation
+        if user.user_id != resolve_owner_user_id():
+            raise HTTPException(403, '本人の画面から試してください。')
+        # A client-only delegation has no server, tools, job registry or after-call handler.
+        config['delegation'] = session_delegation()
     pending_id = 'pending-' + uuid4().hex
-    register(pending_id, user.user_id, room_id=body.room_id)
+    if not body.preview_only:
+        register(pending_id, user.user_id, room_id=body.room_id)
     bound = False
     try:
         async with httpx.AsyncClient(timeout=40) as client:
@@ -256,10 +273,13 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         if response.status_code not in (200, 201) or not data.get('session', {}).get('id') or not data.get('transport', {}).get('sdp'):
             logger.error('Live session rejected: status=%s request_id=%s detail=%s', response.status_code, response.headers.get('x-request-id'), str((data.get('error') or {}).get('message') or data)[:200])
             raise HTTPException(502, 'Live 1への接続に失敗しました')
+        if body.preview_only:
+            return {'session': {'id': data['session']['id']}, 'transport': data['transport'], 'preview_only': True, 'prompts': list(reads)}
         bind_session(pending_id, data['session']['id'])
         bound = True
         # The backend model's function calls arrive only on the server's own connection to the call: it always answers them.
         from app.services import voice_sideband
+        voice_sideband.note(data['session']['id'], body.room_id, 'voice_configured', prompts=list(reads))
         owned = voice_sideband.attach(data['session']['id'], user.user_id, body.room_id, settings.OPENAI_API_KEY, own=True, backend=backend)
         # Dan's tools for this call start loading now (a few seconds), not when the backend first needs one
         from app.services import voice_tools
@@ -268,7 +288,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(502, 'Live 1への接続に失敗しました') from exc
     finally:
-        if not bound:
+        if not bound and not body.preview_only:
             close(pending_id, user.user_id)
 
 

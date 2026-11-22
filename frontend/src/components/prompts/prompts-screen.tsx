@@ -723,6 +723,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
               <Icon className="size-4" />{label}
             </button>
           ))}
+          <a href={embedded ? 'https://dan.paina.info/prompts/circuit' : '/prompts/circuit'} target={embedded ? '_blank' : undefined} rel="noreferrer" className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-stone-700 hover:bg-amber-50"><Network className="size-4" />会話の回路図</a>
         </nav>
         {!library && !reader && <p className="text-sm text-stone-600">箱を押すと指示文が開きます。緑の枝では、頼みごとに使うスキルを開けます。</p>}
       </header>

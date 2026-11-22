@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import re
 import queue as thread_queue
 import unicodedata
 import uuid
@@ -1235,6 +1236,17 @@ def _save_execution_event_sync(
     if normalized_type == "tool_use" and tool_name:
         try:
             from app.agent.activity_line import activity_phrase, done_note, own_activity
+            args = tool_input or {}
+            name = tool_name.split('__')[-1]
+            if name in ('Skill', 'check_skill'):
+                skill = args.get('name') or args.get('skill')
+                if isinstance(skill, str) and re.fullmatch(r'[a-zA-Z0-9_-]+', skill):
+                    metadata['skill_requested'] = 'skill/' + skill
+            elif name in ('read_file', 'Read'):
+                path = str(args.get('path') or args.get('file_path') or '').replace(chr(92), '/')
+                match = re.search(r'(?:^|/)\.claude/skills/([A-Za-z0-9_/-]+)\.md$', path)
+                if match:
+                    metadata['skill_requested'] = 'skill/' + match[1].removesuffix('/SKILL')
             own = own_activity(tool_name, tool_input)
             metadata["activity"] = own or activity_phrase(tool_name, tool_input)
             if own:
