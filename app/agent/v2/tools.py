@@ -424,8 +424,9 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.parallel_work_tool import TOOL as PARALLEL_WORK_TOOL
     from app.services.video_analyzer import TOOL as VIDEO_TOOL
     from app.services.owner_summon import TOOL as SUMMON_TOOL
+    from app.services.editor_handoff import for_tool
     return [
-        PARALLEL_WORK_TOOL,
+        for_tool(PARALLEL_WORK_TOOL),
         SUMMON_TOOL,
         LOOKUP_TOOL,
         LOCATION_TOOL,
@@ -443,7 +444,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         PROGRESS_TOOL,
         WAIT_TOOL,
         DESKTOP_TOOL,
-        COMMAND_CENTER_TOOL,
+        for_tool(COMMAND_CENTER_TOOL),
         BROWSER_TOOL,
         BROWSER_PLAN_TOOL,
         *([BROWSER_FLOW_TOOL] if jev_browser_enabled() else []),
@@ -1930,6 +1931,11 @@ class SkillRegistry:
     @classmethod
     def get_prompt(cls, name: str) -> str:
         """スキルのプロンプト（SKILL.md内容）を取得"""
+        from app.services import prompt_store
+        try:
+            return prompt_store.text('skill/' + name.removesuffix('.md').removesuffix('/SKILL'))
+        except KeyError:
+            pass
         skill = cls.get(name)
         return skill.raw_content if skill else ""
 
@@ -2524,6 +2530,10 @@ async def execute_tool(
                 "error": "skill_name が必要です",
             }
 
+        if '/references/' in check_skill_name:
+            manual = SkillRegistry.get_prompt(check_skill_name)
+            if manual:
+                return {'success': True, 'skill_name': check_skill_name, 'manual': manual}
         # スキルを検索
         skill = SkillRegistry.get(check_skill_name)
         if not skill:

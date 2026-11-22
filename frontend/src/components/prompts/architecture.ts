@@ -56,7 +56,7 @@ export const NODES: ArchNode[] = [
   { id: 'voice', name: '通話のダン', model: 'GPT-Live（OpenAI）', icon: 'voice', x: 300, y: 470, w: 240,
     prompts: ['call/persona', 'call/policies', 'call/editor-place', 'call/router-job-started'],
     line: '声で受け答えする。自分で答えられない頼みは、裏に任せる。' },
-  { id: 'editor', name: 'エディターのダンと制作', model: 'Claude Code', icon: 'editor', x: 740, y: 470, w: 240, same: 'chat',
+  { id: 'editor', name: 'エディターのダンと制作', model: 'Claude Code', icon: 'editor', x: 740, y: 470, w: 240, same: 'chat', skills: true, prompts: ['work/editor-handoff'],
     line: 'エディターで動画を作る・直す。チャットのダンと同じ決まりに、制作の決まり（プログラムの中）を足して読む。' },
   { id: 'router', name: '振り分け', model: 'Jev', icon: 'router', x: 300, y: 594, w: 240,
     prompts: ['call/router-routes', 'call/router-ask', 'call/router-work', 'call/router-reply', 'call/router-calendar', 'call/router-promise-words', 'call/editor-place'],

@@ -847,65 +847,65 @@
    "why": "取り返しのつかない操作（11/11）など、ダンの進め方の決まり。",
    "kind": "text"
   },
- {
-  "id": "skill/talking-demo-editing",
-  "title": "手順書「話す人と実物で見せる動画の編集」",
-  "place": "chat",
-  "reader": "動画を編集するダン",
-  "when": "この種類の動画を編集する時",
-  "source": "~/.dan/workspace/prompts/skill/talking-demo-editing.md",
-  "source_file": ".claude/skills/talking-demo-editing/SKILL.md",
-  "kind": "skill"
- },
- {
-  "id": "skill/talking-demo-editing/references/suya-youtube",
-  "title": "スヤさんの YouTube",
-  "place": "chat",
-  "reader": "動画を編集するダン",
-  "when": "この案件を編集する時",
-  "source": "~/.dan/workspace/prompts/skill/talking-demo-editing/references/suya-youtube.md",
-  "source_file": ".claude/skills/talking-demo-editing/references/suya-youtube.md",
-  "kind": "skill"
- },
- {
-  "id": "skill/talking-demo-editing/references/nakamura-line-gift",
-  "title": "中村さんの LINE 特典",
-  "place": "chat",
-  "reader": "動画を編集するダン",
-  "when": "この案件を編集する時",
-  "source": "~/.dan/workspace/prompts/skill/talking-demo-editing/references/nakamura-line-gift.md",
-  "source_file": ".claude/skills/talking-demo-editing/references/nakamura-line-gift.md",
-  "kind": "skill"
- },
- {
-  "id": "skill/talking-demo-editing/references/pornanti-line-gift",
-  "title": "ポルノアンチの LINE 特典",
-  "place": "chat",
-  "reader": "動画を編集するダン",
-  "when": "この案件を編集する時",
-  "source": "~/.dan/workspace/prompts/skill/talking-demo-editing/references/pornanti-line-gift.md",
-  "source_file": ".claude/skills/talking-demo-editing/references/pornanti-line-gift.md",
-  "kind": "skill"
- },
- {
-  "id": "skill/talking-demo-editing/references/new-attack-video",
-  "title": "新アタックの紹介映像",
-  "place": "chat",
-  "reader": "動画を編集するダン",
-  "when": "この案件を編集する時",
-  "source": "~/.dan/workspace/prompts/skill/talking-demo-editing/references/new-attack-video.md",
-  "source_file": ".claude/skills/talking-demo-editing/references/new-attack-video.md",
-  "kind": "skill"
- },
- {
-  "id": "work/editor-handoff",
-  "title": "動画編集の依頼を渡す時",
-  "place": "editor",
-  "reader": "動画を編集するダン",
-  "when": "会話から作品の部屋に作業を渡す時",
-  "source": "app/services/command_center.py の execute()",
-  "kind": "text",
-  "why": "本人の依頼と決めた条件を届け、編集の判断は作品を直接見られる担当に任せる。"
- }
+  {
+   "id": "skill/talking-demo-editing",
+   "title": "手順書「話す人と実物で見せる動画の編集」",
+   "place": "chat",
+   "reader": "動画を編集するダン",
+   "when": "この種類の動画を編集する時",
+   "source": ".claude/skills/talking-demo-editing/SKILL.md",
+   "source_file": ".claude/skills/talking-demo-editing/SKILL.md",
+   "kind": "skill"
+  },
+  {
+   "id": "skill/talking-demo-editing/references/suya-youtube",
+   "title": "スヤさんの YouTube",
+   "place": "chat",
+   "reader": "動画を編集するダン",
+   "when": "この案件を編集する時",
+   "source": ".claude/skills/talking-demo-editing/references/suya-youtube.md",
+   "source_file": ".claude/skills/talking-demo-editing/references/suya-youtube.md",
+   "kind": "skill"
+  },
+  {
+   "id": "skill/talking-demo-editing/references/nakamura-line-gift",
+   "title": "中村さんの LINE 特典",
+   "place": "chat",
+   "reader": "動画を編集するダン",
+   "when": "この案件を編集する時",
+   "source": ".claude/skills/talking-demo-editing/references/nakamura-line-gift.md",
+   "source_file": ".claude/skills/talking-demo-editing/references/nakamura-line-gift.md",
+   "kind": "skill"
+  },
+  {
+   "id": "skill/talking-demo-editing/references/pornanti-line-gift",
+   "title": "ポルノアンチの LINE 特典",
+   "place": "chat",
+   "reader": "動画を編集するダン",
+   "when": "この案件を編集する時",
+   "source": ".claude/skills/talking-demo-editing/references/pornanti-line-gift.md",
+   "source_file": ".claude/skills/talking-demo-editing/references/pornanti-line-gift.md",
+   "kind": "skill"
+  },
+  {
+   "id": "skill/talking-demo-editing/references/new-attack-video",
+   "title": "新アタックの紹介映像",
+   "place": "chat",
+   "reader": "動画を編集するダン",
+   "when": "この案件を編集する時",
+   "source": ".claude/skills/talking-demo-editing/references/new-attack-video.md",
+   "source_file": ".claude/skills/talking-demo-editing/references/new-attack-video.md",
+   "kind": "skill"
+  },
+  {
+   "id": "work/editor-handoff",
+   "title": "作業をほかのダンに頼む時",
+   "place": "editor",
+   "reader": "依頼を渡すチャット・音声・エディターのダン",
+   "when": "別の部屋や並行作業へ依頼する時",
+   "source": "チャット・音声・エディターの作業依頼",
+   "kind": "text",
+   "why": "本人の依頼と決めた条件を届け、編集の判断は作品を直接見られる担当に任せる。"
+  }
  ]
 }

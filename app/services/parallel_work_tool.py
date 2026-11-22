@@ -38,14 +38,20 @@ async def execute(params, room_id, user_id):
             task = str(params.get('task') or '').strip()
             if not task:
                 return {'error': 'task が必要です'}
+            from app.services.editor_handoff import from_chat
+            task = await from_chat(params, params.get('title', ''), room_id, user_id)
             job = await runner.start(room_id, user_id, task, params.get('model') or '', str(params.get('title') or ''))
             return {'started': runner.public(job)}
         if action == 'list':
             rows = await asyncio.to_thread(runner.room_jobs, user_id, room_id)
             return {'jobs': [runner.public(s) for s in rows]}
         if action in ('update', 'cancel', 'switch_model'):
+            update = str(params.get('text') or '')
+            if action == 'update':
+                from app.services.editor_handoff import from_chat
+                update = await from_chat({**params, 'task': update}, '', room_id, user_id)
             job = await runner.control(room_id, user_id, str(params.get('job_id') or ''), action,
-                                       str(params.get('text') or ''), str(params.get('model') or ''))
+                                       update, str(params.get('model') or ''))
             return {'job': runner.public(job)}
         return {'error': '未対応の操作です'}
     except ValueError as exc:

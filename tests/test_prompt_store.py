@@ -44,7 +44,7 @@ def test_moved_text_is_the_same_as_in_the_code_before(store):
         assert value == BEFORE[name], name
     assert '\n' + store.text('work/codex-job-rules') + '\n' == BEFORE['command_job_runner.codex_block']
     assert store.fill('call/persona', owner='本田樹さん（呼び名はみきさん）', whose='みきさん') == BEFORE['voice_plain.persona(本田樹,みきさん)']
-    assert store.text('work/relay-header') == '【あなたの依頼・Done経由】'
+    assert store.text('work/relay-header') == '【作業の依頼】'
     assert store.text('call/router-job-started') == '取りかかった。分かったことから伝える。'
 
 
@@ -115,3 +115,25 @@ def test_workspace_files_keep_their_place(store, tmp_path):
     store.save('workspace/rules', '# 決まり\n- 一つ目\n- 二つ目\n', by='owner')
     assert (ws / 'RULES.md').read_text(encoding='utf-8') == '# 決まり\n- 一つ目\n- 二つ目\n'
     assert [r['by'] for r in store.history('workspace/rules')] == ['owner', 'dan']
+
+
+def test_skill_save_tracks_learning_and_refuses_stale_edit(store, monkeypatch, tmp_path):
+    from app.agent.v2.tools import SkillRegistry
+    name = 'talking-demo-editing/references/suya-youtube'
+    key = 'skill/' + name
+    monkeypatch.setattr(store, 'REPO', tmp_path)
+    source = tmp_path / store.entry(key)['source_file']
+    source.parent.mkdir(parents=True)
+    source.write_text('冒頭\n中盤\n本編\n終わり')
+    base = store.text(key)
+    edited = base.replace('冒頭', '冒頭は実写')
+    store.save(key, edited, by='owner', base_sha=store.sha(base))
+    source.write_text(base.replace('本編', '本編は明るく'))
+    learned = SkillRegistry.get_prompt(name + '.md')
+    assert learned == edited.replace('本編', '本編は明るく')
+    with pytest.raises(RuntimeError):
+        store.save(key, '別の修正', base_sha=store.sha(edited))
+    source.write_text(source.read_text().replace('冒頭', 'インタビューから始める'))
+    assert 'インタビューから始める' in SkillRegistry.get_prompt(name)
+    store.revert(key, store.sha(edited))
+    assert SkillRegistry.get_prompt(name) == edited

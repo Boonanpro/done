@@ -260,17 +260,9 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
         return {"reported": True, "message_id": message["id"], "project": summary(target)}
     if target_room == room_id and action != 'work':
         raise ValueError("今の部屋の作業は自分の作業モードで実行してください")
-    if action == 'delegate' or voice_handoff:
-        from app.services.editor_rooms import room_info
-        editor = await asyncio.to_thread(room_info, target_room)
-        if editor and editor.get('content_id'):
-            original = ''
-            if not voice_handoff:
-                recent = await chat.get_messages(room_id, user_id, limit=12)
-                original = next((m.get('content') or '' for m in recent
-                                 if m.get('sender_type') in {'human', 'user'}), '')
-            from app.services.editor_handoff import editor_task
-            task = editor_task(str(target.get('title') or editor['content_id']), task, original)
+    if action == 'delegate':
+        from app.services.editor_handoff import from_chat
+        task = await from_chat(params, target.get('title') or target_room, room_id, user_id)
     # Immediate work has one durable owner. The shared watch table can be
     # consumed by older notification workers, which cannot execute this job.
     from app.services import command_job_state

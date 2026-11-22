@@ -617,7 +617,12 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           {node?.skills && skills.length ? (
             <details>
               <summary className="cursor-pointer text-sm text-stone-600">手順書と案件ごとの参考（{skills.length}）</summary>
-              <ul className="mt-2 space-y-2">{skills.map(row)}</ul>
+              <h3 className="mt-3 text-sm font-semibold">動画編集の共通手順</h3>
+              <ul className="mt-2 space-y-2">{skills.filter(p => !p.readonly && !p.id.includes('/references/')).map(row)}</ul>
+              <h3 className="mt-3 text-sm font-semibold">案件ごとの編集方針</h3>
+              <ul className="mt-2 space-y-2">{skills.filter(p => p.id.includes('/references/')).map(row)}</ul>
+              <h3 className="mt-3 text-sm font-semibold">その他の手順書</h3>
+              <ul className="mt-2 space-y-2">{skills.filter(p => p.readonly).map(row)}</ul>
             </details>
           ) : null}
           {node && !here.length && !node.same && loaded && !error ? (
