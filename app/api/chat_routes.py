@@ -3953,7 +3953,7 @@ async def _active_session_status(session_id: str) -> dict:
 
 # A turn records a step every few seconds and at most about a hundred apart (one long command); a room whose latest step is
 # older than this has no turn running, whatever the run's state says (a run left behind by a dead process stays "running").
-RECORD_ACTIVE_WINDOW = 180
+from app.services.run_service import RECORD_ACTIVE_WINDOW
 
 
 def _latest_room_events(room_id: str, limit: int = 10) -> list[dict]:

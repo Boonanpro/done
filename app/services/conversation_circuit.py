@@ -1,10 +1,13 @@
 """Owner's circuit view. Join only on recorded session, room, job and run IDs."""
 import json
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
 from app.paths import LIVE_ROOT
-from app.services import command_job_state, voice_sideband
+from app.services import command_job_state, voice_calls, voice_sideband
+from app.agent.activity_line import activity_phrase
+from app.services.run_service import background
 
 VOICE = {
     'voice_configured': ('voice', '通話の指示文を準備'),
@@ -17,6 +20,24 @@ VOICE = {
     'lookup_answered': ('lookup', '調査完了'), 'stage_page': ('stage', '画面表示'),
     'route_luna_round': ('backend', '担当が判断'), 'backend_completed': ('backend', '担当が返答'),
     'lookup_handed_over': ('parallel', '調査を引き継ぎ'), 'whisper_heard': ('voice', '音声を文字に変換'),
+}
+VOICE_ACTIVITY = {
+    'voice_configured': '通話で使う指示文を読み込みました。',
+    'sideband_attached': '通話の音声につながりました。',
+    'sideband_closed': '通話が終わりました。',
+    'route_answered': '振り分けの結果を通話のダンに返しました。',
+    'route_job_started': '依頼を並行作業の担当に渡しました。',
+    'lookup_handed_over': '調べものを並行作業の担当に引き継ぎました。',
+    'lookup_started': '通話で頼まれたことを調べています。',
+    'lookup_answered': '調べた結果を通話のダンに返しました。',
+    'stage_page': '通話の画面に資料を表示しました。',
+    'whisper_heard': '聞き取った言葉を文字にしました。',
+    'route_luna_round': '判断役が依頼の進め方を確認しています。',
+    'backend_completed': '判断役が結果を返しました。',
+    'chat_in_call': 'チャットの言葉が通話に届きました。',
+    'route_job_refused': '作業を担当に渡せませんでした。',
+    'route_failed': '依頼の振り分けに失敗しました。',
+    'sideband_failed': '音声につなげませんでした。',
 }
 STATE = {'running': '作業中', 'completed': '完了', 'failed': '失敗', 'cancelled': '停止',
          'superseded': '次の依頼へ移行', 'paused': '一時停止', 'queued': '受付', 'awaiting_confirmation': '確認待ち',
@@ -71,7 +92,8 @@ def voice_steps(rows, jobs):
         phase, at = row['phase'], row['at']
         if phase == 'speech_start':
             owner = row.get('side') == 'owner'
-            events.append(step(at, 'owner' if owner else 'voice', '本人の発話' if owner else 'ダンの発話'))
+            events.append(step(at, 'owner' if owner else 'voice', '本人の発話' if owner else 'ダンの発話',
+                               activity='みきさんが話し始めました。' if owner else 'ダンが話し始めました。'))
             continue
         node, label = VOICE[phase]
         detail = row.get('route') or row.get('name') or row.get('model') or ''
@@ -79,11 +101,19 @@ def voice_steps(rows, jobs):
         calls = row.get('calls')
         if isinstance(calls, list):
             detail = ' · '.join(filter(None, [detail, *map(str, calls)]))
-        events.append(step(at, node, label, detail, prompts=row.get('prompts', []), ms=row.get('elapsed_ms', row.get('ms'))))
+        activity = VOICE_ACTIVITY.get(phase, label)
+        if phase == 'route_chosen':
+            activity = f'依頼を「{detail}」に振り分けました。'
+        if phase == 'function_done':
+            node = 'sandbox'
+            activity = row.get('activity') or activity_phrase(row.get('name') or '', {}) or '道具から結果が返りました。'
+        events.append(step(at, node, label, detail, activity=activity, prompts=row.get('prompts', []),
+                           ms=row.get('elapsed_ms', row.get('ms', row.get('transcribe_ms')))))
         prefix = row.get('job_id')
         if prefix and phase in ('route_job_started', 'lookup_handed_over'):
             matches = [j for j in jobs if j['id'].startswith(prefix)]
             if len(matches) == 1:
+                events[-1]['handoff'] = matches[0].get('task')
                 events.extend(job_steps(matches[0]))
     return sorted(events, key=lambda e: e['at'])
 
@@ -93,17 +123,17 @@ def job_origin(path, stamp):
     try:
         job = json.loads(path.read_bytes())
         if not job.get('internal_check'):
-            return job.get('origin_room_id'), job.get('user_id'), job.get('created_at') or ''
+            return job.get('origin_room_id'), job.get('user_id'), job.get('created_at') or '', job.get('state'), (job.get('title') or job.get('task') or '')[:80]
     except (ValueError, OSError):
         pass
-    return None, None, ''
+    return None, None, '', '', ''
 
 
 def room_jobs(room, user):
     matches = []
     for path in command_job_state.ROOT.glob('*.json'):
         try:
-            origin, who, date = job_origin(path, path.stat().st_mtime_ns)
+            origin, who, date, _, _ = job_origin(path, path.stat().st_mtime_ns)
         except FileNotFoundError:
             continue
         if (origin, who) == (room, user):
@@ -113,13 +143,20 @@ def room_jobs(room, user):
 
 
 def job_steps(job):
-    events = [step(job['created_at'], 'parallel', '担当に渡った依頼文', job.get('task'))]
+    events = [step(job['created_at'], 'parallel', '担当に渡った依頼文', job.get('task'),
+                   activity='作業担当が依頼を受け取りました。', handoff=job.get('task'))]
     for e in job.get('events', []):
         kind = e.get('kind')
         labels = {'tool': '道具を使用', 'result': '結果', 'progress': '進み具合', 'error': 'エラー',
                   'confirmation': '確認待ち', 'control': '追加指示', 'waiting': '返答待ち'}
         if kind in labels and e.get('at'):
-            events.append(step(e['at'], 'error' if kind == 'error' else 'parallel', labels[kind], e.get('label') or e.get('text')))
+            detail = e.get('text') or ''
+            activity = e.get('activity') or e.get('label') or detail
+            if kind == 'tool' and not e.get('activity'):
+                name, _, action = detail.partition(':')
+                activity = activity_phrase(name, {'action': action}) or '道具を使いました。'
+            events.append(step(e['at'], 'parallel', labels[kind], detail if kind != 'tool' else '',
+                               activity=activity, ms=e.get('ms'), prompt=e.get('prompt')))
     return events
 
 
@@ -136,9 +173,90 @@ def owner_rooms(db, user):
     return list(items.values())
 
 
+def active_requests(db, user):
+    rooms = {r['id']: r['title'] for r in owner_rooms(db, user)}
+    if not rooms:
+        return []
+    items = []
+    runs = (db.table('agent_runs').select('id,room_id,origin_message_id,created_at,metadata,state')
+            .in_('state', ['running', 'queued', 'awaiting_confirmation', 'awaiting_approval'])
+            .execute().data or [])
+    runs = [r for r in runs if r['room_id'] in rooms and not background(r)]
+    # A chat can continue after its HTTP stream closes. Its subsequent events
+    # still identify the actual run or (in a plain room) the individual turn.
+    from app.services.run_service import RECORD_ACTIVE_WINDOW
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=RECORD_ACTIVE_WINDOW)).isoformat()
+    recent = (db.table('execution_events').select('room_id,run_id,turn_id,event_type,created_at')
+              .gte('created_at', cutoff).order('seq', desc=True).execute().data or [])
+    latest = {}
+    for e in recent:
+        if e['room_id'] in rooms and (e.get('run_id') or e.get('turn_id')):
+            latest.setdefault((e['room_id'], e.get('run_id'), e.get('turn_id')), e)
+    by_run = {}
+    for (room, run_id, turn_id), e in latest.items():
+        if run_id:
+            by_run.setdefault(run_id, e)
+        elif e['event_type'] != 'done':
+            items.append(dict(room=room, id='turn/'+turn_id, kind='チャット', title=rooms[room],
+                              at=e['created_at'], state='作業中'))
+    active_ids = {r['id'] for r in runs}
+    extra_ids = [rid for rid, e in by_run.items() if rid not in active_ids and e['event_type'] != 'done']
+    if extra_ids:
+        extra = (db.table('agent_runs').select('id,room_id,origin_message_id,created_at,metadata,state')
+                 .in_('id', extra_ids).execute().data or [])
+        runs += [r for r in extra if r['room_id'] in rooms and r['state'] == 'paused' and not background(r)]
+    runs = [r for r in runs if by_run.get(r['id'], {}).get('event_type') != 'done']
+    ids = [r['origin_message_id'] for r in runs if r.get('origin_message_id')]
+    messages = {m['id']: m for m in db.table('chat_messages').select('id,room_id,content')
+                .in_('id', ids).execute().data or []} if ids else {}
+    for r in runs:
+        room = r['room_id']
+        msg = messages.get(r.get('origin_message_id')) or {}
+        title = msg.get('content') if msg.get('room_id') == room else ''
+        items.append(dict(room=room, id='chat/'+r['id'], kind='チャット', title=(title or rooms[room])[:80],
+                          at=r['created_at'], state=STATE.get(r['state'], r['state'])))
+    for path in voice_calls.ROOT.glob('*.json'):
+        room = path.stem
+        if room in rooms and (call := voice_calls.active(room)):
+            items.append(dict(room=room, id='voice/'+call['session_id'], kind='通話', title=rooms[room],
+                              at=datetime.fromtimestamp(call['at'], timezone.utc).isoformat(), state='通話中'))
+    for path in command_job_state.ROOT.glob('*.json'):
+        try:
+            room, who, date, state, title = job_origin(path, path.stat().st_mtime_ns)
+        except FileNotFoundError:
+            continue
+        if room in rooms and who == user and state in ('running', 'queued', 'awaiting_confirmation', 'waiting'):
+            items.append(dict(room=room, id='job/'+path.stem, kind='並行作業', title=title or rooms[room],
+                              at=date, state=STATE.get(state, state)))
+    return sorted(items, key=lambda i: i['at'], reverse=True)
+
+
+def chat_steps(rows):
+    events = []
+    for e in reversed(rows):
+        meta = e.get('metadata') or {}
+        labels = {'tool_use': '道具を使用', 'phase': '作業の進行', 'done':'作業終了','error':'エラー'}
+        activity = meta.get('activity') or meta.get('done')
+        if not activity and e['tool_name']:
+            activity = activity_phrase(e['tool_name'])
+        events.append(step(e['created_at'], 'chat', labels[e['event_type']], activity=activity or {'phase':'次の段階に進みました。', 'done':'チャットの作業が終わりました。',
+                                                 'error':'作業中にエラーが起きました。'}.get(e['event_type'], '道具を使いました。'),
+                           prompt=meta.get('skill_requested'), handoff=meta.get('handoff')))
+    return events
+
+
 def snapshot(db, room, user, selected=''):
     runs = (db.table('agent_runs').select('id,origin_message_id,state,created_at,updated_at')
             .eq('room_id', room).order('created_at', desc=True).limit(50).execute().data or [])
+    if selected.startswith('chat/') and not any('chat/'+r['id'] == selected for r in runs):
+        from uuid import UUID
+        try:
+            run_id = str(UUID(selected[5:]))
+        except ValueError:
+            run_id = None
+        if run_id:
+            runs += (db.table('agent_runs').select('id,origin_message_id,state,created_at,updated_at')
+                     .eq('room_id', room).eq('id', run_id).limit(1).execute().data or [])
     ids = [r['origin_message_id'] for r in runs if r.get('origin_message_id')]
     messages = {}
     if ids:
@@ -189,14 +307,25 @@ def snapshot(db, room, user, selected=''):
         rows = (db.table('execution_events').select('created_at,event_type,tool_name,tool_label,metadata')
                 .eq('room_id', room).eq('run_id', run['id']).in_('event_type',['tool_use','phase','done','error'])
                 .order('seq', desc=True).limit(250).execute().data or [])
-        for e in reversed(rows):
-            meta = e.get('metadata') or {}
-            labels = {'tool_use': '道具を使用', 'phase': '作業の進行', 'done':'作業終了','error':'エラー'}
-            events.append(step(e['created_at'], 'tool' if e['tool_name'] else 'chat', e.get('tool_label') or labels[e['event_type']],
-                               meta.get('activity') or e['tool_name'], prompt=meta.get('skill_requested')))
+        events.extend(chat_steps(rows))
         if run['state'] not in ('running','queued'):
             events.append(step(run['updated_at'], 'chat', STATE.get(run['state'],run['state'])))
         break
+    if key.startswith('turn/'):
+        from uuid import UUID
+        try:
+            turn_id = str(UUID(key[5:]))
+        except ValueError:
+            turn_id = None
+        if turn_id:
+            rows = (db.table('execution_events').select('created_at,event_type,tool_name,tool_label,metadata')
+                    .eq('room_id', room).eq('turn_id', turn_id).is_('run_id', 'null')
+                    .in_('event_type', ['tool_use','phase','done','error']).order('seq', desc=True)
+                    .limit(250).execute().data or [])
+            events = chat_steps(rows)
+            if rows:
+                items.insert(0, dict(id=key, at=events[0]['at'], title='チャットの作業', kind='チャット',
+                                     state='完了' if rows[0]['event_type']=='done' else '作業中'))
     if key.startswith('message/'):
         events = standalone.get(key[8:], [])
     if key.startswith('voice/'):

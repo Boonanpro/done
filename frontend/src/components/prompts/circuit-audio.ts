@@ -2,6 +2,7 @@ import { promptRequest } from '@/lib/prompts-api';
 
 export interface CircuitStep {
   at: string; node: string; label: string; detail: string;
+  activity?: string; handoff?: string;
   ms?: number; model?: string; prompts?: string[]; prompt?: string;
 }
 export const localStep = (node: string, label: string, detail = ''): CircuitStep =>

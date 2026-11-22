@@ -3,18 +3,18 @@ place: prompts
 name: ダンを動かしている指示文
 open: /prompts
 ready: 'textarea, button:has(img[src^="/prompts/arch/"])'
-watches: [frontend/src/app/prompts/page.tsx, frontend/src/components/prompts/prompts-screen.tsx, frontend/src/components/prompts/prompts-chat.tsx, frontend/src/components/prompts/reader-skills.tsx, frontend/src/components/prompts/skill-library.tsx, frontend/src/components/prompts/line-diff.ts, frontend/src/components/prompts/architecture.ts, frontend/src/components/prompts/architecture-trace.ts, frontend/src/components/prompts/conversation-circuit.tsx, frontend/src/app/prompts/circuit/page.tsx, frontend/src/lib/prompts-api.ts, app/api/prompts_screen.py, app/services/prompt_store.py, app/prompts/catalog.json]
+watches: [frontend/src/app/prompts/page.tsx, frontend/src/components/prompts/prompts-screen.tsx, frontend/src/components/prompts/prompts-chat.tsx, frontend/src/components/prompts/reader-skills.tsx, frontend/src/components/prompts/skill-library.tsx, frontend/src/components/prompts/line-diff.ts, frontend/src/components/prompts/architecture.ts, frontend/src/components/prompts/architecture-trace.ts, frontend/src/components/prompts/conversation-circuit.tsx, frontend/src/components/prompts/request-playback.tsx, frontend/src/app/prompts/circuit/page.tsx, frontend/src/lib/prompts-api.ts, app/api/prompts_screen.py, app/services/prompt_store.py, app/prompts/catalog.json]
 errors: [ログインが切れています, 失敗しました]
 speak: |
-  - 上の「会話の回路図」を押すと、構成図の同じ箱と線に、実際のチャット・音声・並行作業の記録が重なります。番号は記録の順で、「図の箱を追う」でその段階の箱まで自動で移り、箱を押すと指示文を開けます。失敗した場所が記録にある時はその箱が赤くなります。「依頼を試す」では、担当に渡す直前までか、実際に作業を進めるかを選べます。
+  - 構成図の上の「今動いている依頼」で見たいチャット・通話・並行作業を押すと、その依頼だけの作業が箱の横と「作業の様子」に出ます。「前の会話を流し直す」で部屋と依頼を選び、図の下の「流れを再生」で再生・一時停止・コマ送り・速度変更ができます。光った箱を押すと、その段階で記録された指示文・渡した本文・秒数が開きます。「依頼を試す」で渡す直前までか実際に進めるかを選べます。
   - 構成図の緑の枝には、ダンがどんな依頼で読むスキルかが出ます。「すべて」でそのダンの頼み別の枝を開けます。通話で制作を頼んだ時は並行作業につながります。
   - 画面上の「スキル」で全スキルの手順書と参考ページを検索し、編集・復元できます。
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: 55263a5532e43db4
-described: efe6ea89b3f5408b
-last_review: "2026-11-22 説明は変えない: 一覧と全文の並びは記載どおり"
+fingerprint: 821574520012cb4d
+described: ff973906e4ea91df
+last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で追う操作は記載どおり"
 ---
 # ダンを動かしている指示文
 
@@ -59,10 +59,10 @@ last_review: "2026-11-22 説明は変えない: 一覧と全文の並びは記�
 
 `python scripts/place_map.py stamp prompts` が書き直す。手で直さない。
 
-- 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/circuit/page.tsx`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/architecture-trace.ts`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/conversation-circuit.tsx`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
-- ラベル: 「時刻順の記録」、「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「指示文の表示」、「ダンと話す」、「会話を閉じる」、「スキル一覧」、「スキル・参考ページを検索」
+- 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/circuit/page.tsx`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/architecture-trace.ts`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/conversation-circuit.tsx`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/request-playback.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
+- ラベル: 「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「指示文の表示」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「スキル一覧」、「スキル・参考ページを検索」
 - 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」
-- 見出し: 「プログラムの中にあった頃に直された日」、「ダンを動かしている指示文」
+- 見出し: 「プログラムの中にあった頃に直された日」、「ダンを動かしている指示文」、「作業の様子」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "6047951223", "app/prompts/catalog.json": "c75d3461c7", "app/services/prompt_store.py": "750e86435b", "frontend/src/app/prompts/circuit/page.tsx": "76c05249b6", "frontend/src/app/prompts/page.tsx": "ea917328ef", "frontend/src/components/prompts/architecture-trace.ts": "f84a185427", "frontend/src/components/prompts/architecture.ts": "60757c7a1c", "frontend/src/components/prompts/conversation-circuit.tsx": "81b57cdfba", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "ceb98a46cb", "frontend/src/components/prompts/prompts-screen.tsx": "92c413efba", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "93f3485b6b"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "6047951223", "app/prompts/catalog.json": "c75d3461c7", "app/services/prompt_store.py": "750e86435b", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/architecture-trace.ts": "adb59d4b2e", "frontend/src/components/prompts/architecture.ts": "60757c7a1c", "frontend/src/components/prompts/conversation-circuit.tsx": "9ee082d8b9", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "ceb98a46cb", "frontend/src/components/prompts/prompts-screen.tsx": "9d5b1bbb6c", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "2af02d9613", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "93f3485b6b"} -->
 <!-- place_map:auto:end -->

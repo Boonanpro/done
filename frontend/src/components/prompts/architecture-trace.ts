@@ -1,7 +1,10 @@
 import { EDGES, NODES } from './architecture';
 import type { CircuitStep } from './circuit-audio';
 
-export type Trace = ReturnType<typeof architectureTrace>;
+export type Segment = { key: string; inferred: boolean; reverse: boolean };
+export type Trace = ReturnType<typeof architectureTrace> & {
+  activity?: string; inspect?: (node: string, index: number) => void;
+};
 const nodeIds = new Set(NODES.map(n => n.id));
 // These error labels identify the emitting component in conversation_circuit.py.
 const errorSources: Record<string, string> = {
@@ -14,29 +17,35 @@ const edgeIds = new Set(EDGES.map(e => e.from + '/' + e.to));
 // hops have no timestamps in the event stream, so display those lines dashed.
 const entryPaths: Record<string, string[]> = {
   chat: ['owner', 'next', 'gateway', 'core', 'chat'],
+  router: ['owner', 'voice', 'router'],
   editor: ['owner', 'next', 'gateway', 'sandbox', 'editor'],
 };
 
+export function stepNode(step?: CircuitStep) {
+  if (!step) return '';
+  if (step.node === 'error') return errorSources[step.label] || '';
+  return nodeIds.has(step.node) ? step.node : '';
+}
+
+export function transition(from: string, to: string): Segment[] {
+  if (from === to) return [];
+  if (edgeIds.has(from + '/' + to)) return [{key: from + '/' + to, inferred: false, reverse: false}];
+  if (edgeIds.has(to + '/' + from)) return [{key: to + '/' + from, inferred: false, reverse: true}];
+  const path = from === 'owner' ? entryPaths[to] : to === 'owner' ? entryPaths[from] : undefined;
+  if (!path) return [];
+  const segments = path.slice(1).map((node, i) => ({key: path[i] + '/' + node, inferred: true, reverse: to === 'owner'}));
+  return to === 'owner' ? segments.reverse() : segments;
+}
+
 export function architectureTrace(steps: CircuitStep[], index: number) {
   const visits = new Map<string, number>();
-  const lines = new Map<string, { inferred: boolean; reverse: boolean }>();
+  const lines = new Map<string, Segment>();
   let current = '';
-  let previous = '';
   for (let i = 0; i <= index && i < steps.length; i++) {
-    const step = steps[i];
-    current = step.node === 'error' ? errorSources[step.label] || '' : nodeIds.has(step.node) ? step.node : '';
-    // A tool name alone doesn't identify which server ran it. Keep the event in
-    // the step inspector without lighting an unrelated box.
+    const next = stepNode(steps[i]);
+    for (const segment of transition(current, next)) lines.set(segment.key, segment);
+    current = next;
     if (current) visits.set(current, i);
-    const forward = previous + '/' + current;
-    const back = current + '/' + previous;
-    if (edgeIds.has(forward)) lines.set(forward, { inferred: false, reverse: false });
-    else if (edgeIds.has(back)) lines.set(back, { inferred: false, reverse: true });
-    else if (previous === 'owner' && entryPaths[current]) {
-      const path = entryPaths[current];
-      path.slice(1).forEach((to, n) => lines.set(path[n] + '/' + to, { inferred: true, reverse: false }));
-    }
-    previous = current;
   }
-  return { current, visits, lines, failed: steps[index]?.node === 'error' || steps[index]?.label === '失敗' };
+  return {current, visits, lines, failed: steps[index]?.node === 'error' || steps[index]?.label === '失敗'};
 }

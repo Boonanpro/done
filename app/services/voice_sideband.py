@@ -187,7 +187,8 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     except Exception:
         pass
     detail = {k: str(output.get(k))[:120] for k in ('reason', 'error', 'replayed', 'accepted') if isinstance(output, dict) and output.get(k) is not None}   # outcome codes only, never content
-    record('function_done', delegation_id=str(delegation_id)[:40], name=item.get('name'), prefetched=early is not None,
+    from app.agent.activity_line import activity_phrase
+    record('function_done', activity=activity_phrase(item.get('name') or '', args), delegation_id=str(delegation_id)[:40], name=item.get('name'), prefetched=early is not None,
            elapsed_ms=round((time.monotonic()-started)*1000), output_chars=len(json.dumps(output, ensure_ascii=False)), **({'detail': detail} if detail else {}))
     return {'type': 'function_call_output', 'call_id': item.get('call_id'), 'output': json.dumps(output, ensure_ascii=False)[:12000], 'name': item.get('name')}
 

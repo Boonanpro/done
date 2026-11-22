@@ -61,7 +61,7 @@ def change(job_id, fn):
         notify()
         return state
 
-def event(state, kind, text, label=None):
+def event(state, kind, text, label=None, *, activity=None, ms=None, prompt=None):
     seq = state.get('seq', 0) + 1
     state['seq'] = seq
     item = {'seq': seq, 'kind': kind, 'text': text[:3000], 'at': now()}
@@ -72,6 +72,14 @@ def event(state, kind, text, label=None):
         item['applied_revision'] = revision
         item['applied_inputs'] = [dict(i) for i in state.get('inputs', [])
                                   if i.get('revision', 0) <= revision]
+    if kind == 'tool':
+        from app.agent.activity_line import activity_phrase
+        name, _, action = text.partition(':')
+        item['activity'] = activity or activity_phrase(name, {'action': action}) or '道具を使いました。'
+        if ms is not None:
+            item['ms'] = ms
+        if prompt:
+            item['prompt'] = prompt
     if label: item['label'] = label[:300]
     state.setdefault('events', []).append(item)
     state['events'] = state['events'][-300:]   # 40 lost the first minutes of a 75-step job (2026-09-23): the start is where the cause usually is

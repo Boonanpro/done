@@ -33,6 +33,9 @@ def announce(row) -> None:
         logger.debug("Run state not announced: %s", exc)
 
 
+RECORD_ACTIVE_WINDOW = 180
+
+
 ACTIVE_RUN_STATES = {
     AgentRunState.RUNNING.value,
     AgentRunState.AWAITING_APPROVAL.value,
