@@ -36,7 +36,7 @@ export interface ArchEdge {
 }
 
 export const W = 1000;
-export const H = 1040;
+export const H = 1320;
 export const BOX_H = 78;
 
 export const NODES: ArchNode[] = [
@@ -58,34 +58,34 @@ export const NODES: ArchNode[] = [
     line: '声で受け答えする。自分で答えられない頼みは、裏に任せる。' },
   { id: 'editor', name: 'エディターのダンと制作', model: 'Claude Code', icon: 'editor', x: 740, y: 470, w: 240, same: 'chat', skills: true, prompts: ['work/editor-handoff'],
     line: 'エディターで動画を作る・直す。チャットのダンと同じ決まりに、制作の決まり（プログラムの中）を足して読む。' },
-  { id: 'router', name: '振り分け', model: 'Jev', icon: 'router', x: 300, y: 594, w: 240,
+  { id: 'router', name: '振り分け', model: 'Jev', icon: 'router', x: 300, y: 688, w: 240,
     prompts: ['call/router-routes', 'call/router-ask', 'call/router-work', 'call/router-reply', 'call/router-calendar', 'call/router-promise-words', 'call/editor-place'],
     line: '通話のダンが任せた頼みを、どこへ回すか一瞬で選ぶ。' },
-  { id: 'editorTalk', name: 'エディターの「話す」', model: 'GPT-Live ＋ GPT-6 Astra', icon: 'editorTalk', x: 740, y: 594, w: 240,
+  { id: 'editorTalk', name: 'エディターの「話す」', model: 'GPT-Live ＋ GPT-6 Astra', icon: 'editorTalk', x: 740, y: 688, w: 240,
     prompts: ['code/editor-live', 'code/editor-reasoning', 'code/editor-conversation'],
     line: 'エディターで指した所を、声で直す。' },
-  { id: 'lookup', name: '調べもの係', model: 'DeepSeek', icon: 'lookup', x: 440, y: 744, w: 160,
+  { id: 'lookup', name: '調べもの係', model: 'DeepSeek', icon: 'lookup', x: 440, y: 924, w: 160,
     prompts: ['call/lookup-instructions'],
     line: '通話を止めずに、裏で調べる・記憶やメールを読む。' },
-  { id: 'stage', name: '画面係', model: 'GPT-5.4 mini', icon: 'stage', x: 615, y: 744, w: 170,
+  { id: 'stage', name: '画面係', model: 'GPT-5.4 mini', icon: 'stage', x: 615, y: 924, w: 170,
     prompts: ['call-code/stage-instructions', 'call-code/stage-flow-message', 'call-code/stage-flow-doc', 'call-code/stage-flow-assist', 'call-code/stage-flow-media'],
     line: '通話中に見せる画面（写真・地図・下書き）を描く。' },
-  { id: 'backend', name: '判断役', model: 'GPT-6 Luna', icon: 'backend', x: 800, y: 744, w: 180,
+  { id: 'backend', name: '判断役', model: 'GPT-6 Luna', icon: 'backend', x: 800, y: 924, w: 180,
     prompts: ['call/backend-instructions', 'call/backend-plain-rules', 'call/backend-background-rules', 'call/luna-rules', 'call-code/backend-tools', 'call-code/backend-background-lines', 'call/editor-place'],
     line: '迷う頼み・連絡・文書を、道具を使って判断し、下書きを書く（OpenAI のモデル）。' },
-  { id: 'parallel', name: '並行作業', model: 'Claude Code', icon: 'parallel', x: 355, y: 916, w: 290, group: 'work',
+  { id: 'parallel', name: '並行作業', model: '部屋の作業用モデル', icon: 'parallel', x: 355, y: 1096, w: 290, group: 'work',
     prompts: ['work/parallel-job-rules', 'work/confirmation-rule', 'call/call-job-note', 'call/editor-call-note', 'work/editor-handoff', 'call/voice-task', 'call/make-origin-note'], same: 'chat',
     line: '頼んだ部屋の会話を引き継いだ別のダンが、時間のかかる制作・調べものをする。起こすのはチャットのダン（並行作業の道具）と、振り分け（作る・直す）。' },
-  { id: 'codex', name: '別の部屋への頼み', model: 'Codex（GPT-6 Astra）', icon: 'codex', x: 30, y: 916, w: 290, group: 'work',
+  { id: 'codex', name: '別の部屋への頼み', model: 'Codex（GPT-6 Astra）', icon: 'codex', x: 30, y: 1096, w: 290, group: 'work',
     prompts: ['work/codex-job-rules', 'work/confirmation-rule', 'work/relay-header'],
     line: 'チャットのダンが別の部屋に頼んだ作業。結果はその部屋に「〇〇からの報告」で届く。' },
-  { id: 'api', name: '手順の再生', model: 'DeepSeek', icon: 'api', x: 680, y: 916, w: 290, group: 'work',
+  { id: 'api', name: '手順の再生', model: 'DeepSeek', icon: 'api', x: 680, y: 1096, w: 290, group: 'work',
     prompts: ['work/api-job-instructions', 'work/confirmation-rule', 'work/relay-header'],
     line: '判断役が起こす、一度やった手順の再生などの短い手続き。' },
 ];
 
 // 作業の部屋の枠（中の3つを囲む）
-export const WORK_FRAME = { x: 14, y: 880, w: 972, h: 126, name: '作業の部屋',
+export const WORK_FRAME = { x: 14, y: 1060, w: 972, h: 216, name: '作業の部屋',
   line: '終わると、通話中ならその通話で声で、そうでなければ頼んだ部屋のチャットへ報告する。' };
 
 export const EDGES: ArchEdge[] = [

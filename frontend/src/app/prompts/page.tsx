@@ -5,18 +5,17 @@
 // ダンの画面は html と body のスクロールを止めているので、この画面は自分の枠でスクロールする（11/17 まではスクロールできず、
 // 全文の欄まで行けなかった＝本人「見るだけで編集できない」）。
 import { Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 
 import { PromptsScreen } from '@/components/prompts/prompts-screen';
 
 function PromptsInner() {
-  const router = useRouter();
   const params = useSearchParams();
   const go = (next: { place: string; id?: string }) => {
     const q = new URLSearchParams();
     q.set('place', next.place);
     if (next.id) q.set('id', next.id);
-    router.replace(`/prompts?${q.toString()}`, { scroll: false });
+    window.history.replaceState(null, '', `/prompts?${q.toString()}`);
   };
   return (
     <div className="h-dvh overflow-y-auto overscroll-contain bg-[#faf8f4] text-stone-900 lg:overflow-hidden">
