@@ -168,3 +168,19 @@ def test_skill_library_discovers_manuals_and_nested_pages(store, monkeypatch, tm
     for invalid in ('camera/outside', 'camera/../private', 'camera/SKILL', 'camera//recipes/撮影'):
         with pytest.raises(KeyError):
             store.text('skill/' + invalid)
+
+
+def test_where_dan_works_is_marked_and_a_save_ends_it(store):
+    """2026-11-22: the screen lights the lines Dan is changing; Dan says where before he writes."""
+    assert store.working() == {}
+    routes = store.text('call/router-routes')
+    third = routes.split('\n')[2]
+    out = store.mark('call/router-routes', find=third, note='言い方')
+    assert (out['from'], out['to'], out['state']) == (3, 3, 'editing')
+    assert store.working()['id'] == 'call/router-routes' and store.working()['title']
+    with pytest.raises(ValueError):
+        store.mark('call/router-routes', find='全文に無い文')
+    store.save('call/router-job-started', '「{label}」を始めた。', by='dan', note='試し')
+    assert store.working()['state'] == 'saved' and store.working()['id'] == 'call/router-job-started'
+    store.save('call/router-job-started', '「{label}」を始めたよ。', by='owner')   # the owner's own save is not Dan's work
+    assert store.working()['state'] == 'saved'
