@@ -92,9 +92,11 @@ function ReplyBox({ onSend, placeholder, autoFocus }: { onSend: (text: string) =
 }
 
 export function ThreadCard({
-  thread, active, onFocus, onReply, onSettle, canWrite,
+  thread, gone, active, onFocus, onReply, onSettle, canWrite,
 }: {
   thread: Thread;
+  /** Its words are no longer in the text (rewritten since): kept by the paragraph they were in, struck through. */
+  gone?: boolean;
   active?: boolean;
   onFocus?: () => void;
   onReply: (text: string) => Promise<void>;
@@ -115,9 +117,14 @@ export function ThreadCard({
         thread.resolved && 'opacity-70',
       )}
     >
-      {thread.quote && (
+      {thread.quote && (gone ? (
+        <div data-testid="thread-gone" className="mb-1.5 border-l-2 border-stone-300 pl-2 text-[12px] text-stone-400">
+          <div className="text-[11px] font-semibold">元の文（今は書き換わっています）</div>
+          <div className="line-clamp-2 line-through">{thread.quote}</div>
+        </div>
+      ) : (
         <div className="mb-1.5 line-clamp-2 border-l-2 border-yellow-400 pl-2 text-[12px] text-stone-500">{thread.quote}</div>
-      )}
+      ))}
       <Messages thread={thread} />
       {canWrite && active && !thread.resolved && (
         <div onClick={e => e.stopPropagation()}>
