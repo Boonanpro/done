@@ -11,6 +11,7 @@ import { VoiceStage } from './voice-stage';
 import { WorkWaiting, isWorking } from './work-waiting';
 import { WaitingAudio } from './waiting-audio';
 import { QUIET_SPEECH_MIC, liftQuietSpeech } from './quiet-speech';
+import { playCallEndTone, playCallStartTone, voiceGain } from './call-tones';
 
 type Status = 'idle' | 'connecting' | 'connected' | 'error';
 type RtEvent = { type: string; [key: string]: unknown };
@@ -69,6 +70,8 @@ export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }:
 
   // ---- オーブ駆動用の音量計測 ----
   const audioCtxRef = useRef<AudioContext | null>(null);
+  // True from the start tone until the call ends: only a call that was open plays the hang-up tone.
+  const openCallRef = useRef(false);
   const micAnalyserRef = useRef<AnalyserNode | null>(null);
   const aiAnalyserRef = useRef<AnalyserNode | null>(null);
   const levelBufRef = useRef<Uint8Array<ArrayBuffer>>(new Uint8Array(new ArrayBuffer(512)));
@@ -137,6 +140,7 @@ export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }:
   }, [status,roomId,authHeaders,pushLog]);
 
   const disconnect = useCallback(() => {
+    if (openCallRef.current) { openCallRef.current = false; playCallEndTone(); }
     waitingAudioRef.current?.close(); waitingAudioRef.current = null;
     workingJobsRef.current = false;
     genRef.current += 1;
@@ -290,6 +294,22 @@ export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }:
       pc.ontrack = (e) => {
         const stream = e.streams[0] || new MediaStream([e.track]);
         if (audioEl) { audioEl.srcObject = stream; void audioEl.play().catch(() => {}); }
+        // Dan's voice plays louder than GPT-Live sends it, so the PC volume can stay low for other videos (11/22).
+        // The element keeps pulling the remote stream (Chrome plays a WebRTC stream into Web Audio only then) but is
+        // muted; the voice is heard through gain → limiter. If Web Audio fails, the element plays it as before.
+        try {
+          const voice = audioCtx.createMediaStreamSource(stream);
+          const gain = audioCtx.createGain();
+          gain.gain.value = voiceGain();
+          const limiter = audioCtx.createDynamicsCompressor();
+          limiter.threshold.value = -2; limiter.knee.value = 0; limiter.ratio.value = 20;
+          limiter.attack.value = 0.002; limiter.release.value = 0.2;
+          voice.connect(gain); gain.connect(limiter); limiter.connect(audioCtx.destination);
+          void audioCtx.resume().catch(() => {});
+          if (audioEl) audioEl.muted = true;
+        } catch {
+          if (audioEl) audioEl.muted = false;
+        }
         // AI音声の音量 → オーブの雲の揺らめき
         try {
           const src = audioCtx.createMediaStreamSource(stream);
@@ -354,6 +374,8 @@ export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }:
       finally { clearTimeout(timeout); }
       if (!live()) { cleanupLocal(); return; }
       setStatus('connected');
+      // The call can be spoken into from here: say so with a tone (the owner could not tell when, 11/22).
+      openCallRef.current = true; playCallStartTone();
       // Live is full duplex. Observe actual audio instead of guessing from backend turns.
       const samples = new Float32Array(1024);
       guardianTimerRef.current = setInterval(() => {
