@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+STARTED = '作業「{label}」は作業の部屋で始まっている。結果はまだ出ていない。結果や確かめたいことが出たら届く。'
 BEFORE = json.loads((ROOT / 'tests' / 'fixtures' / 'prompts_before_move.json').read_text(encoding='utf-8'))
 
 
@@ -45,7 +46,7 @@ def test_moved_text_is_the_same_as_in_the_code_before(store):
     assert '\n' + store.text('work/codex-job-rules') + '\n' == BEFORE['command_job_runner.codex_block']
     assert store.fill('call/persona', owner='本田樹さん（呼び名はみきさん）', whose='みきさん') == BEFORE['voice_plain.persona(本田樹,みきさん)']
     assert store.text('work/relay-header') == '【作業の依頼】'
-    assert store.text('call/router-job-started') == '取りかかった。分かったことから伝える。'
+    assert store.text('call/router-job-started') == STARTED
 
 
 def test_every_catalog_entry_reads(store):
@@ -60,13 +61,13 @@ def test_a_saved_change_reaches_the_code_at_once_and_can_be_put_back(store):
     from app.services import voice_router
     first = store.history('call/router-job-started')
     assert [r['by'] for r in first] == ['seed']
-    out = store.save('call/router-job-started', '始めたよ。', by='owner', note='言い方を変える',
-                     base_sha=store.sha('取りかかった。分かったことから伝える。'))
+    out = store.save('call/router-job-started', '「{label}」を始めたよ。', by='owner', note='言い方を変える',
+                     base_sha=store.sha(STARTED))
     assert out['saved']
-    assert store.text('call/router-job-started') == '始めたよ。'
+    assert store.text('call/router-job-started') == '「{label}」を始めたよ。'
     assert [r['by'] for r in store.history('call/router-job-started')] == ['owner', 'seed']
     store.revert('call/router-job-started', first[0]['sha'])
-    assert store.text('call/router-job-started') == '取りかかった。分かったことから伝える。'
+    assert store.text('call/router-job-started') == STARTED
     # a sections file: the code sees the change and the route keys are kept
     routes = store.text('call/router-routes').replace('今の時刻・日付・曜日が要る', '今の時刻が要る')
     store.save('call/router-routes', routes, by='owner')
