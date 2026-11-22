@@ -10,8 +10,8 @@ speak: |
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: 5eae7cfe6a39bb08
-described: 27bad43ac85c1ff8
+fingerprint: 6375641a38dc229b
+described: 5f10b29cfefdc811
 last_review: "2026-11-22 説明は変えない: 一覧と全文の並びは記載どおり"
 ---
 # ダンを動かしている指示文
@@ -22,7 +22,7 @@ last_review: "2026-11-22 説明は変えない: 一覧と全文の並びは記�
 ## 中にある物
 
 - 構成図（components/prompts/architecture.ts。箱と矢印はコードで確かめた呼び出し順で、根拠のファイルは同じファイルの頭に書いてある。仕組みを変えたらここも直す）。スマホの幅では図が横に広く、押した箱の所まで横に送る。
-- 場所ごとの一覧。札の色: 緑＝みきさんが直した、黄＝ダンが直した、青＝元の文のまま、灰＝プログラムの中（読むだけ）。
+- 場所ごとの一覧。札: 直したことのある文は「最終更新 月/日 時:分」だけ（誰が直したか・元の文のままかは出さない。11/22 本人）、灰＝プログラムの中（読むだけ）。
 - 全文の欄（「この文は、ここでそのまま書き直せます」。欄は中身の高さまで伸びる）、下に貼り付いた保存の帯（書き直すと「なぜ直したか」・直す前に戻す・保存が出る）、たたんだ「この文について」と「履歴」（押すとその版、この版に戻す・プログラムの中にあった頃に直された日）。
 - スマホの幅では、一覧と全文が入れ替わり（「一覧に戻る」）。PC でも 1280 より狭い時（開発室の中など）は、一覧と全文が入れ替わり、右に会話の列が出る。
 - 「ダンと話して直す」の会話（2026-11-21 本人「指示文の見直しはお前と一緒にやった方が良いけど、ページにチャットが無いからやりにくい」）。PC は全文の横の列（スクロールしても見えたまま）、スマホは右下の「ダンと話す」で下から出る。部屋は1つ（「ダン開発室: 指示文の見直し」、一覧に出さない。app/api/prompts_screen.py の /prompts/chat、~/.dan/workspace/prompts/.chat/chat.json）で、/prompts と開発室の「指示文」が同じ部屋で話す。
@@ -60,5 +60,5 @@ last_review: "2026-11-22 説明は変えない: 一覧と全文の並びは記�
 - 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」
 - 見出し: 「プログラムの中にあった頃に直された日」、「ダンを動かしている指示文」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "9201b26078", "app/prompts/catalog.json": "c75d3461c7", "app/services/prompt_store.py": "7d17a36062", "frontend/src/app/prompts/page.tsx": "486f5c8762", "frontend/src/components/prompts/architecture.ts": "63ac2258bd", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "9d705794fe", "frontend/src/components/prompts/prompts-screen.tsx": "5ee1be863d", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "146206af99"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "9201b26078", "app/prompts/catalog.json": "c75d3461c7", "app/services/prompt_store.py": "7d17a36062", "frontend/src/app/prompts/page.tsx": "486f5c8762", "frontend/src/components/prompts/architecture.ts": "63ac2258bd", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "9d705794fe", "frontend/src/components/prompts/prompts-screen.tsx": "5b0aec960c", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "146206af99"} -->
 <!-- place_map:auto:end -->
