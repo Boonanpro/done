@@ -68,6 +68,12 @@ async def prompt_sha(id: str, current_user: TokenData = Depends(get_current_user
     except KeyError: raise HTTPException(404, 'その指示文はありません。')
 
 
+@router.get('/working')
+async def prompt_working(current_user: TokenData = Depends(get_current_user)):
+    """Where Dan is working now (the lines the screen lights), or {}."""
+    return await asyncio.to_thread(prompt_store.working)
+
+
 class SaveBody(BaseModel):
     id: str
     text: str
@@ -114,9 +120,10 @@ CHAT_DESCRIPTION = """この部屋は、みきさんがダンを動かしてい�
 - みきさんの発言の頭の <dan-context> に、今開いている指示文（id・題・ファイル・誰が読むか・いつ効くか）と、選んでいる行と文、まだ保存していない書きかけがあればその違いが入っています。「ここ」「この行」「これ」はそれを指します。
 - 「何のため？」「消したらどうなる？」のような質問には、その文を読むコードと効く場面を実際に確かめて答えます。答えるだけの時は文を変えません。
 - 直してと頼まれた時だけ直します。直し方は1つだけです: `python /Users/mikihonda/done/scripts/prompts.py save <id> --note "<なぜ直したか。みきさんのどの言葉か>"` に新しい全文を標準入力で渡します。ファイルを直接書き換えたり、Python のコードの中に文を足したりしません。
-- 保存すると、みきさんの画面の全文が数秒で新しい版に替わり、変わった所と「元に戻す」が出ます。返事には、何をどう変えたかを1〜3文で書きます（全文を貼り直さない）。
+- 直す文を決めたら、新しい文を考える前に `python /Users/mikihonda/done/scripts/prompts.py mark <id> --find "<これから直す所の今の文>"`（または `--lines 12-15`）を呼びます。みきさんの画面でその文が開き、その行が光るので、ダンがどこを直しているかが見えます。
+- 保存すると、みきさんの画面の全文が数秒で新しい版に替わり、変わった行が光り、変わった所と「元に戻す」が出ます。返事には、何をどう変えたかを1〜3文で書きます（全文を貼り直さない）。
 - みきさんが書きかけを保存していない時は、その書きかけを消さないよう、直す前にどちらを生かすか聞きます。
-- 「読むだけ」の文（まだプログラムの中にある文）は、この部屋では書き換えません。直したいと言われたら、画面で直せる形に移す作業になると伝えて、やってよいか聞きます。
+- 「読むだけ」の文（まだプログラムの中にある文）と手順書は、この部屋では書き換えません。直したいと言われたら、画面で直せる形に移す作業になると伝えて、やってよいか聞きます。
 - 指示文を書き換えるのは取り返しのつく操作です（履歴から戻せます）。頼まれた直しは、聞き返さずにそのまま進めます。"""
 CHAT_FILE = 'chat.json'
 
@@ -151,6 +158,8 @@ async def prompts_chat_room(current_user: TokenData = Depends(get_current_user))
         if saved.get('project_id'):
             project = await service.get_project(saved['project_id'], current_user.user_id)
             if project and project.get('room_id'):
+                if (project.get('description') or '') != CHAT_DESCRIPTION:   # how Dan works in this room changed
+                    await service.update_project(project['id'], current_user.user_id, description=CHAT_DESCRIPTION)
                 return {'project_id': project['id'], 'room_id': project['room_id'], 'title': CHAT_TITLE}
         project = await service.create_project(user_id=current_user.user_id, title=CHAT_TITLE, description=CHAT_DESCRIPTION,
                                                origin_room_id=DEV_LEAD_ROOM, metadata={'hidden': True})

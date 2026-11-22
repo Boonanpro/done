@@ -113,7 +113,10 @@ async def test_site_work_goes_to_chat_dan_with_the_calls_transcript(monkeypatch)
     head, transcript = params['task'].split(voice_router.TRANSCRIPT, 1)
     assert 'しゅんさんとみひろさんなんですけど' in head and '六日までに' in head   # the request said over two turns
     assert '本人: しゅんさんとみひろさんなんですけど' in transcript and '【途中】' in transcript
-    assert sent[-1]['type'] == 'session.commentary.append' and sent[-1]['delegation_id'] == 'del_2'   # before the acknowledgement: said once
+    # a state, given silently after Dan's own acknowledgement, with the name of the work (2026-11-22)
+    assert sent[-1]['type'] == 'session.thinking.append' and sent[-1]['delegation_id'] == 'del_2'
+    assert time.monotonic() - created >= voice_router.ACK_DELAY_MS / 1000
+    assert '{label}' not in sent[-1]['content']
     assert r.jobs == {'job-1': voice_router.label_of('しゅんさんとみひろさんなんですけど六日までに両方空いてる時間を、続けて入れられる所で')}
 
 
@@ -423,3 +426,23 @@ def test_the_connection_follows_the_model_named_not_the_lookups_model(monkeypatc
     assert 'deepseek' in str(voice_lookup._client().base_url)
     assert 'deepseek' in str(voice_lookup._client('deepseek-v4-pro').base_url)
     assert 'openai.com' in str(voice_lookup._client('gpt-6-luna').base_url)
+
+
+def test_notice_of_work_begun_is_never_the_line_dan_says(monkeypatch):
+    """2026-11-22: the notice reached the speech model before its own acknowledgement and was said as it was, the same
+    sentence every call. It goes in silently, after the API has asked Dan for his own words; an answer is still said."""
+    sent, log = [], []
+    async def send(event): sent.append(event)
+    monkeypatch.setattr(voice_router, 'ACK_DELAY_MS', 60)
+    async def run():
+        r = voice_router.Router('s', 'u', 'r', SimpleNamespace(), send, lambda phase, **f: log.append((phase, f)), {})
+        began = time.monotonic()
+        await r.reply('d1', began, '作業「台本の直し」は作業の部屋で始まっている。', spoken=False)
+        waited = time.monotonic() - began
+        await r.reply('d2', time.monotonic(), '明日は晴れ。')
+        return waited
+    waited = asyncio.run(run())
+    assert waited >= .06
+    assert [e['type'] for e in sent] == ['session.thinking.append', 'session.commentary.append']
+    assert sent[0]['delegation_id'] == 'd1' and '台本の直し' in sent[0]['content']
+    assert [f['spoken'] for p, f in log if p == 'route_answered'] == [False, True]

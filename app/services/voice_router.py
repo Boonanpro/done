@@ -381,15 +381,18 @@ class Router:
         return await self.luna(delegation_id, created)
 
     async def reply(self, delegation_id, created, text, spoken=True):
-        """The answer to this delegation, through the call's one entry (voice_say). Before the automatic acknowledgement it
-        is the one thing said; after Dan has started speaking (the acknowledgement was said), a notice of work begun goes
-        in quietly instead, or Dan says 「調べるね」 and then 「調べ始めた」."""
+        """The answer to this delegation, through the call's one entry (voice_say). An answer (spoken) is the one thing
+        said. A notice of work begun (not spoken) is a state, not a line: it is given silently, and only after the API
+        has asked Dan for his own acknowledgement (ACK_DELAY_MS). Given earlier it was the one thing said, so Dan
+        said the notice itself, the same sentence every time (2026-11-22, the owner: 毎回テンプレートのように言ってくる)."""
         from app.services.voice_say import say
-        late = (time.monotonic() - created) * 1000 >= ACK_DELAY_MS - 50
         target = None if delegation_id.startswith('auto-') else delegation_id   # started by a promise: no delegation to answer
         if target is None and not str(text or '').strip(): return
-        said = await say(self.send, 'answer' if spoken else 'started', text, None, target, quiet=not spoken and late)
-        self.record('route_answered', delegation_id=delegation_id[:40], spoken=spoken or not late, chars=len(said),
+        if not spoken:
+            early = ACK_DELAY_MS / 1000 + .05 - (time.monotonic() - created)
+            if early > 0: await asyncio.sleep(early)
+        said = await say(self.send, 'answer' if spoken else 'started', text, None, target, quiet=not spoken)
+        self.record('route_answered', delegation_id=delegation_id[:40], spoken=spoken, chars=len(said),
                     after_ms=round((time.monotonic() - created) * 1000))
 
     # -- the routes -----------------------------------------------------------------------------------------------
@@ -461,7 +464,7 @@ class Router:
             return await self.luna(delegation_id, created)
         label = label_of(words)
         call.start('この通話で本人が今頼んだこと（言葉のまま）: ' + words, label)
-        await self.reply(delegation_id, created, '調べ始めた。', spoken=False)
+        await self.reply(delegation_id, created, f'調べもの「{label}」を裏で調べ始めた。答えはまだ出ていない。', spoken=False)
 
     async def show(self, target, delegation_id, created):
         if self.stage is None:
@@ -480,7 +483,7 @@ class Router:
         job_id = (out.get('receipt') or {}).get('id')
         if job_id: self.jobs[job_id] = label
         self.record('route_job_started', route=route, job_id=str(job_id)[:8])
-        await self.reply(delegation_id, created, prompt_store.text('call/router-job-started'), spoken=False)
+        await self.reply(delegation_id, created, prompt_store.fill('call/router-job-started', label=label), spoken=False)
 
     async def stop(self, route, delegation_id, created):
         _, kind, work_id = route.split(':', 2)
