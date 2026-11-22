@@ -35,8 +35,8 @@ async def list_jobs(project_id: str, current_user: TokenData = Depends(get_curre
     room_id = await _room(project_id, current_user.user_id)
     rows = await asyncio.to_thread(runner.room_jobs, current_user.user_id, room_id, 24, False)
     return {"jobs": [runner.public(s) for s in rows],
-            "models": [{"id": key, "label": label} for key, label in runner.LABELS.items()],
-            "default_model": await asyncio.to_thread(runner.room_model, room_id)}
+            "models": [{"id": key, "label": runner.LABELS.get(key, key)} for key in runner.MODELS],
+            "default_model": runner.DEFAULT_MODEL}
 
 
 @router.post("/{project_id}/parallel-jobs")

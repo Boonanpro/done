@@ -348,10 +348,11 @@ def _create_job(job_id: str, room_id: str) -> None:
     from app.services.command_center import report_id
     from app.core.generations import read as generation_read
     user, project = _owner_and_project(room_id)
+    from app.services.parallel_job_runner import DEFAULT_MODEL
     state.create(job_id, user_id=user, room_id=room_id, origin_room_id=room_id, origin_project_id=project,
                  task=prompt(job_id), report_message_id=report_id(job_id),
                  queue_owner='process' if generation_read('active') else 'core',
-                 engine='parallel', model='opus', quiet=True, title='動画の指摘から編集の手順書を育てる',
+                 engine='parallel', model=DEFAULT_MODEL, quiet=True, title='動画の指摘から編集の手順書を育てる',
                  origin_note='内部の学習記録だけに残し、チャットへ通知しない。')
 
 

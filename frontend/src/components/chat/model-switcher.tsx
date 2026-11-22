@@ -6,6 +6,7 @@ import { api, type SessionModelResponse } from '@/lib/api-client';
 
 interface ModelSwitcherProps {
   roomId: string;
+  disabled?: boolean;
 }
 
 /**
@@ -15,7 +16,7 @@ interface ModelSwitcherProps {
  * Dan's DB, so the next turn on the other backend starts from a DB reseed.
  * The server refuses the change while a turn is running (409).
  */
-export function ModelSwitcher({ roomId }: ModelSwitcherProps) {
+export function ModelSwitcher({ roomId, disabled = false }: ModelSwitcherProps) {
   const queryClient = useQueryClient();
   const queryKey = ['session-model', roomId];
   const { data } = useQuery<SessionModelResponse>({
@@ -74,7 +75,7 @@ export function ModelSwitcher({ roomId }: ModelSwitcherProps) {
         aria-label="チャットのモデル"
         aria-busy={mutation.isPending}
         value={mutation.isPending ? mutation.variables : current}
-        disabled={!data.can_switch || mutation.isPending}
+        disabled={disabled || !data.can_switch || mutation.isPending}
         onChange={(e) => mutation.mutate(e.target.value)}
         className="max-w-[9.5rem] cursor-pointer bg-transparent text-xs outline-none disabled:cursor-not-allowed"
       >

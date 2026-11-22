@@ -343,7 +343,7 @@ async def _start_parallel_codex(owner, job_id, row, project, instructions, mcp):
     import logging
     from app.agent.cli_runner import _load_session, _build_reseed_context
     from app.agent.codex_runner import thread_id_from_session
-    from app.services.parallel_job_runner import room_model
+    from app.services.parallel_job_runner import MODELS, room_model
     log = logging.getLogger(__name__)
     s = state.read(job_id)
     await owner.rpc('initialize', {'clientInfo': {'name': 'dan_parallel_job', 'version': '1.0'}, 'capabilities': {'experimentalApi': True}})
@@ -351,7 +351,7 @@ async def _start_parallel_codex(owner, job_id, row, project, instructions, mcp):
     account = await owner.rpc('account/read', {})
     if (account.get('account') or {}).get('type') not in ('chatgpt', 'chatgptAuthTokens'):
         raise RuntimeError('CodexをChatGPT契約でログインしてください。APIキー課金では実行しません。')
-    common = {'model': _current_model('gpt-6-astra'), 'cwd': str(Path(__file__).resolve().parents[2]), 'approvalPolicy': 'never',
+    common = {'model': _current_model(MODELS['astra']), 'cwd': str(Path(__file__).resolve().parents[2]), 'approvalPolicy': 'never',
               'sandbox': 'danger-full-access', 'developerInstructions': instructions,
               'config': {'model_reasoning_effort': 'high', 'web_search': 'live', 'mcp_servers': mcp}}
     fresh = [i['text'] for i in s['inputs'] if i['revision'] > s['applied_revision']]

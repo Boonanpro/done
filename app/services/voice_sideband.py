@@ -657,11 +657,9 @@ async def after_call(user_id, room_id, turns, began_iso, decisions_out=None, com
                 logger.warning('call handoff to running job %s failed: %s', target['id'][:8], exc)
         if receipt is None:
             try:
-                # chat Dan on the room's model, as the call's own work (voice_router.start_chat_dan): on 11/6 21:36 the left-over
+                # Parallel work, as the call's own work (voice_router.start_chat_dan): on 11/6 21:36 the left-over
                 # train request ran on DeepSeek (WORK_ENGINE 'api') and pressed an unpressable page 48 times in 3.5 min.
-                from app.services.parallel_job_runner import room_model
-                model = await asyncio.to_thread(room_model, room_id)
-                receipt = await execute({'action': 'work', 'task': AFTER_TASK.format(task=tasks[:2000], context=path), 'engine': 'make', 'model': model}, room_id, user_id)
+                receipt = await execute({'action': 'work', 'task': AFTER_TASK.format(task=tasks[:2000], context=path), 'engine': 'make'}, room_id, user_id)
             except Exception as exc:
                 receipt = {'accepted':False, 'error_type':type(exc).__name__}
                 logger.exception('call handoff failed room=%s', room_id)

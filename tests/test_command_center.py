@@ -114,6 +114,12 @@ class CommandCenterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['report_message_id'], cc.report_id(result['receipt']['id']))
         self.projects.get_project.assert_not_called()
 
+    async def test_parallel_work_and_voice_make_default_to_astra(self):
+        for engine in ('parallel', 'make'):
+            with self.subTest(engine=engine):
+                await cc.execute({'action': 'work', 'engine': engine, 'task': '作業して'}, 'hub-room', 'owner')
+                self.assertEqual(self.local.call_args.kwargs['model'], 'astra')
+
     async def test_long_voice_handoff_is_persisted_without_clipping(self):
         task = '依頼' * 2500 + '最後の条件:送信しない'
         result = await cc.execute({'action':'work','task':task}, 'hub-room','owner',voice_handoff=True)
