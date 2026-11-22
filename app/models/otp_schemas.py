@@ -169,7 +169,8 @@ OTP_LINK_CONTEXT_KEYWORDS = [
     "reset", "verify", "verification", "confirm", "authenticate",
     "sign in", "log in", "login", "one time", "magic", "tap to",
     "click the link", "secure link", "password",
-    "パスワード", "再設定", "リセット", "認証", "確認", "ログイン",
+    "sign on", "signin", "magic link",
+    "パスワード", "再設定", "リセット", "認証", "確認", "ログイン", "サインイン",
     "本人確認", "ワンタイム", "タップ",
 ]
 
