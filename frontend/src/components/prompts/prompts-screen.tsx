@@ -6,7 +6,7 @@
 // 使う所: /prompts（app/prompts/page.tsx）と、開発室のボードの「指示文」（artifacts/dev-lead）。
 // 裏側は app/api/prompts_screen.py、文の置き場所と履歴は app/services/prompt_store.py。
 import { useCallback, useDeferredValue, useId, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { ArrowLeft, BookOpen, Clapperboard, Network, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, ChevronRight, Clapperboard, Cpu, Network, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, Sparkles, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { READER_EXAMPLES, readerGroups, ReaderSkills } from './reader-skills';
@@ -16,9 +16,8 @@ import { SideResizeHandle, useSideWidth } from '@/components/ui/side-resize';
 import { ApiError } from '@/lib/api-client';
 import { promptsApi, type PromptItem, type PromptSummary, type PromptVersion, type PromptWorking } from '@/lib/prompts-api';
 import { cn } from '@/lib/utils';
-import { BOX_H, EDGES, H, NODES, W, WORK_FRAME, type ArchEdge, type ArchNode } from './architecture';
+import { BOX_H, EDGES, H, NODES, VIDEO_EDGES, VIDEO_H, VIDEO_NODES, VIDEO_W, W, WORK_FRAME, type ArchEdge, type ArchNode } from './architecture';
 import { ConversationCircuit } from './conversation-circuit';
-import { VideoFlowView } from './video-flow';
 import type { Trace } from './architecture-trace';
 import { diffText, hunks, lineDiff } from './line-diff';
 import { PromptsChat, TalkButton, type PromptChatContext } from './prompts-chat';
@@ -53,7 +52,10 @@ function DiffView({ before, after }: { before: string; after: string }) {
 const WHO: Record<string, string> = { owner: 'みきさん', dan: 'ダン', seed: '元の文' };
 // 前の画面（家の絵）の場所の名前で開かれた時の行き先
 const OLD_PLACE: Record<string, string> = { work: 'parallel' };
-const BY_ID = new Map(NODES.map(n => [n.id, n]));
+const BY_ID = new Map([...NODES, ...VIDEO_NODES].map(n => [n.id, n]));
+const VIDEO_IDS = new Set(VIDEO_NODES.map(n => n.id));
+/** 「動画を作る・直す時」の枝を見ているか（?place=video か、その中の箱） */
+export const inVideo = (place: string) => place === 'video' || VIDEO_IDS.has(place);
 
 export function nodeOf(place: string): ArchNode | undefined {
   return BY_ID.get(OLD_PLACE[place] || place);
@@ -91,7 +93,7 @@ function StateBadge({ p }: { p: Pick<PromptSummary, 'readonly' | 'last_by' | 'la
 // ---- 構成図 ----
 function anchor(n: ArchNode, side: 't' | 'b' | 'l' | 'r', at?: number): [number, number] {
   if (side === 't') return [n.x + (at ?? n.w / 2), n.y];
-  if (side === 'b') return [n.x + (at ?? n.w / 2), n.y + BOX_H + (n.id in READER_EXAMPLES || n.id === 'voice' ? 84 : 0)];
+  if (side === 'b') return [n.x + (at ?? n.w / 2), n.y + BOX_H + (VIDEO_IDS.has(n.id) ? 0 : n.id in READER_EXAMPLES || n.id === 'voice' ? 84 : 0)];
   if (side === 'l') return [n.x, n.y + BOX_H / 2];
   return [n.x + n.w, n.y + BOX_H / 2];
 }
@@ -110,43 +112,45 @@ function edgePath(e: ArchEdge) {
   return { d: `M${x1},${y1} C${c1[0]},${c1[1]} ${c2[0]},${c2[1]} ${x2},${y2}`, mx, my };
 }
 
-function Diagram({ skills, onSkills, counts, active, glow, onPick, trace }: { trace?: Trace; skills: PromptSummary[]; onSkills: (reader: string, id?: string) => void; counts: Record<string, number>; active: string; glow?: string; onPick: (id: string) => void }) {
+function Diagram({ skills, onSkills, counts, active, glow, onPick, trace, video = false }: { trace?: Trace; skills: PromptSummary[]; onSkills: (reader: string, id?: string) => void; counts: Record<string, number>; active: string; glow?: string; onPick: (id: string) => void; video?: boolean }) {
+  // 同じ描き方で、全体の構成図と「動画を作る・直す時」の枝の図を描く
+  const nodes = video ? VIDEO_NODES : NODES, W_ = video ? VIDEO_W : W, H_ = video ? VIDEO_H : H;
   const wrap = useRef<HTMLDivElement>(null);
   const marker = useId().replace(/:/g, '');
   const [scale, setScale] = useState(1);
   useLayoutEffect(() => {
     const el = wrap.current;
     if (!el) return;
-    const fit = () => setScale(Math.min(1, Math.max(0.85, el.clientWidth / W)));
+    const fit = () => setScale(Math.min(1, Math.max(0.85, el.clientWidth / W_)));
     fit();
     const ro = new ResizeObserver(fit);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [W_]);
   // 図が枠より広い時（スマホ）は、押した箱（無ければ真ん中の通話の列）が見える所まで横に送る
   useEffect(() => {
     const el = wrap.current;
     if (!el || el.scrollWidth <= el.clientWidth) return;
-    const n = BY_ID.get(active) || BY_ID.get('voice')!;
+    const n = (active && nodes.find(x => x.id === active)) || BY_ID.get(video ? 'v-owner' : 'voice')!;
     el.scrollTo({ left: Math.max(0, (n.x + n.w / 2) * scale - el.clientWidth / 2), behavior: 'smooth' });
-  }, [active, scale]);
-  const previews = useMemo(() => Object.fromEntries(Object.entries(READER_EXAMPLES).map(([reader, example]) => {
+  }, [active, scale, nodes, video]);
+  const previews = useMemo(() => video ? {} as Record<string, { example?: { request: string; page: PromptSummary }; count: number }> : Object.fromEntries(Object.entries(READER_EXAMPLES).map(([reader, example]) => {
     const entries = readerGroups(reader, skills).flatMap(g => g.entries);
     return [reader, { example: entries.find(e => e.page.id === 'skill/' + example), count: entries.length }];
-  })), [skills]);
-  const edges = useMemo(() => EDGES.map(e => ({ e, ...edgePath(e) })), []);
+  })), [skills, video]);
+  const edges = useMemo(() => (video ? VIDEO_EDGES : EDGES).map(e => ({ e, ...edgePath(e) })), [video]);
   return (
     <div ref={wrap} className="w-full overflow-x-auto rounded-xl border border-stone-200 bg-white">
-      <div style={{ width: W * scale, height: H * scale }} className="relative mx-auto">
-        <div style={{ width: W, height: H, transform: `scale(${scale})`, transformOrigin: '0 0' }} className="absolute left-0 top-0">
-          <div className="absolute rounded-2xl border-2 border-dashed border-stone-300 bg-stone-50"
+      <div style={{ width: W_ * scale, height: H_ * scale }} className="relative mx-auto">
+        <div style={{ width: W_, height: H_, transform: `scale(${scale})`, transformOrigin: '0 0' }} className="absolute left-0 top-0">
+          {!video && <><div className="absolute rounded-2xl border-2 border-dashed border-stone-300 bg-stone-50"
             style={{ left: WORK_FRAME.x, top: WORK_FRAME.y, width: WORK_FRAME.w, height: WORK_FRAME.h }}>
             <span className="absolute left-3 top-1.5 text-[13px] font-bold text-stone-600">{WORK_FRAME.name}</span>
           </div>
           <p className="absolute text-[12px] text-stone-500" style={{ left: WORK_FRAME.x + 4, top: WORK_FRAME.y + WORK_FRAME.h + 6, width: WORK_FRAME.w }}>
             {WORK_FRAME.line}
-          </p>
-          <svg width={W} height={H} className="absolute left-0 top-0 overflow-visible" aria-hidden="true">
+          </p></>}
+          <svg width={W_} height={H_} className="absolute left-0 top-0 overflow-visible" aria-hidden="true">
             <defs>
               <marker id={marker} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                 <path d="M0,0 L10,5 L0,10 z" fill="#78716c" />
@@ -170,7 +174,7 @@ function Diagram({ skills, onSkills, counts, active, glow, onPick, trace }: { tr
             <span key={`l-${e.from}-${e.to}`} className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-white/95 px-1 text-[11px] leading-tight text-stone-500"
               style={{ left: mx, top: my }}>{e.label}</span>
           ))}
-          {NODES.map(n => {
+          {nodes.map(n => {
             const on = n.id === active, count = counts[n.id] || 0;
             return (
               <div key={n.id}>
@@ -189,13 +193,14 @@ function Diagram({ skills, onSkills, counts, active, glow, onPick, trace }: { tr
                   <span className="line-clamp-2 block text-[14px] font-bold leading-tight text-stone-900">{n.name}</span>
                   <span className="mt-0.5 block truncate text-[11px] leading-tight text-stone-500">{n.model}</span>
                   {count ? <span className="mt-1 inline-block rounded-full bg-amber-100 px-1.5 text-[11px] font-semibold text-amber-900">指示文 {count}</span>
-                    : n.same ? <span className="mt-1 inline-block text-[11px] text-stone-400">{BY_ID.get(n.same)?.name}と同じ文</span> : null}
+                    : n.same ? <span className="mt-1 inline-block text-[11px] text-stone-400">{BY_ID.get(n.same)?.name}と同じ文</span>
+                    : n.programs?.length ? <span className="mt-1 inline-block rounded-full bg-sky-100 px-1.5 text-[11px] font-semibold text-sky-900">プログラム {n.programs.length}</span> : null}
                 </span>
               </button>
               {trace?.current === n.id && trace.activity && <span data-flow-bubble title={trace.activity}
                 className="pointer-events-none absolute z-10 max-w-[260px] truncate rounded-lg bg-emerald-950 px-3 py-1.5 text-xs font-semibold text-white shadow"
-                style={{left:n.x + n.w / 2 < W / 2 ? n.x + n.w + 7 : undefined,
-                        right:n.x + n.w / 2 >= W / 2 ? W - n.x + 7 : undefined, top:n.y+16}}>{trace.activity}</span>}
+                style={{left:n.x + n.w / 2 < W_ / 2 ? n.x + n.w + 7 : undefined,
+                        right:n.x + n.w / 2 >= W_ / 2 ? W_ - n.x + 7 : undefined, top:n.y+16}}>{trace.activity}</span>}
               {(previews[n.id] || n.id === 'voice') && <div style={{left:n.x + 3, top:n.y + BOX_H, width:n.w - 6, height:84}}
                 className="absolute flex flex-col justify-center rounded-b-xl border border-t-0 border-teal-300 bg-teal-50 px-2 text-teal-950">
                 {n.id === 'voice' ? <button type="button" className="text-left hover:underline" onClick={() => onSkills('parallel')}>
@@ -203,7 +208,10 @@ function Diagram({ skills, onSkills, counts, active, glow, onPick, trace }: { tr
                 </button> : <>
                   <button type="button" aria-label={n.name + 'が読むスキル'} onClick={() => onSkills(n.id)}
                     className="flex min-h-7 items-center gap-1 text-[13px] font-bold hover:underline"><BookOpen size={14} />スキル {previews[n.id].count || ''}<span className="ml-auto">すべて ›</span></button>
-                  {previews[n.id].example && <button type="button" onClick={() => onSkills(n.id, previews[n.id].example!.page.id)}
+                  {n.video ? <button type="button" data-video-branch={n.id} onClick={() => onPick('video')}
+                    className="flex items-center gap-1 rounded border border-violet-300 bg-violet-50 px-2 py-1 text-left text-violet-950 hover:border-violet-600">
+                    <Clapperboard size={14} className="shrink-0" /><span className="min-w-0 flex-1 truncate text-[13px] font-bold">動画を作る・直す時の中</span><ChevronRight size={14} className="shrink-0" />
+                  </button> : previews[n.id].example && <button type="button" onClick={() => onSkills(n.id, previews[n.id].example!.page.id)}
                     className="rounded border border-teal-200 bg-white px-2 py-1 text-left hover:border-teal-600">
                     <span className="block truncate text-[13px] font-semibold">{previews[n.id].example!.request}</span>
                     <span className="block truncate text-[11px] text-teal-800">{previews[n.id].example!.page.title}</span>
@@ -586,10 +594,11 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
   const reader = place.startsWith('reader-') && place.slice(7) in READER_EXAMPLES ? nodeOf(place.slice(7)) : undefined;
-  const library = !reader && (place === 'skills' || id.startsWith('skill/'));
-  const video = !reader && !library && place === 'video';   // 動画を編集する作業の図（2026-11-23）
+  // 「動画を作る・直す時」の枝（2026-11-23）。構成図の箱から降りる図で、中の箱を押すと下に読む文・プログラムが出る
+  const video = !reader && inVideo(place);
+  const library = !reader && !video && (place === 'skills' || id.startsWith('skill/'));
   const mapTop = useRef<HTMLDivElement>(null);
-  const node = reader || (library || video ? undefined : nodeOf(place));
+  const node = reader || (library ? undefined : nodeOf(place));
   const detail = useRef<HTMLElement>(null);
   const list = useRef<HTMLElement>(null);
 
@@ -657,17 +666,17 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
     if (!place && !id) return;
     if (draftDiff && !window.confirm('保存していない書きかけがあります。閉じると消えます。閉じますか？')) return;
     setPicked({ id: '', sel: null, cursor: null });
-    onGo({ place: library ? 'skills' : '' });
-  }, [place, id, draftDiff, onGo, library]);
+    onGo({ place: library ? 'skills' : video ? 'video' : '' });
+  }, [place, id, draftDiff, onGo, library, video]);
   // 左の余白を押した時だけ外す。押せる物・全文の欄・文字をなぞって選んでいる最中は外さない
   const onBlank = useCallback((e: ReactMouseEvent) => {
-    if ((!place || library || video) && !id) return;
+    if ((!place || library || place === 'video') && !id) return;
     const t = e.target as HTMLElement;
     if (t.closest('button, a, input, textarea, select, summary, label, [role="button"], main, details')) return;
     if (window.getSelection()?.toString()) return;
     if (draftDiff) { setPicked(v => ({ ...v, sel: null })); return; }   // 書きかけは消さない。選んだ行だけ外す
     clearPick();
-  }, [place, id, draftDiff, clearPick, library, video]);
+  }, [place, id, draftDiff, clearPick, library]);
   // PC の会話の欄は右に常にいる（スクロールしても動かない）。左の表示との境目を引いて幅を変える（2026-11-21 本人）
   const [talkRef, side] = useSideWidth('dan-prompts-chat-width', 400);
   // スマホの「ダンと話す」は、全文の下に貼り付く保存の帯の上に出す
@@ -687,26 +696,29 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const groups = useMemo(() => reader ? readerGroups(reader.id, skills) : [], [reader, skills]);
   const counts = useMemo(() => {
     const out: Record<string, number> = {};
-    for (const n of NODES) out[n.id] = (n.prompts || []).filter(pid => byId.has(pid)).length;
+    for (const n of [...NODES, ...VIDEO_NODES]) out[n.id] = (n.prompts || []).filter(pid => byId.has(pid)).length;
     return out;
   }, [byId]);
   // どの箱にも入っていない文（台帳に足されたのに図に無い物）も、失くさず下に出す
   const loose = useMemo(() => {
-    const placed = new Set(NODES.flatMap(n => n.prompts || []));
+    const placed = new Set([...NODES, ...VIDEO_NODES].flatMap(n => n.prompts || []));
     return prompts.filter(p => !p.id.startsWith('skill/') && !placed.has(p.id));
   }, [prompts]);
 
   const here = (node?.prompts || []).map(pid => byId.get(pid)).filter((p): p is PromptSummary => !!p);
   const editable = here.filter(p => !p.readonly);
   const readonly = here.filter(p => p.readonly);
+  // 読む文が無く、プログラムと動き方だけの箱（動画の枝の道具など）は、右の全文の枠を出さずに横いっぱいに出す
+  const progOnly = !!node && !here.length && !!(node.programs?.length || node.facts?.length);
 
   useEffect(() => {   // 狭い画面では、選んだ物の所まで送る
     if (reader && !id) { mapTop.current?.scrollIntoView({ block: 'start' }); return; }
+    if (video && !id) { if (place !== 'video') list.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); return; }
     if (typeof window === 'undefined' || (!reader && !library && window.innerWidth >= 1280)) return;
     if (library && !id) return;
     const target = id ? detail.current : place ? list.current : null;
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [id, place, library, reader]);
+  }, [id, place, library, reader, video]);
 
   const navigate = (next: { place: string; id?: string }) => {
     if (shown && open.draft !== shown.text && next.id !== id &&
@@ -743,14 +755,14 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
       <header>
         <h1 className="text-xl font-bold">ダンを動かしている指示文</h1>
         <nav className="my-3 inline-flex gap-1 rounded-xl border border-stone-300 bg-white p-1" aria-label="指示文の表示">
-          {[{ label: '構成図', active: !library && !video, icon: Network, target: '' }, { label: '動画の編集', active: video, icon: Clapperboard, target: 'video' }, { label: 'スキル', active: library, icon: BookOpen, target: 'skills' }].map(({ label, active, icon: Icon, target }) => (
+          {[{ label: '構成図', active: !library, icon: Network, target: '' }, { label: 'スキル', active: library, icon: BookOpen, target: 'skills' }].map(({ label, active, icon: Icon, target }) => (
             <button key={label} type="button" aria-label={label} aria-pressed={active} onClick={() => { navigate({ place: target }); }}
               className={cn('inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold', active ? 'bg-stone-800 text-white' : 'text-stone-700 hover:bg-amber-50')}>
               <Icon className="size-4" />{label}
             </button>
           ))}
         </nav>
-        {!library && !reader && !video && <p className="text-sm text-stone-600">箱を押すと指示文が開きます。緑の枝では、頼みごとに使うスキルを開けます。</p>}
+        {!library && !reader && !video && <p className="text-sm text-stone-600">箱を押すと指示文が開きます。緑の枝では、頼みごとに使うスキルを開けます。紫の札から、動画を作る・直す時の中へ降りられます。</p>}
       </header>
       {error ? (
         <p className="rounded-md bg-rose-50 p-3 text-sm text-rose-800">
@@ -775,7 +787,14 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
               </select></label>}
           </div>
         : <ReaderSkills node={reader} groups={groups} onBack={() => navigate({place: ''})} onPick={pid => navigate({place, id:pid})} />}</div>}
-      {video && <VideoFlowView onOpenPrompt={pid => { navigate(pid.startsWith('skill/') ? { place: 'skills', id: pid } : { place: NODES.find(n => n.prompts?.includes(pid))?.id || '', id: pid }); }} />}
+      {video && <section ref={mapTop} aria-label="動画を作る・直す時の構成図" data-testid="video-branch" className="space-y-3">
+        <nav className="flex flex-wrap items-center gap-1 text-sm">
+          <button type="button" onClick={() => navigate({ place: '' })} className="inline-flex items-center gap-1 text-stone-600 hover:underline"><ArrowLeft size={16} />構成図全体</button>
+          <ChevronRight size={14} className="text-stone-400" /><span className="font-bold text-violet-900">動画を作る・直す時</span>
+        </nav>
+        <p className="text-sm text-stone-600">構成図の「チャットのダン」「エディターのダンと制作」「並行作業」の中で、動画の頼みが来た時に起きることです。上から、頼みが届く所→読む決まり→手順書→道具→見せる→指摘から育てる、の順。箱を押すと、その箱が読む文と動くプログラムが下に出ます。</p>
+        <Diagram video skills={skills} onSkills={(name, pid) => navigate({ place: 'reader-' + name, id: pid })} counts={counts} active={node?.id || ''} glow={work?.state === 'editing' && VIDEO_IDS.has(workNode) ? workNode : ''} onPick={p => navigate({ place: p })} />
+      </section>}
       <div hidden={!!reader || library || video}><ConversationCircuit visible={!reader && !library && !video} onEdit={p => { if (navigate({place:p})) requestAnimationFrame(() => list.current?.scrollIntoView({block:"start"})); }} renderDiagram={renderDiagram}
         onPrompt={(pid, source) => {
           const owner = NODES.find(n => n.id === source && n.prompts?.includes(pid)) || NODES.find(n => n.prompts?.includes(pid));
@@ -783,8 +802,8 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
         }} /></div>
 
 
-      {(!reader || id) && !video && <div className={cn('grid items-start gap-4', !reader && 'xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]')}>
-        {!reader && <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block', library && !id && 'xl:col-span-2')}>
+      {(!reader || id) && !(place === 'video' && !id) && <div className={cn('grid items-start gap-4', !reader && 'xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]')}>
+        {!reader && <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block', (library || progOnly) && !id && 'xl:col-span-2')}>
           {library ? <SkillLibrary pages={skills} selected={id} loaded={loaded} onPick={pid => navigate({ place: 'skills', id: pid })} /> : <>
           {node ? (
             <div className="flex items-start gap-3">
@@ -799,12 +818,22 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           ) : (
             <p className="text-sm text-stone-500">図の箱を押すと、ここにその箱が読む指示文が並びます。</p>
           )}
+          {node?.facts?.length ? <ul className="list-disc space-y-1 pl-5 text-sm text-stone-700" data-testid="node-facts">{node.facts.map(f => <li key={f}>{f}</li>)}</ul> : null}
           {editable.length ? <ul className="space-y-2">{editable.map(row)}</ul> : null}
           {readonly.length ? (
             <details open={!editable.length}>
               <summary className="cursor-pointer text-sm text-stone-600">まだプログラムの中にある文（読むだけ・{readonly.length}）</summary>
               <ul className="mt-2 space-y-2">{readonly.map(row)}</ul>
             </details>
+          ) : null}
+          {node?.programs?.length ? (
+            <div className="space-y-1.5" data-testid="node-programs">
+              <h3 className="flex items-center gap-1 text-sm font-semibold text-sky-900"><Cpu className="h-4 w-4" />ここで動くプログラム</h3>
+              <ul className="space-y-1.5">{node.programs.map(pr => <li key={pr.path} className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2">
+                <div className="break-all font-mono text-[12px] text-sky-900">{pr.path}</div>
+                <div className="text-sm text-stone-700">{pr.what}</div>
+              </li>)}</ul>
+            </div>
           ) : null}
           {node?.same ? (
             <p className="text-sm text-stone-600">
@@ -823,7 +852,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           ) : null}
           </>}
         </aside>}
-        <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && (library ? 'hidden' : 'hidden xl:block'))}>
+        <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && (library || progOnly ? 'hidden' : 'hidden xl:block'))}>
           {id ? (
             <Editor key={id} id={id} pulse={pulse} work={work?.id === id ? work : null} onBack={() => navigate({ place: library ? 'skills' : place })} onSaved={load} onState={onState} onSelection={onSelection} />
           ) : (
