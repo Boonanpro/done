@@ -173,6 +173,14 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
         # start_work; approval-sensitive functions still use recent speech.
         context = ([dict(turn) for turn in dialogue.history]
                    if item.get('name') in {'start_work', 'steer_job'} else dialogue.recent())
+        sketch = getattr(dialogue, 'sketch', None)
+        if sketch and sketch.frames and item.get('name') in {'start_work', 'steer_job'}:
+            context = [dict(t) for t in context]
+            if context:
+                reference = sketch.handoff()
+                context[-1]['sketch_reference'] = reference
+                if item.get('name') == 'steer_job' and args.get('kind', 'update') == 'update':
+                    args = {**args, 'instruction': str(args.get('instruction') or '') + reference}
         output = (search_output(early, str(args.get('query') or '')) if item.get('name') == 'web_search' else early) if early is not None else await run_function(item.get('name'), args, user_id, room_id, context, speak=speak)
     except Exception as exc:
         output = {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
@@ -732,6 +740,10 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
             # the owner's words are still arriving: voice_say holds what it gives until he has been quiet OWNER_QUIET_S
             send.owner_speaking = lambda: time.monotonic() - spoke.get('owner', 0) < OWNER_QUIET_S
+            from app.services import voice_sketch, voice_live
+            state = voice_live.get_session(session_id, user_id)
+            if own and state is not None:
+                dialogue.sketch = state['sketch'] = voice_sketch.Sketch(dialogue, send)
             pending = {}
             from app.services.voice_interruption import Interruption
             from app.services import voice_plain

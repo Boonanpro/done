@@ -48,6 +48,16 @@
  ],
  "prompts": [
   {
+   "id": "call/sketch",
+   "title": "描きながら説明する時に絵を見る",
+   "place": "voice",
+   "reader": "音声のダン",
+   "when": "本人が描画画面を音声モードで共有した時",
+   "source": "app/services/voice_sketch.py",
+   "why": "描いた場所を指しながら話した時に、発言とその時の絵を一緒に読むため。",
+   "kind": "text"
+  },
+  {
    "id": "call/persona",
    "title": "通話のダンが、自分は誰かを知る文",
    "place": "voice",

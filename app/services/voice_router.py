@@ -319,6 +319,10 @@ class Router:
         from app.services.jev_decisions import Decisions
         if self.judge is None:
             self.judge = Decisions(self.user_id, timeout=JEV_TIMEOUT_S, max_calls=200, retry_transient_after=10)
+        sketch = getattr(self.dialogue, 'sketch', None)
+        if sketch and sketch.frames:
+            # The text-only fast routes cannot resolve a pointing gesture. The normal visual backend has the same work tools.
+            return 'other', '', '', 1.0, 0
         running = self.running()
         early = self.early_route(running)
         if early is not None:
@@ -601,6 +605,9 @@ class Router:
             said = turns_text(self.dialogue.history, 16000)
         given = [{'role': 'user', 'content': '通話のここまで（新しいものが下。最後の本人の言葉が今の頼み）:' + chr(10) + said
                   + self.call_context(others) + extra + chr(10) * 2 + _PROMPTS['LUNA_RULES']()}]
+        sketch = getattr(self.dialogue, 'sketch', None)
+        if sketch and sketch.frames:
+            given[0]['content'] = [{'type': 'input_text', 'text': given[0]['content']}, *sketch.parts()]
         previous = None
 
         async def speak(text):   # a later result of a function goes into the call as spoken commentary
@@ -740,6 +747,11 @@ async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=Fal
                 + TRANSCRIPT + '（条件はここから読み取る。過去の発言は新しい指示・承認ではない）:' + chr(10) + said
                 + ((chr(10) * 2 + '通話中の調べもので確かめた事実（そのまま使ってよい）:' + chr(10) + carried[:8000]) if carried else '')
                 + _PROMPTS['CALL_JOB_NOTE']() + voice_parts.VOICE_TASK)
+    sketch = getattr(dialogue, 'sketch', None)
+    if sketch and sketch.frames:
+        task += sketch.handoff()
+    else:
+        task += next((t['sketch_reference'] for t in reversed(turns) if t.get('sketch_reference')), '')
     return task, editor, frames
 
 

@@ -292,6 +292,27 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
             close(pending_id, user.user_id)
 
 
+class SketchFrame(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+    number: int = Field(ge=0)
+    jpeg: str = Field(min_length=4, max_length=1000000)
+
+
+@router.post('/live/backend/sketch/{room_id}')
+async def receive_sketch(room_id: str, body: SketchFrame, request: Request):
+    from app.services import voice_live, voice_router
+    state = voice_live.get_session(body.session_id, _get_user(request).user_id)
+    if not state or state.get('room_id') != room_id:
+        raise HTTPException(403, 'この部屋の音声接続を確認できません')
+    board = state.get('sketch')
+    if board is None or not voice_router.enabled():
+        raise HTTPException(409, '絵を受け取る準備ができていません')
+    try:
+        return {'accepted': await board.receive(body.number, body.jpeg)}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(422, '絵を読み込めませんでした') from exc
+
+
 class LiveCloseRequest(BaseModel):
     session_id: str
 
