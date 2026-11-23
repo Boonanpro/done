@@ -12,9 +12,11 @@ from app.services.owner import resolve_owner_user_id
 from app.services.skill_versions import skill_pages
 
 from app.api.conversation_circuit import router as circuit_router
+from app.api.video_flow_routes import router as video_flow_router
 
 router = APIRouter(prefix='/prompts', tags=['prompts'])
 router.include_router(circuit_router)
+router.include_router(video_flow_router)
 
 
 def _list(include_skills=True):
@@ -127,7 +129,9 @@ CHAT_DESCRIPTION = """この部屋は、みきさんがダンを動かしてい�
 - 保存すると、みきさんの画面の全文が数秒で新しい版に替わり、変わった行が光り、変わった所と「元に戻す」が出ます。返事には、何をどう変えたかを1〜3文で書きます（全文を貼り直さない）。
 - みきさんが書きかけを保存していない時は、その書きかけを消さないよう、直す前にどちらを生かすか聞きます。
 - 「読むだけ」の文（まだプログラムの中にある文）と手順書は、この部屋では書き換えません。直したいと言われたら、画面で直せる形に移す作業になると伝えて、やってよいか聞きます。
-- 指示文を書き換えるのは取り返しのつく操作です（履歴から戻せます）。頼まれた直しは、聞き返さずにそのまま進めます。"""
+- 指示文を書き換えるのは取り返しのつく操作です（履歴から戻せます）。頼まれた直しは、聞き返さずにそのまま進めます。
+- 動画の編集の手順書・案件の決まりについて、ダンの方から「直していいですか」と聞く時は、チャットの文だけで聞きません。`python /Users/mikihonda/done/scripts/video_flow.py propose` で画面の「動画の編集」の図に案を載せます（どの段の・どの文を・こう変える、と、同じ場面を作り直した前と後のコマ）。みきさんが図の上で承認すると、その文はその場で保存されます。案を載せた後に自分で save しません。
+- 「動画の編集の図で「…」を承認しました」という発言は、その画面のボタンから届いた物です。文の案はもう保存されているので、何が変わったかを1文で返します。作業の案（プログラムを足す等）なら、その作業を始めます。却下なら、なぜ却下されたかを推し量らず、次に何を変えるべきか1つだけ聞きます。"""
 CHAT_FILE = 'chat.json'
 
 

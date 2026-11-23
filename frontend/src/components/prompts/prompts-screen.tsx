@@ -6,7 +6,7 @@
 // 使う所: /prompts（app/prompts/page.tsx）と、開発室のボードの「指示文」（artifacts/dev-lead）。
 // 裏側は app/api/prompts_screen.py、文の置き場所と履歴は app/services/prompt_store.py。
 import { useCallback, useDeferredValue, useId, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { ArrowLeft, BookOpen, Network, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Clapperboard, Network, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, Sparkles, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { READER_EXAMPLES, readerGroups, ReaderSkills } from './reader-skills';
@@ -18,6 +18,7 @@ import { promptsApi, type PromptItem, type PromptSummary, type PromptVersion, ty
 import { cn } from '@/lib/utils';
 import { BOX_H, EDGES, H, NODES, W, WORK_FRAME, type ArchEdge, type ArchNode } from './architecture';
 import { ConversationCircuit } from './conversation-circuit';
+import { VideoFlowView } from './video-flow';
 import type { Trace } from './architecture-trace';
 import { diffText, hunks, lineDiff } from './line-diff';
 import { PromptsChat, TalkButton, type PromptChatContext } from './prompts-chat';
@@ -586,8 +587,9 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const [loaded, setLoaded] = useState(false);
   const reader = place.startsWith('reader-') && place.slice(7) in READER_EXAMPLES ? nodeOf(place.slice(7)) : undefined;
   const library = !reader && (place === 'skills' || id.startsWith('skill/'));
+  const video = !reader && !library && place === 'video';   // 動画を編集する作業の図（2026-11-23）
   const mapTop = useRef<HTMLDivElement>(null);
-  const node = reader || (library ? undefined : nodeOf(place));
+  const node = reader || (library || video ? undefined : nodeOf(place));
   const detail = useRef<HTMLElement>(null);
   const list = useRef<HTMLElement>(null);
 
@@ -659,13 +661,13 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   }, [place, id, draftDiff, onGo, library]);
   // 左の余白を押した時だけ外す。押せる物・全文の欄・文字をなぞって選んでいる最中は外さない
   const onBlank = useCallback((e: ReactMouseEvent) => {
-    if ((!place || library) && !id) return;
+    if ((!place || library || video) && !id) return;
     const t = e.target as HTMLElement;
     if (t.closest('button, a, input, textarea, select, summary, label, [role="button"], main, details')) return;
     if (window.getSelection()?.toString()) return;
     if (draftDiff) { setPicked(v => ({ ...v, sel: null })); return; }   // 書きかけは消さない。選んだ行だけ外す
     clearPick();
-  }, [place, id, draftDiff, clearPick, library]);
+  }, [place, id, draftDiff, clearPick, library, video]);
   // PC の会話の欄は右に常にいる（スクロールしても動かない）。左の表示との境目を引いて幅を変える（2026-11-21 本人）
   const [talkRef, side] = useSideWidth('dan-prompts-chat-width', 400);
   // スマホの「ダンと話す」は、全文の下に貼り付く保存の帯の上に出す
@@ -741,14 +743,14 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
       <header>
         <h1 className="text-xl font-bold">ダンを動かしている指示文</h1>
         <nav className="my-3 inline-flex gap-1 rounded-xl border border-stone-300 bg-white p-1" aria-label="指示文の表示">
-          {[{ label: '構成図', active: !library, icon: Network, target: '' }, { label: 'スキル', active: library, icon: BookOpen, target: 'skills' }].map(({ label, active, icon: Icon, target }) => (
+          {[{ label: '構成図', active: !library && !video, icon: Network, target: '' }, { label: '動画の編集', active: video, icon: Clapperboard, target: 'video' }, { label: 'スキル', active: library, icon: BookOpen, target: 'skills' }].map(({ label, active, icon: Icon, target }) => (
             <button key={label} type="button" aria-label={label} aria-pressed={active} onClick={() => { navigate({ place: target }); }}
               className={cn('inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold', active ? 'bg-stone-800 text-white' : 'text-stone-700 hover:bg-amber-50')}>
               <Icon className="size-4" />{label}
             </button>
           ))}
         </nav>
-        {!library && !reader && <p className="text-sm text-stone-600">箱を押すと指示文が開きます。緑の枝では、頼みごとに使うスキルを開けます。</p>}
+        {!library && !reader && !video && <p className="text-sm text-stone-600">箱を押すと指示文が開きます。緑の枝では、頼みごとに使うスキルを開けます。</p>}
       </header>
       {error ? (
         <p className="rounded-md bg-rose-50 p-3 text-sm text-rose-800">
@@ -773,14 +775,15 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
               </select></label>}
           </div>
         : <ReaderSkills node={reader} groups={groups} onBack={() => navigate({place: ''})} onPick={pid => navigate({place, id:pid})} />}</div>}
-      <div hidden={!!reader || library}><ConversationCircuit visible={!reader && !library} onEdit={p => { if (navigate({place:p})) requestAnimationFrame(() => list.current?.scrollIntoView({block:"start"})); }} renderDiagram={renderDiagram}
+      {video && <VideoFlowView onOpenPrompt={pid => { navigate(pid.startsWith('skill/') ? { place: 'skills', id: pid } : { place: NODES.find(n => n.prompts?.includes(pid))?.id || '', id: pid }); }} />}
+      <div hidden={!!reader || library || video}><ConversationCircuit visible={!reader && !library && !video} onEdit={p => { if (navigate({place:p})) requestAnimationFrame(() => list.current?.scrollIntoView({block:"start"})); }} renderDiagram={renderDiagram}
         onPrompt={(pid, source) => {
           const owner = NODES.find(n => n.id === source && n.prompts?.includes(pid)) || NODES.find(n => n.prompts?.includes(pid));
           navigate({place: pid.startsWith('skill/') ? 'skills' : owner?.id || source, id: pid});
         }} /></div>
 
 
-      {(!reader || id) && <div className={cn('grid items-start gap-4', !reader && 'xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]')}>
+      {(!reader || id) && !video && <div className={cn('grid items-start gap-4', !reader && 'xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]')}>
         {!reader && <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block', library && !id && 'xl:col-span-2')}>
           {library ? <SkillLibrary pages={skills} selected={id} loaded={loaded} onPick={pid => navigate({ place: 'skills', id: pid })} /> : <>
           {node ? (
