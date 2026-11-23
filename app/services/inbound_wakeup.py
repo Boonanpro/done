@@ -239,6 +239,18 @@ def take_docs_comment_notice(detected_message: Dict[str, Any], room_id: Optional
         return False
 
 
+_BOT_SENDER = re.compile(r"\[bot\]", re.I)
+
+
+def automated_notice(detected_message: Dict[str, Any]) -> bool:
+    """GitHub の bot（vercel[bot] など）が PR に付ける自動のコメント通知。ビルドの開始・完了・失敗の知らせで、
+    本人がすることは無い。部屋を起こして報告すると、PR を出すたびに同じ報告が並ぶ（2026-11-23 本人
+    「俺がやることねえなら報告すんなや。余計な報告何回もしてくんな」）。"""
+    si = detected_message.get("sender_info") or {}
+    sender = f"{si.get('from') or ''} {si.get('email') or ''} {si.get('name') or ''}"
+    return "notifications@github.com" in sender.lower() and bool(_BOT_SENDER.search(sender))
+
+
 def schedule_room_wakeup(detected_message: Dict[str, Any], room_id: str, *, reason: str) -> bool:
     """該当ルームでダンを起動するタスクを予約する。予約できたら True。
 
@@ -247,6 +259,9 @@ def schedule_room_wakeup(detected_message: Dict[str, Any], room_id: str, *, reas
     if not room_id or not detected_message.get("user_id"):
         return False
     if take_docs_comment_notice(detected_message, room_id):
+        return True
+    if automated_notice(detected_message):
+        logger.info("[inbound-wake] automated notice not woken msg=%s", detected_message.get("id"))
         return True
     try:
         loop = asyncio.get_running_loop()
