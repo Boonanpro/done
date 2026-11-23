@@ -708,6 +708,8 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const here = (node?.prompts || []).map(pid => byId.get(pid)).filter((p): p is PromptSummary => !!p);
   const editable = here.filter(p => !p.readonly);
   const readonly = here.filter(p => p.readonly);
+  // 読む文が無く、プログラムと動き方だけの箱（動画の枝の道具など）は、右の全文の枠を出さずに横いっぱいに出す
+  const progOnly = !!node && !here.length && !!(node.programs?.length || node.facts?.length);
 
   useEffect(() => {   // 狭い画面では、選んだ物の所まで送る
     if (reader && !id) { mapTop.current?.scrollIntoView({ block: 'start' }); return; }
@@ -801,7 +803,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
 
 
       {(!reader || id) && !(place === 'video' && !id) && <div className={cn('grid items-start gap-4', !reader && 'xl:grid-cols-[minmax(0,280px)_minmax(0,1fr)]')}>
-        {!reader && <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block', library && !id && 'xl:col-span-2')}>
+        {!reader && <aside ref={list} className={cn('scroll-mt-2 space-y-3', id && 'hidden xl:block', (library || progOnly) && !id && 'xl:col-span-2')}>
           {library ? <SkillLibrary pages={skills} selected={id} loaded={loaded} onPick={pid => navigate({ place: 'skills', id: pid })} /> : <>
           {node ? (
             <div className="flex items-start gap-3">
@@ -850,7 +852,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           ) : null}
           </>}
         </aside>}
-        <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && (library ? 'hidden' : 'hidden xl:block'))}>
+        <main ref={detail} className={cn('min-w-0 scroll-mt-2 rounded-xl border border-stone-200 bg-white p-3 sm:p-4', !id && (library || progOnly ? 'hidden' : 'hidden xl:block'))}>
           {id ? (
             <Editor key={id} id={id} pulse={pulse} work={work?.id === id ? work : null} onBack={() => navigate({ place: library ? 'skills' : place })} onSaved={load} onState={onState} onSelection={onSelection} />
           ) : (
