@@ -16,9 +16,9 @@ watches:
   - frontend/src/components/chat/chat-shapes.tsx
   - frontend/src/lib/chat-shapes/*.ts
   - frontend/src/app/globals.css
-fingerprint: 7cb95630ada8f43e
+fingerprint: ee8aeefefec1bd3d
 described: c866355fb33b9629
-last_review: "2026-11-23 購入カードと写真の札を押した時の動作を更新"
+last_review: "2026-11-23 説明は変えない: 描く時に選択中のペンを縁取りし、画面全体にボードを表示。入口と操作は同じ。"
 ---
 # ダンのチャット
 
@@ -66,5 +66,5 @@ last_review: "2026-11-23 購入カードと写真の札を押した時の動作�
 - ラベル: 「近づける」、「遠ざける」、「部品を準備中」、「描いて話す」、「閉じる」、「手描きボード」、「このコメントを外す」、「添えた物を外す」、「タイムライン参照を外す」
 - ボタンの字: 「閉じる」
 
-<!-- place_map:files {"frontend/src/app/globals.css": "b514a43252", "frontend/src/components/chat/chat-shapes.tsx": "18019ae9c2", "frontend/src/components/chat/sketch-board.tsx": "089098e1d6", "frontend/src/components/layout/project-chat-panel.tsx": "51952edaf3", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "7da7099871", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/map-geometry.ts": "b207ed80e8", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "5eecbe35bb", "frontend/src/lib/chat-shapes/schema.ts": "4ac17fc139", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
+<!-- place_map:files {"frontend/src/app/globals.css": "b514a43252", "frontend/src/components/chat/chat-shapes.tsx": "18019ae9c2", "frontend/src/components/chat/sketch-board.tsx": "3dbfd4acb8", "frontend/src/components/layout/project-chat-panel.tsx": "51952edaf3", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "7da7099871", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/map-geometry.ts": "b207ed80e8", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "5eecbe35bb", "frontend/src/lib/chat-shapes/schema.ts": "4ac17fc139", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
 <!-- place_map:auto:end -->
