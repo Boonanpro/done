@@ -132,6 +132,7 @@ class OutboundMessageService:
         from_account: Optional[str] = None,
         attachments: Optional[list] = None,
         show_card: bool = True,
+        owner_reply: Optional[str] = None,
         sender: Optional[str] = None,
     ) -> dict:
         """reply_to: 既存スレッドへの返信なら {message_id, references, subject, detected_message_id}。
@@ -164,8 +165,11 @@ class OutboundMessageService:
         if channel == "collab" and collab_room_id:
             existing = self._find_pending_collab_draft(user_id, collab_room_id)
             if existing:
-                return self._revise_collab_draft(existing, body=body, intent=intent, to_name=to_name,
+                revised = self._revise_collab_draft(existing, body=body, intent=intent, to_name=to_name,
                                                  files=staged_files, sender=sender if sender != "dan" else None)
+                if owner_reply and owner_reply.strip():
+                    self._post_room_message(room_id, owner_reply.strip())
+                return revised
 
         action_data: dict[str, Any] = {
             "action": "outbound_draft",
@@ -213,6 +217,8 @@ class OutboundMessageService:
         # collab（外部窓口）のカードはコミュニケーションタブ側に表示されるため、
         # 本体チャットにはカード行を出さない（ダンの記憶は digest_for_turn が届ける）。
         # 会話で既に承認された送信（show_card=False）は、確認のカードを出さない（2026-10-03）。
+        if owner_reply and owner_reply.strip():
+            self._post_room_message(room_id, owner_reply.strip())
         if channel != "collab" and show_card:
             self._post_room_message(room_id, card_marker(row["id"]))
         return row

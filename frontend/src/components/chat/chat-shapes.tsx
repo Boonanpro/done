@@ -932,29 +932,40 @@ const ItemView: ComponentRenderer<ItemInput> = ({ props }) => {
   const img = complete && onClient ? safeImageUrl(props.image, siteHost()) : null;
   const [broken, setBroken] = useState(false);
   const link = complete && props.url ? safeLinkUrl(props.url) : null;
-  const sel = point.selected === props.title;
+  const sel = !props.url && point.selected === props.title;
   const lines = (props.lines || []).filter((l) => typeof l === 'string' && l.trim());
+  const content = (
+    <>
+      {img && !broken ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={img} alt={props.title} loading="lazy" referrerPolicy="no-referrer" crossOrigin={img.startsWith('/') ? undefined : 'anonymous'} onError={() => setBroken(true)}
+          className="h-auto min-h-[6rem] w-24 shrink-0 self-stretch bg-muted object-cover sm:w-28" />
+      ) : null}
+      <div className="flex min-w-0 flex-1 flex-col gap-1 px-3 py-2.5">
+        <div className="flex items-baseline gap-1.5">
+          {props.num ? <span className="grid h-5 w-5 shrink-0 translate-y-0.5 place-items-center rounded-full bg-[#1f4e79] text-[11px] text-white tabular-nums">{props.num}</span> : null}
+          <span className="text-[15px] font-semibold leading-snug">{props.title}</span>
+        </div>
+        {props.sub ? <div className="text-xs text-muted-foreground">{props.sub}</div> : null}
+        {lines.length ? <ul className="flex flex-col gap-0.5 text-[13px] leading-relaxed text-foreground/85">{lines.map((l, i) => <li key={i}>{l}</li>)}</ul> : null}
+      </div>
+    </>
+  );
+  const className = "flex min-w-0 flex-1 text-left";
   return (
     <div className={inside ? 'w-full' : 'my-2 w-full'} data-shape="Item">
       <div className={`flex w-full overflow-hidden rounded-xl border bg-card shadow-sm ${sel ? 'border-amber-400 ring-[3px] ring-amber-300/70' : 'border-border'}`}>
-        <button type="button" disabled={!point.press} onClick={() => point.press?.(props.title)} className="flex min-w-0 flex-1 text-left disabled:cursor-default" data-item-press>
-          {img && !broken ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={img} alt={props.title} loading="lazy" referrerPolicy="no-referrer" crossOrigin={img.startsWith('/') ? undefined : 'anonymous'} onError={() => setBroken(true)}
-              className="h-auto min-h-[6rem] w-24 shrink-0 self-stretch bg-muted object-cover sm:w-28" />
-          ) : null}
-          <div className="flex min-w-0 flex-1 flex-col gap-1 px-3 py-2.5">
-            <div className="flex items-baseline gap-1.5">
-              {props.num ? <span className="grid h-5 w-5 shrink-0 translate-y-0.5 place-items-center rounded-full bg-[#1f4e79] text-[11px] text-white tabular-nums">{props.num}</span> : null}
-              <span className="text-[15px] font-semibold leading-snug">{props.title}</span>
-            </div>
-            {props.sub ? <div className="text-xs text-muted-foreground">{props.sub}</div> : null}
-            {lines.length ? <ul className="flex flex-col gap-0.5 text-[13px] leading-relaxed text-foreground/85">{lines.map((l, i) => <li key={i}>{l}</li>)}</ul> : null}
-          </div>
-        </button>
+        {link ? (
+          <a href={link} onClick={(event) => openSignedIn(event, link)} target="_blank" rel="noopener noreferrer" className={className}>
+            {content}
+          </a>
+        ) : (
+          <button type="button" disabled={!!props.url || !point.press} onClick={() => point.press?.(props.title)}
+            className={`${className} disabled:cursor-default`} data-item-press>{content}</button>
+        )}
       </div>
-      {link ? <div className="mt-1 px-1"><SourceLine url={props.url} label="ページを開く" /></div> : null}
-      <PointNote point={point} />
+      {link ? <div className="mt-1 px-1"><SourceLine url={link} label="ページを開く" /></div> : null}
+      {!props.url && point.failed && <PointNote point={point} />}
     </div>
   );
 };

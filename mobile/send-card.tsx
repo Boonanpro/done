@@ -2,7 +2,7 @@
 // これまでアプリの部屋のチャットでは描かれず、行の文字がそのまま出ていた（Web とコラボ窓口にはあった）。
 // 待ちの間は丸い読み込み表示を出さず、ボタンの文字で状態を見せる（LINE と同じ方針）。
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { CopyBodyButton } from './copy-body-button';
 import { DraftBodyEditor } from './draft-body-editor';
@@ -35,7 +35,7 @@ export function ConfirmCard({ id, request, onAnswer }: { id: string; request: Re
     request<Proposal & { title?: string }>(`/chat/proposals/${id}`).then(setP).catch(() => setError('確認カードを読み込めませんでした'));
   }, [id]);   // eslint-disable-line react-hooks/exhaustive-deps
   if (!p) return error ? <Text style={st.muted}>{error}</Text> : <View style={[st.card, { height: 120 }]} />;
-  const ad = (p.action_data || {}) as { items?: { label: string; value: string }[]; choices?: string[]; confirm_label?: string };
+  const ad = (p.action_data || {}) as { items?: { label: string; value: string }[]; products?: { name: string; url: string; image_url: string; store_logo_url?: string }[]; choices?: string[]; confirm_label?: string };
   const choices = ad.choices || [];
   const pending = p.status === 'pending';
   const answer = async (approve: boolean) => {
@@ -66,6 +66,18 @@ export function ConfirmCard({ id, request, onAnswer }: { id: string; request: Re
           </View>
         ))}
       </View>
+      {ad.products?.length ? (
+        <View style={st.productList}>
+          {ad.products.filter(product => product.url.startsWith('https://')).map((product, i) => (
+            <Pressable key={i} accessibilityRole="link" accessibilityLabel={product.name + 'の商品ページ'} style={st.product}
+              onPress={() => Linking.openURL(product.url).catch(() => setError('商品ページを開けませんでした'))}>
+              <Image source={{ uri: product.image_url }} resizeMode="contain" style={st.productImage} />
+              <Text style={st.productName}>{product.name}</Text>
+              {product.store_logo_url ? <Image source={{ uri: product.store_logo_url }} resizeMode="contain" style={st.storeLogo} /> : null}
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
       {choices.length > 0 ? (
         <View style={{ gap: 6 }}>
           {choices.map((c) => (
@@ -205,6 +217,11 @@ export function SendCard({ id, request }: { id: string; request: Request }) {
 }
 
 const st = StyleSheet.create({
+  productList: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  product: { width: 112, alignItems: 'center', padding: 7, gap: 4, backgroundColor: '#fff', borderRadius: 8 },
+  productImage: { width: '100%', height: 80 },
+  productName: { fontSize: 12, color: '#171717', textAlign: 'center' },
+  storeLogo: { width: 64, height: 28 },
   card: { borderWidth: 1, borderColor: '#cfdcd5', backgroundColor: '#ffffff', borderRadius: 14, padding: 12, gap: 8, alignSelf: 'stretch' },
   cardDone: { backgroundColor: '#f6f8f7' },
   head: { flexDirection: 'row', alignItems: 'center', gap: 6 },

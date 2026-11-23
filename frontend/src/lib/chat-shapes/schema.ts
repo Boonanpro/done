@@ -422,7 +422,7 @@ export const SHAPE_SPECS = [
   { name: 'Divider', description: '区切り線', props: DividerProps },
   { name: 'Flow', description: '矢印でつなぐ図（人・物・流れ）。箱は流れの順、edges を省くと順につなぐ。tone now=今ここ', props: FlowProps },
   { name: 'Map', description: '本物の地図にピン（番号つき）。場所・店・施設の話で、どこにあるかを見せる時。座標は places や検索で確かめた物だけ。ピンを押すとダンに届く', props: MapProps },
-  { name: 'Item', description: '写真つきの人・店・物の札。候補を写真で見せる時（地図と並べる時は num をピンの番号に合わせる）。押すとダンに届く', props: ItemProps },
+  { name: 'Item', description: '写真つきの人・店・物の札。候補を写真で見せる時（地図と並べる時は num をピンの番号に合わせる）。商品には写真と個別ページの url を付ける。札を押すと url を開き、url の無い札はダンに届く', props: ItemProps },
   { name: 'Quote', description: 'ページに書いてある文をそのまま引く。名前・値段・条件など、間違えると困る事実の根拠を見せる時。mark の言葉に蛍光ペン', props: QuoteProps },
   { name: 'Sources', description: '出どころのページの一覧。調べて答えた文の最後に付ける', props: SourcesProps },
   { name: 'Frames', description: '動画のコマの並び（時刻つき）。動画のどこの話かを見せる時。押すとダンに届く', props: FramesProps },

@@ -696,7 +696,7 @@ COMPOSE_MESSAGE_TOOL = {
 【何が起きるか】action="propose" でこの部屋に「送信案カード」が出る。カードには宛先・件名・本文があり、ユーザーはその場で本文を直せて、送信ボタンを押せばそのまま送られる（あなたを起こさずに送信される）。送信・編集・破棄の結果は次のターンの冒頭で自動的にあなたに知らされる。
 
 【使い方】
-- propose: 文面を出す。ユーザーに「これで良ければ送ります」と言う代わりにこれを呼ぶ。呼んだ後は本文をチャットに繰り返さず、一言添えるだけでよい。件名が要るのは「メールの新規送信」だけ。
+- propose: 文面を出す。ユーザーに「これで良ければ送ります」と言う代わりにこれを呼ぶ。本人から聞かれた質問への回答は owner_reply に入れる。外部に送る本文は body に入れる。件名が要るのは「メールの新規送信」だけ。
 - send: 既に出した送信案を送る（本人がこの送信を名指して許した時。許可の後に別の話の発言が続いても、止める・取り消す言葉が無く中身も変わっていなければ、そのまま通る。別の部屋の発言の許可だけ lookup で元の発言IDを取り、owner_message_id を付けて照合する）。proposal_id と approval（その本人の言葉をそのまま）を渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。サーバー送信できないチャネル（LINE 等）では送信の代わりにカードが「送信中」にロックされ、送るべき本文が返る → あなたが browser でその本文を送り、mark_sent で確定する。
 - mark_sent: あなたが browser 等で自力送信した後、送信済みとして確定する（本文は DB の現在の版）。
 - release: 手動送信に失敗した時、「送信中」ロックを解除して下書きに戻す。
@@ -725,6 +725,7 @@ COMPOSE_MESSAGE_TOOL = {
             "collab_room_id": {"type": "string", "description": "channel=\"collab\" 用: 送信先コラボルームのID（collab_thread の結果や受信通知にある）"},
             "attachments": {"type": "array", "items": {"type": "string"}, "description": "collab: 相手に届ける画像・動画・ファイルのローカルパスまたは配信URL。x_post: 投稿に添付する画像・動画の /api/v1/files/<名前> URL。動画をtarget_noteに書くだけでは添付されない。確認画面と送信時に同じ添付を使う。"},
             "sender": {"type": "string", "enum": ["dan", "owner"], "description": "collab用: 名義。dan=ダンとして届く（既定）/ owner=ユーザー本人として届く"},
+            "owner_reply": {"type": "string", "description": "propose時必須。本人から一緒に聞かれた質問への回答全文。本人の会話にだけ保存する。質問が無いか回答済みなら空文字。"},
             "body": {"type": "string", "description": "propose時必須。送る本文そのもの（挨拶〜署名まで完成形）"},
             "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
             "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
@@ -4954,6 +4955,8 @@ async def _execute_compose_message(
 
     try:
         if action == "propose":
+            if "owner_reply" not in params:
+                return {"success": False, "error": "owner_reply に本人への回答を入れてください。質問が無いか回答済みなら空文字です。"}
             channel = (params.get("channel") or "").strip()
             to = (params.get("to") or "").strip()
             body = (params.get("body") or "").strip()
@@ -4992,6 +4995,7 @@ async def _execute_compose_message(
                 from_account=params.get("from_account"),
                 attachments=atts or None, sender=params.get("sender"),
                 show_card=not bool(params.get("approved")),
+                owner_reply=params.get("owner_reply"),
             )
             channel = (row.get("action_data") or {}).get("channel") or channel
             sendable = channel in SERVER_SENDABLE
