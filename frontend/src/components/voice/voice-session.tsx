@@ -19,13 +19,18 @@ type RtEvent = { type: string; [key: string]: unknown };
 interface VoiceSessionProps {
   roomId: string;
   chatTitle?: string;
+  onSession?: (id: string | null) => void;
   onClose: () => void;
   /** ダンが画面に出す物の札の幅（エディターの会話は狭い） */
   stageWidthClass?: string;
 }
 
-export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }: VoiceSessionProps) {
+export function VoiceSession({ roomId, onClose, onSession, stageWidthClass = 'w-[520px]' }: VoiceSessionProps) {
   const [status, setStatus] = useState<Status>('idle');
+  useEffect(() => {
+    onSession?.(status === 'connected' ? liveSessionIdRef.current : null);
+    return () => onSession?.(null);
+  }, [status, onSession]);
   const [error, setError] = useState<string | null>(null);
   const [stageShown, setStageShown] = useState(false);   // a scene is on the stage: its card shows bottom-right
   const liveSessionIdRef = useRef('');

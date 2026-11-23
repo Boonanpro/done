@@ -20,6 +20,7 @@ import {
   MessageSquarePlus,
   Mic,
   Paperclip,
+  Pencil,
   Phone,
   Plus,
   Reply,
@@ -80,6 +81,7 @@ import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
 import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
 import { bareDanMedia, chatImageUrl, danFileMedia, earlierTurnMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo, type DanMedia } from '@/lib/chat-media';
+import { SketchBoard } from '@/components/chat/sketch-board';
 import { VoiceSession } from '@/components/voice/voice-session';
 import { editorWorkLink, openEditorWindow } from '@/lib/open-editor-window';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
@@ -870,6 +872,7 @@ type TimelineReference = { content_id: string; title: string; updated_at?: strin
 const chatDraftKey = (projectId: string) => `dan-chat-draft:${projectId}`;
 
 function ChatInput({
+  voiceOpen, voiceSession, onVoice,
   projectId,
   roomId,
   isSessionActive,
@@ -891,6 +894,9 @@ function ChatInput({
   onClearReply?: () => void;
   onAddComment?: () => void;
   onEditPendingComment?: (id: string) => void;
+  voiceOpen: boolean;
+  voiceSession: string | null;
+  onVoice: (open: boolean) => void;
 }) {
   const inspectorElement = usePreviewStore((s) => s.selectedElement);
   const inspectorElements = usePreviewStore((s) => s.selectedElements);
@@ -912,6 +918,15 @@ function ChatInput({
   // ChatInput のミラーモードは「コメントモードで要素選択中」の時だけ有効
   const isCommentMode = !!inspectorElement && previewMode === 'comment';
   const [message, setMessage] = useState('');
+  const [sketchOpen, setSketchOpen] = useState(false);
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.pathname === '/chat/' + projectId && url.searchParams.get('sketch') === '1') {
+      setSketchOpen(true);
+      url.searchParams.delete('sketch');
+      window.history.replaceState(window.history.state, '', url);
+    }
+  }, [projectId]);
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
   // 画面から添えた物（台本を聞く画面のサムネで選んだ部品・ペンの書き込み。stores/chat-attach-store.ts）
   const screenItems = useChatAttachments(projectId);
@@ -2242,6 +2257,16 @@ function ChatInput({
         <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={handleClickAttach} disabled={isUploading || isCommentMode} title="ファイルを添付">
           {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
         </Button>
+        <button type="button" aria-label="描いて話す" title="描いて話す" disabled={isCommentMode} className="flex h-7 shrink-0 items-center gap-1 rounded px-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => setSketchOpen(true)}>
+          <Pencil className="h-4 w-4" /><span>描く</span>
+        </button>
+        {sketchOpen && <SketchBoard key={roomId} room={roomId} voiceOpen={voiceOpen} session={voiceSession} onVoice={onVoice}
+          onClose={() => { setSketchOpen(false); if (voiceOpen) onVoice(false); }}
+          onAttach={async file => {
+            const uploaded = await api.files.upload(file);
+            setAttachedFiles(old => [...old, uploaded]);
+            if (file.type.startsWith('video/')) setMessage(old => [old.trimEnd(), '録画で、描きながら話した内容を見てください。'].filter(Boolean).join('\n'));
+          }}/>}
         <textarea
           ref={textareaRef}
           value={isCommentMode ? inspectorDraft : message}
@@ -2565,6 +2590,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voiceSession, setVoiceSession] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
@@ -3318,6 +3344,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
     {voiceOpen && project?.room_id && (
       <VoiceSession
         roomId={project.room_id}
+        onSession={setVoiceSession}
         chatTitle={project.title || undefined}
         onClose={() => setVoiceOpen(false)}
         stageWidthClass={editorChat ? 'w-[396px]' : 'w-[520px]'}
@@ -3638,6 +3665,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
 
       {project?.room_id && workspaceMode === 'chat' ? (
         <ChatInput
+          voiceOpen={voiceOpen} voiceSession={voiceOpen ? voiceSession : null} onVoice={setVoiceOpen}
           projectId={projectId}
           roomId={project.room_id}
           isSessionActive={isActiveExecution}
