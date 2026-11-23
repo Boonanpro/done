@@ -6,7 +6,7 @@
 // 段ごとに、ダンが読む手順書の文（今の版から抜き出す）と使うプログラム。過去の作業を選ぶと、段ごとに何をしたかと出来たコマ。
 // ダンの直しの案は「どの段の・どの文を・こう変える」と前後のコマで出し、本人は承認か却下を押すだけ（文の案は承認でその場で保存）。
 // 裏側は app/services/video_flow.py、段の定義は app/prompts/video_flow.json、ダンが載せるのは scripts/video_flow.py。
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, Check, CircleAlert, Clapperboard, Cpu, FileText, Loader2, PenLine, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/lib/api-client';
@@ -25,7 +25,7 @@ const reason = (e: unknown) => e instanceof ApiError ? String((e.data as { detai
 function Frames({ frames, onZoom }: { frames: VideoFlowFrame[]; onZoom: (f: VideoFlowFrame) => void }) {
   if (!frames.length) return null;
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-2 2xl:grid-cols-4">
       {frames.map((f, i) => (
         <button key={i} type="button" onClick={() => onZoom(f)} className="group min-w-0 text-left">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -90,13 +90,14 @@ function StageDetail({ stage, run, onOpen, onZoom }: { stage: VideoFlowStage; ru
   );
 }
 
-function Proposal({ p, stage, onDecide, busy, onOpen, onZoom }: { p: VideoFlowProposal; stage?: VideoFlowStage; busy: boolean; onDecide: (p: VideoFlowProposal, d: 'approve' | 'reject') => void; onOpen: (id: string) => void; onZoom: (f: VideoFlowFrame) => void }) {
+function Proposal({ p, stage, onDecide, busy, onOpen, onZoom, onShow }: { p: VideoFlowProposal; stage?: VideoFlowStage; busy: boolean; onDecide: (p: VideoFlowProposal, d: 'approve' | 'reject') => void; onOpen: (id: string) => void; onZoom: (f: VideoFlowFrame) => void; onShow: (p: VideoFlowProposal) => void }) {
   const pending = p.state === 'pending';
   return (
     <article className={cn('space-y-3 rounded-xl border-2 bg-white p-3', pending ? 'border-violet-400' : 'border-stone-200 opacity-80')} data-testid="video-flow-proposal">
       <div className="flex flex-wrap items-center gap-2">
         <span className="rounded bg-violet-100 px-2 py-0.5 text-xs font-semibold text-violet-900">{stage?.name || p.stage}</span>
         <span className="rounded bg-stone-100 px-2 py-0.5 text-xs text-stone-700">{p.kind === 'text' ? '手順書の文を変える' : '作業（プログラムなど）を足す'}</span>
+        <button type="button" onClick={() => onShow(p)} className="text-xs font-semibold text-teal-800 hover:underline">図のこの段を見る</button>
         {!pending && <span className={cn('rounded px-2 py-0.5 text-xs font-semibold', p.state === 'approved' ? 'bg-emerald-600 text-white' : 'bg-stone-500 text-white')}>{p.state === 'approved' ? '承認済み' : '却下'}</span>}
       </div>
       <h4 className="font-bold leading-snug">{p.title}</h4>
@@ -110,8 +111,29 @@ function Proposal({ p, stage, onDecide, busy, onOpen, onZoom }: { p: VideoFlowPr
           {pending && p.applies === false && <p className="text-xs text-rose-700">案を出した後にこの文が直されたので、このままでは承認できません。</p>}
         </div>
       ) : null}
-      {(p.before.frames.length || p.after.frames.length) ? (
-        <div className="grid gap-3 lg:grid-cols-2">
+      {p.before.frames.length && p.before.frames.length === p.after.frames.length ? (
+        <div className="space-y-1" data-testid="video-flow-pairs">
+          <div className="grid grid-cols-[3.5rem_minmax(0,1fr)_minmax(0,1fr)] gap-2 text-xs font-bold">
+            <span /><span className="text-rose-800">{p.before.label || '今'}</span><span className="text-emerald-800">{p.after.label || '直した後'}</span>
+          </div>
+          {p.before.frames.map((b, i) => {
+            const a = p.after.frames[i];
+            return (
+              <div key={i} className="grid grid-cols-[3.5rem_minmax(0,1fr)_minmax(0,1fr)] items-start gap-2">
+                <span className="pt-1 text-sm font-bold text-stone-700">{b.time}</span>
+                {[b, a].map((f, j) => (
+                  <button key={j} type="button" onClick={() => onZoom(f)} className="group min-w-0 text-left">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={f.src} alt={f.label || f.time} className={cn('aspect-video w-full rounded-md border-2 object-cover group-hover:ring-2 group-hover:ring-amber-400', j ? 'border-emerald-300' : 'border-rose-300')} />
+                    {f.label ? <span className="mt-0.5 block text-[11px] leading-tight text-stone-600">{f.label}</span> : null}
+                  </button>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      ) : (p.before.frames.length || p.after.frames.length) ? (
+        <div className="grid gap-3">
           {[p.before, p.after].map((side, i) => side.frames.length ? (
             <div key={i} className="space-y-1">
               <div className={cn('text-xs font-bold', i === 0 ? 'text-rose-800' : 'text-emerald-800')}>{side.label || (i === 0 ? '今' : '直した後')}</div>
@@ -189,6 +211,13 @@ export function VideoFlowView({ onOpenPrompt }: { onOpenPrompt: (id: string) => 
     finally { setBusy(false); }
   }, []);
 
+  const flowTop = useRef<HTMLDivElement>(null);
+  const showProposal = (p: VideoFlowProposal) => {
+    if (p.run && data?.runs.some(r => r.id === p.run)) setRunId(p.run);
+    setStageId(p.stage);
+    requestAnimationFrame(() => flowTop.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  };
+
   if (error) return <p className="rounded-md bg-rose-50 p-3 text-sm text-rose-800">{error}</p>;
   if (!data) return <p className="flex items-center gap-2 text-sm text-stone-500"><Loader2 className="size-4 animate-spin" />読み込んでいます</p>;
 
@@ -198,10 +227,10 @@ export function VideoFlowView({ onOpenPrompt }: { onOpenPrompt: (id: string) => 
       {pending.length ? (
         <section className="space-y-2">
           <h2 className="text-base font-bold text-violet-950">ダンからの直しの案（{pending.length}）</h2>
-          {pending.map(p => <Proposal key={p.id} p={p} stage={data.stages.find(s => s.id === p.stage)} busy={busy} onDecide={decide} onOpen={onOpenPrompt} onZoom={setZoom} />)}
+          {pending.map(p => <Proposal key={p.id} p={p} stage={data.stages.find(s => s.id === p.stage)} busy={busy} onDecide={decide} onOpen={onOpenPrompt} onZoom={setZoom} onShow={showProposal} />)}
         </section>
       ) : null}
-      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-stone-200 bg-white p-3">
+      <div ref={flowTop} className="flex scroll-mt-2 flex-wrap items-end gap-3 rounded-xl border border-stone-200 bg-white p-3">
         <label className="min-w-0 flex-1 space-y-1 text-sm font-semibold"><span className="flex items-center gap-1"><Clapperboard className="size-4" />流し直す作業</span>
           <select className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm font-normal" value={runId} onChange={e => pickRun(e.target.value)}>
             <option value="">選ばない（段の中身だけ見る）</option>
@@ -263,7 +292,7 @@ export function VideoFlowView({ onOpenPrompt }: { onOpenPrompt: (id: string) => 
       {decided.length ? (
         <details className="space-y-2">
           <summary className="cursor-pointer text-sm text-stone-600">決まった案（{decided.length}）</summary>
-          <div className="space-y-2 pt-2">{decided.map(p => <Proposal key={p.id} p={p} stage={data.stages.find(s => s.id === p.stage)} busy={busy} onDecide={decide} onOpen={onOpenPrompt} onZoom={setZoom} />)}</div>
+          <div className="space-y-2 pt-2">{decided.map(p => <Proposal key={p.id} p={p} stage={data.stages.find(s => s.id === p.stage)} busy={busy} onDecide={decide} onOpen={onOpenPrompt} onZoom={setZoom} onShow={showProposal} />)}</div>
         </details>
       ) : null}
       {zoom ? (
