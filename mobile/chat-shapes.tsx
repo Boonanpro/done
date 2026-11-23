@@ -530,6 +530,8 @@ function MapNode({ p }: { p: Record<string, unknown> }) {
 }
 
 function ItemNode({ p }: { p: Record<string, unknown> }) {
+  const { openUrl } = useContext(ShapeRoomContext);
+  const url = safeLinkUrl(p.url);
   const point = usePoint(POINT_TITLE.Item);
   const uri = useImageUrl(p.image);
   const [broken, setBroken] = useState(false);
@@ -537,7 +539,8 @@ function ItemNode({ p }: { p: Record<string, unknown> }) {
   const lines = (Array.isArray(p.lines) ? p.lines : []).map(str).filter((l) => l.trim());
   return (
     <View style={{ gap: 4, alignSelf: 'stretch' }}>
-      <Pressable disabled={!point.press} onPress={() => point.press?.(title)} style={[styles.item, point.selected === title && styles.itemOn]}>
+      <Pressable accessibilityRole={url ? 'link' : 'button'} disabled={!url && (!!p.url || !point.press)}
+        onPress={() => url ? openUrl(url) : point.press?.(title)} style={[styles.item, !p.url && point.selected === title && styles.itemOn]}>
         {uri && !broken ? <Image source={{ uri }} onError={() => setBroken(true)} style={styles.itemPhoto} resizeMode="cover" /> : null}
         <View style={styles.itemBody}>
           <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
@@ -548,8 +551,8 @@ function ItemNode({ p }: { p: Record<string, unknown> }) {
           {lines.map((l, i) => <Text key={i} style={[styles.text, { fontSize: 13, lineHeight: 19 }]}>{l}</Text>)}
         </View>
       </Pressable>
-      {safeLinkUrl(p.url) ? <SourceLine url={p.url} label="ページを開く" /> : null}
-      <PointNote note={point.note} failed={point.failed} />
+      {url ? <SourceLine url={url} label="ページを開く" /> : null}
+      {!p.url && point.failed && <PointNote note={point.note} failed={point.failed} />}
     </View>
   );
 }

@@ -517,7 +517,7 @@ export function ConfirmCard({ proposalId, onAnswer }: { proposalId: string; onAn
       ? <div className="my-2 text-xs text-muted-foreground">確認カードを読み込めませんでした</div>
       : <div className="my-2 h-28 max-w-[560px] animate-pulse rounded-xl border border-border bg-muted/40" />;
   }
-  const ad = (p.action_data || {}) as { items?: { label: string; value: string }[]; choices?: string[]; confirm_label?: string; chosen?: string };
+  const ad = (p.action_data || {}) as { items?: { label: string; value: string }[]; products?: { name: string; url: string; image_url: string; store_logo_url?: string }[]; choices?: string[]; confirm_label?: string; chosen?: string };
   const pending = p.status === 'pending';
   // 答えた後は選んだ候補だけを残す（どれで承認したかが一目で分かるように）
   const picked = pending ? choice : (ad.chosen || choice);
@@ -552,6 +552,18 @@ export function ConfirmCard({ proposalId, onAnswer }: { proposalId: string; onAn
           ))}
         </dl>
       )}
+      {ad.products?.length ? (
+        <div className="mt-3 flex flex-wrap gap-3">
+          {ad.products.filter(product => product.url.startsWith('https://')).map((product, i) => (
+            <a key={i} href={product.url} target="_blank" rel="noopener noreferrer"
+              aria-label={product.name + 'の商品ページ'} className="flex w-28 flex-col items-center gap-1 rounded-lg border bg-white p-2 text-center text-xs text-black hover:underline">
+              <img src={product.image_url} alt={product.name} className="h-20 w-full object-contain" />
+              <span>{product.name}</span>
+              {product.store_logo_url && <img src={product.store_logo_url} alt="" className="h-7 w-16 object-contain" />}
+            </a>
+          ))}
+        </div>
+      ) : null}
       {choices.length > 0 && (
         <div className="mt-2 flex flex-col gap-1.5" role="radiogroup">
           {choices.map((c) => {

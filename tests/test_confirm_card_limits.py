@@ -34,3 +34,15 @@ def test_short_card_fits():
         'choices': ['法人デビット 末尾3666', 'アメックス（自分のPCで）'],
     }
     assert confirm_cards._too_long(params) == ''
+
+
+def test_purchase_needs_linked_photos_before_it_creates_a_card(monkeypatch):
+    monkeypatch.setenv('DAN_USER_ID', 'test-user')
+    monkeypatch.setenv('DAN_SESSION_ID', 'test-room')
+    params = {'title': 'クーラーを買う', 'items': [{'label': '合計', 'value': '5,079円'}],
+              'confirm_label': '購入する', 'owner_reply': 'このCPUに対応します。'}
+    assert not asyncio.run(confirm_cards.tool(params))['success']
+    product = {'name': 'クーラー', 'url': 'https://example.com/product', 'image_url': 'https://example.com/photo.jpg'}
+    assert not confirm_cards._product_error([product], params['title'], params['confirm_label'])
+    assert confirm_cards._product_error([{**product, 'url': 'javascript:void(0)'}], params['title'], params['confirm_label'])
+    assert not confirm_cards._product_error([], '時間を予約', '予約する')
