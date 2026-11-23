@@ -12,9 +12,11 @@ from app.services.owner import resolve_owner_user_id
 from app.services.skill_versions import skill_pages
 
 from app.api.conversation_circuit import router as circuit_router
+from app.api.video_flow_routes import router as video_flow_router
 
 router = APIRouter(prefix='/prompts', tags=['prompts'])
 router.include_router(circuit_router)
+router.include_router(video_flow_router)
 
 
 def _list(include_skills=True):

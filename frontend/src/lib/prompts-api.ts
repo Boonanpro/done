@@ -110,3 +110,23 @@ export const promptsChat = {
     void (async () => { try { while (!(await reader.read()).done); } catch { /* 閉じられた */ } })();
   },
 };
+
+// ---- 動画を編集する作業の図（2026-11-23）。裏側は app/api/video_flow_routes.py ----
+export interface VideoFlowRead { id: string; title: string; heading: string; why: string; case: boolean; found: boolean; text: string; whole?: boolean }
+export interface VideoFlowStage { id: string; name: string; line: string; reads: VideoFlowRead[]; programs: { path: string; what: string; exists: boolean }[]; gap?: string; trial?: string }
+export interface VideoFlowFrame { src: string; time: string; label: string }
+export interface VideoFlowRun {
+  id: string; at: string; title: string; case: string; work: { url?: string; thumb?: string }; result: string; owner: string;
+  stages: Record<string, { state: 'ok' | 'bad' | 'skipped' | 'na'; did: string; should: string; frames: VideoFlowFrame[] }>;
+}
+export interface VideoFlowProposal {
+  id: string; at: string; title: string; stage: string; kind: 'text' | 'work'; prompt_id: string; find: string; replace: string;
+  why: string; effect: string; run: string; state: 'pending' | 'approved' | 'rejected'; applies?: boolean; decided_at?: string;
+  before: { label: string; frames: VideoFlowFrame[] }; after: { label: string; frames: VideoFlowFrame[] };
+}
+export interface VideoFlow { case: string; cases: { id: string; title: string }[]; stages: VideoFlowStage[]; runs: VideoFlowRun[]; proposals: VideoFlowProposal[] }
+
+export const videoFlowApi = {
+  get: (caseId = '') => promptRequest<VideoFlow>(`/video-flow${caseId ? `?case=${encodeURIComponent(caseId)}` : ''}`),
+  decide: (id: string, decision: 'approve' | 'reject') => promptRequest<VideoFlowProposal>(`/video-flow/proposals/${encodeURIComponent(id)}`, { decision }),
+};
