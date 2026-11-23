@@ -19,6 +19,9 @@ class FakeService:
         self.alive.add(pid)
         return {'id': pid, 'room_id': f'room-{pid}'}
 
+    async def update_project(self, project_id, user_id, **fields):   # 部屋の説明が変わった時に書き直す
+        return {'id': project_id, **fields}
+
 
 def test_chat_room_made_once_and_remade_when_gone(tmp_path, monkeypatch):
     monkeypatch.setattr(prompt_store, 'root', lambda: tmp_path)

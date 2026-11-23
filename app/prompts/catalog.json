@@ -912,6 +912,90 @@
    "source": "チャット・音声・エディターの作業依頼",
    "kind": "text",
    "why": "本人の依頼と決めた条件を届け、編集の判断は作品を直接見られる担当に任せる。"
+  },
+  {
+   "id": "code/editor-runtime-notes",
+   "title": "制作の担当の注意書き（タイムラインの扱い・見せ方・参考の探し方）",
+   "place": "editor",
+   "reader": "「ダンに指示」の実行（Codex の制作の担当）",
+   "when": "タイムラインの「ダンに指示」クリップを実行した時（editor_runtime.run で、チャットのダンと同じ決まりの後ろに足す）",
+   "source": "app/services/editor_runtime.py の ROLE〜REFERENCE_SEARCH（8つ）",
+   "readonly": true,
+   "module": "app.services.editor_runtime",
+   "attr": "NOTES",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/editor-production-budget",
+   "title": "制作の費用とサービスの決まり",
+   "place": "editor",
+   "reader": "「ダンに指示」の実行（Codex の制作の担当）",
+   "when": "タイムラインの「ダンに指示」クリップを実行した時（editor_runtime.run で、チャットのダンと同じ決まりの後ろに足す）",
+   "source": "app/services/editor_production_contract.py の BUDGET",
+   "readonly": true,
+   "module": "app.services.editor_production_contract",
+   "attr": "BUDGET",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/editor-production-authority",
+   "title": "制作の判断を誰が持つか",
+   "place": "editor",
+   "reader": "「ダンに指示」の実行（Codex の制作の担当）",
+   "when": "タイムラインの「ダンに指示」クリップを実行した時（editor_runtime.run で、チャットのダンと同じ決まりの後ろに足す）",
+   "source": "app/services/editor_production_contract.py の PRODUCTION_AUTHORITY",
+   "readonly": true,
+   "module": "app.services.editor_production_contract",
+   "attr": "PRODUCTION_AUTHORITY",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/editor-execution-contract",
+   "title": "タイムラインが正・スキルは資料という約束",
+   "place": "editor",
+   "reader": "「ダンに指示」の実行（Codex の制作の担当）",
+   "when": "タイムラインの「ダンに指示」クリップを実行した時（editor_runtime.run で、チャットのダンと同じ決まりの後ろに足す）",
+   "source": "app/services/editor_help.py の EXECUTION_CONTRACT",
+   "readonly": true,
+   "module": "app.services.editor_help",
+   "attr": "EXECUTION_CONTRACT",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/editor-creative-direction",
+   "title": "参考の応用と制作の判断",
+   "place": "editor",
+   "reader": "「ダンに指示」の実行（Codex の制作の担当）",
+   "when": "タイムラインの「ダンに指示」クリップを実行した時（editor_runtime.run で、チャットのダンと同じ決まりの後ろに足す）",
+   "source": "app/services/editor_creative_direction.py の PRODUCTION_GUIDANCE",
+   "readonly": true,
+   "module": "app.services.editor_creative_direction",
+   "attr": "PRODUCTION_GUIDANCE",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/editor-first-artifact",
+   "title": "制作の進め方（本人はディレクター）",
+   "place": "editor",
+   "reader": "「ダンに指示」の実行（Codex の制作の担当）",
+   "when": "タイムラインの「ダンに指示」クリップを実行した時（editor_runtime.run で、チャットのダンと同じ決まりの後ろに足す）",
+   "source": "app/services/editor_first_artifact.py の GUIDANCE",
+   "readonly": true,
+   "module": "app.services.editor_first_artifact",
+   "attr": "GUIDANCE",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "code/editor-film-plan",
+   "title": "映画・物語の制作相談",
+   "place": "editor",
+   "reader": "「ダンに指示」の実行（Codex の制作の担当）",
+   "when": "タイムラインの「ダンに指示」クリップを実行した時（editor_runtime.run で、チャットのダンと同じ決まりの後ろに足す）",
+   "source": "app/services/editor_film_plan.py の INSTRUCTIONS（2語を置き換えて足す）",
+   "readonly": true,
+   "module": "app.services.editor_film_plan",
+   "attr": "INSTRUCTIONS",
+   "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
   }
  ]
 }
