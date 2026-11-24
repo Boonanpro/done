@@ -142,8 +142,8 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
   );
 
   const saveTranscript = useCallback(
-    (role: 'user' | 'assistant', content: string) => {
-      void api(encodeURIComponent(roomId), { role, content: content.slice(0, 7500) });
+    (role: 'user' | 'assistant', content: string, sessionId: string, pin: boolean) => {
+      void api(encodeURIComponent(roomId), { role, content: content.slice(0, 7500), session_id: sessionId, audio_endpoint: pin ? 'pin' : 'phone' });
     },
     [api, roomId],
   );
@@ -292,7 +292,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       if (!text) return;
       dialogue.push({role, text}); if (dialogue.length > 32) dialogue.shift();
       if (role === 'user') latestUserRef.current = text;
-      saveTranscript(role, text);
+      saveTranscript(role, text, sessionId, external);
     };
     cleanupRef.current = () => {
       clearTimeout(externalDeadline); rejectExternal(new Error(ui("Call ended","通話を終了しました")));
