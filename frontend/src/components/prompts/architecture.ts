@@ -30,6 +30,7 @@ export interface ArchNode {
   programs?: { path: string; what: string }[];   // この箱で動くプログラム（読むだけ。押しても開かない）
   facts?: string[];       // コードで確かめた、この箱の動き方（無い物・条件も書く）
   video?: boolean;        // 下の枝「動画を作る・直す時」へ降りる札を付ける
+  cutout?: boolean;       // 形どおりに切り抜いた絵（枠も角丸も付けない）
 }
 
 export interface ArchEdge {
@@ -47,24 +48,30 @@ export const H = 2190;
 export const BOX_H = 78;
 
 export const NODES: ArchNode[] = [
-  { id: 'owner', name: 'みきさん', model: 'スマホ・PCのチャット・エディター', icon: 'miki-room', height: 202, x: 16, y: 164, w: 164,
-    line: '話しかける・頼む・直す。チャットと通話とエディターの画面から。' },
-  { id: 'devices', name: 'PC・スマホのチャット', model: 'ダンのチャット画面', icon: 'chat-pc',
-    x: 228, y: 74, w: 205, height: 148, line: 'PCやスマホからダンの部屋に依頼を送り、同じチャットで返事を読む。' },
-  { id: 'pin', name: '胸元のダンピン', model: 'スマホで通話を開始', icon: 'chest-pin',
-    x: 230, y: 427, w: 178, height: 144, line: '胸元のピンを押すと、つないだスマホのダンが通話を始める。',
-    programs: [{path: 'mobile/App.tsx', what: 'ピンからのタップを受け、スマホで音声モードを開く。'}] },
-  { id: 'audio', name: 'スマホ・PCの音声モード', model: '声を届け、返事を聞く', icon: 'voice',
-    x: 515, y: 500, w: 214, line: 'マイクで話した声を通話のダンに送り、音声の返事を受け取る。' },
-  { id: 'editor-ui', name: 'エディター', model: '作品とタイムライン', icon: 'editor-screen', height: 132, x: 228, y: 240, w: 205,
-    line: '作品を開き、ダンと制作の会話で編集を頼む。' },
+  { id: 'owner', name: 'みきさん', model: 'PC・スマホ・エディター・ピンから', icon: 'miki-cut', height: 196, x: 4, y: 214, w: 176, cutout: true,
+    line: '話しかける・頼む・直す。PC・スマホ・エディター・胸元のピンから。' },
+  { id: 'pc', name: 'PC', model: 'ブラウザのダン', icon: 'chat-pc', height: 128, x: 202, y: 24, w: 150,
+    line: 'PC のブラウザでダンを開く。入力欄で文字を送るか、横の電話マークで通話する。',
+    programs: [{path: 'frontend/src/components/layout/project-chat-panel.tsx', what: '入力欄から部屋へ依頼を送り、返事を出す。'}, {path: 'frontend/src/components/voice/voice-session.tsx', what: '電話マークから通話を始める。'}] },
+  { id: 'phone', name: 'スマホ', model: 'ダンのアプリ', icon: 'chat-phone', height: 136, x: 214, y: 168, w: 126,
+    line: 'スマホのアプリでダンを開く。文字を送るか、電話マークで通話する。',
+    programs: [{path: 'mobile/App.tsx', what: 'アプリの画面。チャットの入力と、通話の入口。'}, {path: 'mobile/voice.tsx', what: 'スマホでの通話。'}] },
+  { id: 'editor-ui', name: 'エディター', model: '作品とタイムライン', icon: 'editor-screen', height: 120, x: 202, y: 322, w: 150,
+    line: '作品を開き、横の「ダンと制作」の会話で頼むか、「話す」で声で頼む。PC でもスマホでも同じ画面。' },
+  { id: 'pin', name: 'ダンピン', model: '胸元に付ける', icon: 'pin-cut', height: 120, x: 208, y: 462, w: 138, cutout: true,
+    line: '胸元のピンを押して話すと、つないだスマホのアプリが通話を始める。ピンには文字の入口は無い。',
+    programs: [{path: 'mobile/App.tsx', what: 'ピンからのタップを受け、スマホで通話を開く。'}] },
+  { id: 'devices', name: 'チャット', model: '文字で頼む', icon: 'chat', x: 386, y: 196, w: 150,
+    line: 'PC・スマホ・エディターの会話から、文字で依頼を送り、同じ所で返事を読む。' },
+  { id: 'audio', name: '音声', model: '声で頼む', icon: 'voice', x: 386, y: 470, w: 150,
+    line: 'PC・スマホの電話マーク、エディターの「話す」、ピンから。マイクの声を通話のダンに送り、声の返事を聞く。' },
   { id: 'reply', name: '届いた返事', model: 'チャット・通話', icon: 'chat', x: 2260, y: 175, w: 305,
     line: '選んだ依頼に対してダンが実際に返した言葉。' },
   { id: 'skills', name: 'スキルの手順書', model: '全文・参考ページ', icon: 'v-skills', x: 1220, y: 870, w: 235,
     line: 'ダンが仕事に使う手順書を検索し、読んで編集する。' },
-  { id: 'next', name: '画面のサーバー', model: 'Next.js（dan.paina.info）', icon: 'next', x: 502, y: 105, w: 178,
+  { id: 'next', name: '画面のサーバー', model: 'Next.js（dan.paina.info）', icon: 'next', x: 572, y: 105, w: 160,
     line: '画面を出し、チャットや通話の要求を入口へ渡す。' },
-  { id: 'gateway', name: '入口', model: 'プログラム（9100・8100）', icon: 'gateway', x: 718, y: 105, w: 152,
+  { id: 'gateway', name: '入口', model: 'プログラム（9100・8100）', icon: 'gateway', x: 764, y: 105, w: 150,
     line: '要求を、今動いている版の会話の本体・道具のサーバーへ渡す。ダンを入れ替えても会話を切らないための所。' },
   { id: 'core', name: '会話の本体', model: 'プログラム（9000）', icon: 'core', x: 952, y: 42, w: 179,
     line: 'チャットの1通ごとにチャットのダンを起こし、作業の部屋の仕事を回す。' },
@@ -110,16 +117,22 @@ export const WORK_FRAME = { x: 1816, y: 6, w: 327, h: 756, name: '作業の部�
 
 // Connections run left to right. The line from the pin is the tap received by the phone.
 export const EDGES: ArchEdge[] = [
-  { from: 'owner', to: 'devices' },
-  { from: 'owner', to: 'pin' },
+  { from: 'owner', to: 'pc' },
+  { from: 'owner', to: 'phone' },
   { from: 'owner', to: 'editor-ui' },
-  { from: 'editor-ui', to: 'next' },
+  { from: 'owner', to: 'pin' },
+  // 入口の端末 → チャット（文字）と音声（声）。ピンは声だけ。
+  { from: 'pc', to: 'devices' },
+  { from: 'phone', to: 'devices' },
+  { from: 'editor-ui', to: 'devices', label: 'ダンと制作' },
+  { from: 'pc', to: 'audio' },
+  { from: 'phone', to: 'audio' },
+  { from: 'editor-ui', to: 'audio', label: '話す' },
+  { from: 'pin', to: 'audio', label: 'スマホ経由' },
   { from: 'chat', to: 'reply', label: 'チャットに返す', a:'t', b:'t', bend:38 },
   { from: 'editor', to: 'reply', label: '作品の会話に返す' },
   { from: 'voice', to: 'reply', label: '声で返す', a:'b', b:'b', bend:220 },
 
-  { from: 'owner', to: 'audio', a: 'r', b: 't', bend: 115 },
-  { from: 'pin', to: 'audio', label: 'スマホで通話' },
   { from: 'devices', to: 'next' },
   { from: 'next', to: 'gateway' },
   { from: 'gateway', to: 'core' },
