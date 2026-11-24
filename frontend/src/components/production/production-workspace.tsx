@@ -713,6 +713,17 @@ export function ProductionWorkspace({
         compact={compact}
         phoneChat={phoneChat}
         backLabel={video ? '動画に戻る' : undefined}
+        patterns={video ? {
+          videoId: video.id,
+          onOpen: (c) => {
+            const known = contents.find((x) => x.id === c.id);
+            if (known) { openContent(known); return; }
+            const made = c as unknown as ProductionContent;
+            setContents((prev) => (prev.some((x) => x.id === made.id) ? prev : [...prev, made]));
+            openContent(made);
+          },
+          onChanged: () => void loadAll(),
+        } : null}
         onBack={() => {
           if (video) { openContent(video); return; }
           setSelectedContent(null);
@@ -1255,7 +1266,7 @@ function WorkSections({ video, thumbs, current, compact, onOpen, onCreate }: {
       <button type="button" className={tab(video.id === current)} onClick={() => onOpen(video)} data-section-video><Film className="h-3.5 w-3.5" />動画</button>
       {thumbs.map((t, k) => (
         <button key={t.id} type="button" className={tab(t.id === current)} onClick={() => onOpen(t)} data-section-thumb={t.id}>
-          <ImageIcon className="h-3.5 w-3.5" />{thumbs.length > 1 ? `サムネ${k + 1}` : 'サムネ'}
+          <ImageIcon className="h-3.5 w-3.5" />{thumbs.length > 1 ? `${k === 0 ? '★' : ''}${t.title || `サムネ${k + 1}`}` : 'サムネ'}
         </button>
       ))}
       {!thumbs.length && onCreate ? (

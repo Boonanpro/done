@@ -18,8 +18,8 @@ watches:
   - frontend/src/components/production/production-workspace.tsx
   - frontend/src/components/production/editor-dan-chat.tsx
   - frontend/src/app/production-workspace/page.tsx
-fingerprint: 9f465648c12d58d1
-described: 606a8878bf548628
+fingerprint: 071d24dbb73da170
+described: 9cf9f3a5011230d2
 ---
 # エディターの中の「ダンと制作」
 
@@ -31,7 +31,9 @@ described: 606a8878bf548628
 - `content-chat` 作品を開いた画面（タイムラインとプレビュー）の右の欄。作品ごとに1つの部屋。この部屋のダンはその作品のタイムラインの道具（mcp__timeline__*）を持ち、再生位置と選んだクリップが「ここ」「これ」になる。
 - `card-thumb` ライブラリの動画の札の右下に出るサムネ（PC はマウスを乗せた時、スマホはいつも）。押すとエディターより先にサムネのページ。サムネだけの札は一覧に出ない。
 - `thumb-button` 動画の画面の上の道具の並びの「サムネ」（小さな絵つき）。サムネが無い動画では「サムネを作る」。
-- `work-sections` サムネのページの上（スマホは動画の画面の上にも）の「動画／サムネ1／サムネ2…」の切り替え。サムネのページの「動画に戻る」でその動画のタイムラインへ。
+- `work-sections` サムネのページの上（スマホは動画の画面の上にも）の「動画／サムネ」の切り替え。案が2つ以上なら案の名前が並び、表のサムネに★。サムネのページの「動画に戻る」でその動画のタイムラインへ。
+- `thumb-patterns` サムネのページの下（スマホはサムネのすぐ下）の案の帯（2026-11-24 本人「canvaみたいに増やせるように」）。案が小さな絵で並び、押すとその案を開く。先頭の「表」が動画に使うサムネ。「＋ 案を足す」で今の案を複製／白紙から、案の「…」で 表のサムネにする・複製する・消す（控えに回すだけ・最後の1つは消せない）。本人が足した案は本人の物で、ダンは頼まれない限り案を増やさない。
+- `thumb-select` サムネの部品の選び方: 選んでいる部品は四角の中なら透けた所でもつかむ。動かさずに離すと、その上に重なって見えている部品へ選び替える。下の部品は右クリックの「ここにある部品」か ⌥/Alt＋クリック。「画像」ボタン・貼り付け・サムネへ落とすで画像を足せる。
 - `toggle` 上の「ダンと制作」のボタンで欄を開け閉めする。
 - `voice` 欄の上の「話す」で、この作品のダンと通話する（2026-11-17）。みきさんが話している間の再生位置・選んだクリップ・プレビューでマウスを置いた所が、言葉ごとに記録され（app/services/voice_editor.py）、直す作業（チャットで頼んだ時と同じ作品の部屋の作業）に、その時の完成画面の絵（指した所に赤い丸）と一緒に渡る。作業は直す場所と中身を一言で言ってから直し、直す様子はタイムラインの上にダンの手として見える。話している間は画面全体のふちが声に合わせて光る（チャットの地図の voice-mode と同じ）。
 
@@ -53,5 +55,5 @@ described: 606a8878bf548628
 - ラベル: 「ダンと制作」、「欄の幅を変える」、「作品と素材」、「作品」、「素材のフォルダ」、「作品の一覧」
 - 試験の印: 「content-cover」
 
-<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "bea301b706", "frontend/src/components/production/editor-dan-chat.tsx": "2276af678a", "frontend/src/components/production/production-workspace.tsx": "9fa5d50da2"} -->
+<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "bea301b706", "frontend/src/components/production/editor-dan-chat.tsx": "2276af678a", "frontend/src/components/production/production-workspace.tsx": "2867f3b22f"} -->
 <!-- place_map:auto:end -->
