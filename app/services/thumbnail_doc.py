@@ -184,6 +184,111 @@ def archive(room_id: str, thumb_id: str, video_id: str | None = None) -> dict[st
     return _patch(room_id, thumb_id, fn)
 
 
+# ── 案を増やす（2026-11-23 本人「サムネは何パターンか作りたいんで自由に増やせるように。canvaみたいな使い心地」）──
+# 本人がエディターの下の「＋」で足す時だけ増やす。ダンが直す時は今の案を save で直し、勝手に増やさない。
+
+def _normalize_order(rows: list[dict[str, Any]], video_id: str) -> list[dict[str, Any]]:
+    """その動画の案に 0,1,2… の番号を振り直す（今の並び＝表のサムネが先頭のまま）。"""
+    pats = thumbnails_of('', video_id, rows)
+    for i, c in enumerate(pats):
+        c['pattern_order'] = i
+    return pats
+
+
+def add_pattern(room_id: str, video_id: str, from_id: str | None = None) -> dict[str, Any]:
+    """動画に案を1つ足す。from_id があればその案の写し、無ければ白紙。足した案は一番後ろ。"""
+    import copy
+    from app.services.timeline_draft import ContentsLock
+    par = _par()
+    now = _now()
+    with ContentsLock(room_id):
+        contents = par._read_contents(room_id)
+        video = next((c for c in contents if str(c.get('id')) == str(video_id) and not is_thumbnail(c)), None)
+        if not video:
+            raise ValueError('動画の作品が見つかりません')
+        pats = _normalize_order(contents, video_id)
+        src = None
+        if from_id:
+            src = next((c for c in pats if str(c.get('id')) == str(from_id)), None)
+            if not src:
+                raise ValueError('写す案が見つかりません')
+        base = ((src or {}).get('timeline') or {}).get('thumbnail') if src else None
+        if isinstance(base, dict):
+            doc = copy.deepcopy(base)
+            for k in ('instructions', 'saved_by', 'saved_at'):
+                doc.pop(k, None)
+        else:
+            first = ((pats[0].get('timeline') or {}).get('thumbnail') or {}) if pats else {}
+            doc = {'width': int(first.get('width') or 1920), 'height': int(first.get('height') or 1080),
+                   'background': '#111111', 'parts': [], 'title': first.get('title') or video.get('title') or ''}
+        doc['rev'] = 1
+        used = {str(c.get('title') or '') for c in pats}
+        n = len(pats) + 1
+        while f'案{n}' in used:
+            n += 1
+        content = {
+            'id': str(uuid.uuid4()), 'room_id': room_id, 'title': f'案{n}', 'format': FORMAT, 'status': 'draft',
+            'asset_ids': list((src or {}).get('asset_ids') or []), 'timeline': {'thumbnail': doc}, 'outputs': [],
+            'created_at': now, 'updated_at': now, 'video_id': video_id, 'pattern_order': len(pats),
+        }
+        contents.append(content)
+        par._write_contents(room_id, contents)
+    return content
+
+
+def set_pattern_order(room_id: str, video_id: str, ids: list[str]) -> list[dict[str, Any]]:
+    """案の並びを決める（先頭が表のサムネ）。ids に無い案は後ろに今の順で残す。"""
+    from app.services.timeline_draft import ContentsLock
+    par = _par()
+    with ContentsLock(room_id):
+        contents = par._read_contents(room_id)
+        pats = thumbnails_of('', video_id, contents)
+        if not pats:
+            raise ValueError('案がありません')
+        pos = {str(i): k for k, i in enumerate(ids)}
+        was = {str(c.get('id')): k for k, c in enumerate(pats)}
+        pats.sort(key=lambda c: (pos.get(str(c.get('id')), len(ids)), was[str(c.get('id'))]))
+        for k, c in enumerate(pats):
+            c['pattern_order'] = k
+            c['updated_at'] = _now()
+        par._write_contents(room_id, contents)
+    return pats
+
+
+def remove_pattern(room_id: str, thumb_id: str) -> dict[str, Any]:
+    """案を消す（消さずに控えへ回す。最後の1つは消さない）。"""
+    c = _find(room_id, thumb_id)
+    vid = str(c.get('video_id') or '')
+    if vid and len(thumbnails_of(room_id, vid)) <= 1:
+        raise ValueError('最後の1つの案は消せません')
+    return archive(room_id, thumb_id)
+
+
+def add_uploaded_image(room_id: str, content_id: str, data: bytes, filename: str) -> dict[str, Any]:
+    """本人が貼り付けた・落とした画像を、そのサムネの部品の絵にする（素材に登録して URL を返す）。"""
+    from PIL import Image
+    import io
+    _find(room_id, content_id)
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.load()
+            fmt = (im.format or 'PNG').upper()
+    except Exception as exc:
+        raise ValueError('画像として読めませんでした') from exc
+    ext = {'JPEG': '.jpg', 'PNG': '.png', 'WEBP': '.webp', 'GIF': '.gif'}.get(fmt, '.png')
+    d = _par()._room_dir(room_id) / 'thumbnails' / content_id / 'uploads'
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f'{uuid.uuid4().hex[:12]}{ext}'
+    if ext == '.png' and fmt != 'PNG':
+        with Image.open(io.BytesIO(data)) as im:
+            im.save(path, 'PNG')
+    else:
+        path.write_bytes(data)
+    row = add_image_asset(room_id, path, filename or path.name, generated_by='owner:thumbnail')
+    meta = row.get('metadata') or {}
+    return {'asset_id': row['id'], 'src': media_url(room_id, row['id']), 'width': meta.get('width'), 'height': meta.get('height')}
+
+
 def video_for_doc(room_id: str, doc_id: str, title: str = '') -> str:
     """台本に合う動画の作品。台本がつないである動画→同じ台本のサムネがつながっている動画→無ければ空のタイムラインの
     動画の作品を新しく作って台本をつなぐ（撮影前の台本でも、サムネは動画とひと組にする）。"""

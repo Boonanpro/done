@@ -102,3 +102,39 @@ def test_route_create_returns_the_existing_thumb(room):
 def test_content_model_keeps_the_pair_fields():
     m = par.ProductionContent(id='t', room_id='r', title='t', created_at='', updated_at='', video_id='v', archived=True)
     assert m.model_dump()['video_id'] == 'v' and m.model_dump()['archived'] is True
+
+
+def test_patterns_add_copy_blank_order_remove(room):
+    v = _video(room)
+    first = td.create(room, 'サムネ', {**DOC, 'parts': [{'id': 't1', 'type': 'text', 'text': 'あ', 'x': 1, 'y': 2, 'font': 'hiragino-w9', 'size': 10, 'fill': '#fff'}],
+                                       'instructions': [{'id': 'x'}]}, video_id=v['id'])
+    cp = td.add_pattern(room, v['id'], from_id=first['id'])
+    assert cp['title'] == '案2' and cp['video_id'] == v['id']
+    doc = cp['timeline']['thumbnail']
+    assert doc['parts'][0]['text'] == 'あ' and 'instructions' not in doc and doc['rev'] == 1
+    # 写しを直しても元は変わらない
+    td.save(room, cp['id'], {**doc, 'parts': []})
+    assert td.get(room, first['id'])['parts'][0]['text'] == 'あ'
+    blank = td.add_pattern(room, v['id'])
+    assert blank['timeline']['thumbnail']['parts'] == []
+    assert [t['id'] for t in td.thumbnails_of(room, v['id'])] == [first['id'], cp['id'], blank['id']]
+    # 表のサムネにする＝先頭へ
+    td.set_pattern_order(room, v['id'], [blank['id']])
+    assert [t['id'] for t in td.thumbnails_of(room, v['id'])] == [blank['id'], first['id'], cp['id']]
+    td.remove_pattern(room, cp['id'])
+    td.remove_pattern(room, first['id'])
+    with pytest.raises(ValueError):
+        td.remove_pattern(room, blank['id'])     # 最後の1つは消さない
+    assert [t['id'] for t in td.thumbnails_of(room, v['id'])] == [blank['id']]
+
+
+def test_uploaded_image_becomes_asset(room):
+    v = _video(room)
+    t = td.create(room, 'サムネ', DOC, video_id=v['id'])
+    buf = io.BytesIO()
+    Image.new('RGBA', (40, 20), (255, 0, 0, 128)).save(buf, 'PNG')
+    r = td.add_uploaded_image(room, t['id'], buf.getvalue(), 'a.png')
+    assert r['width'] == 40 and r['height'] == 20 and r['asset_id'] in r['src']
+    assert td.asset_file(room, r['asset_id']) is not None
+    with pytest.raises(ValueError):
+        td.add_uploaded_image(room, t['id'], b'not an image', 'x.png')

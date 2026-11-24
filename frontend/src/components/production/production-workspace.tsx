@@ -713,6 +713,17 @@ export function ProductionWorkspace({
         compact={compact}
         phoneChat={phoneChat}
         backLabel={video ? '動画に戻る' : undefined}
+        patterns={video ? {
+          videoId: video.id,
+          onOpen: (c) => {
+            const known = contents.find((x) => x.id === c.id);
+            if (known) { openContent(known); return; }
+            const made = c as unknown as ProductionContent;
+            setContents((prev) => (prev.some((x) => x.id === made.id) ? prev : [...prev, made]));
+            openContent(made);
+          },
+          onChanged: () => void loadAll(),
+        } : null}
         onBack={() => {
           if (video) { openContent(video); return; }
           setSelectedContent(null);

@@ -9602,6 +9602,75 @@ def create_video_thumbnail(content_id: str, room_id: str = Query(...), current_u
     return thumbnail_doc.create(room_id, "サムネ", doc, video_id=content_id)
 
 
+class ThumbnailPatternRequest(BaseModel):
+    from_id: str | None = None
+
+
+class ThumbnailOrderRequest(BaseModel):
+    ids: list[str]
+
+
+@router.get("/contents/{content_id}/thumbnail-patterns")
+def list_thumbnail_patterns(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    """動画の案の一覧（先頭が表のサムネ）。下の案の並びに、それぞれの形も一緒に返す。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    pats = thumbnail_doc.thumbnails_of(room_id, content_id)
+    return {"patterns": [{"id": c["id"], "title": c.get("title") or "", "updated_at": c.get("updated_at"),
+                          "doc": thumbnail_doc.versioned(room_id, ((c.get("timeline") or {}).get("thumbnail")) or {})}
+                         for c in pats]}
+
+
+@router.post("/contents/{content_id}/thumbnail-patterns")
+def add_thumbnail_pattern(content_id: str, data: ThumbnailPatternRequest, room_id: str = Query(...),
+                          current_user: TokenData = Depends(get_current_user)):
+    """エディターの下の「＋」: 案を1つ足す（今の案の写し、または白紙）。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        return thumbnail_doc.add_pattern(room_id, content_id, data.from_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.put("/contents/{content_id}/thumbnail-patterns/order")
+def order_thumbnail_patterns(content_id: str, data: ThumbnailOrderRequest, room_id: str = Query(...),
+                             current_user: TokenData = Depends(get_current_user)):
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        return {"patterns": [c["id"] for c in thumbnail_doc.set_pattern_order(room_id, content_id, data.ids)]}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.delete("/contents/{content_id}/thumbnail")
+def remove_thumbnail_pattern(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        c = thumbnail_doc.remove_pattern(room_id, content_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "id": c["id"]}
+
+
+@router.post("/contents/{content_id}/thumbnail/image")
+async def upload_thumbnail_image(content_id: str, room_id: str = Query(...), file: UploadFile = File(...),
+                                 current_user: TokenData = Depends(get_current_user)):
+    """貼り付けた・落とした画像をサムネの部品の絵にする。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    data = await file.read()
+    if len(data) > 40 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="画像が大きすぎます（40MBまで）")
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, thumbnail_doc.add_uploaded_image, room_id, content_id, data, file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/contents/{content_id}/thumbnail/export")
 async def export_thumbnail(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
     """1280×720 の PNG に書き出す（エディターと同じ描き方）。"""
