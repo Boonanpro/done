@@ -68,6 +68,8 @@ export type ThumbInstruction = {
   created_at: string;
   /** コメントを付けた部品（部品を選んでコメントした時） */
   part_id?: string | null;
+  /** 複数の部品をまとめて選んでコメントした時の全部（part_id はその先頭） */
+  part_ids?: string[] | null;
   /** コメントの印を出す所（サムネの画素） */
   anchor?: [number, number] | null;
 };

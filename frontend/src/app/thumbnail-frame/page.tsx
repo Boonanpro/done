@@ -24,7 +24,10 @@ export default function ThumbnailFramePage() {
       const doc = asThumbDoc(p.doc);
       setFontsReady(false);
       setPayload({ ...p, doc });
-      void loadThumbFonts(doc).then(() => document.fonts.ready).then(() => setFontsReady(true));
+      // 書体が読めた後、文字の部品が測り直して（回す中心が決まって）描き終わるまで2コマ待ってから撮らせる
+      void loadThumbFonts(doc).then(() => document.fonts.ready)
+        .then(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))))
+        .then(() => setFontsReady(true));
     };
     document.body.style.margin = '0';
     document.body.style.background = 'transparent';

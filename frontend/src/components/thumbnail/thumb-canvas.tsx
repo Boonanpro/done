@@ -19,10 +19,15 @@ export function textLineHeight(p: ThumbTextPart) {
   return p.line_height || Math.round(p.size * 1.25);
 }
 
+// 文字の部品。回す中心（文字の範囲の真ん中）はこの部品が自分で測って決める。外から測った範囲を受け取らないので、
+// エディター・下の案の絵・部品の一覧・書き出しのどこで描いても、同じ形なら同じ絵になる
+// （2026-11-24 本人「下の一覧のサムネと実際のサムネにズレがある。構造的に起きないように」: 回す中心をエディターだけが測った
+//  範囲で決め、ほかの所は文字の基準点で回していたので、180度回した矢印が上にずれていた）
 function TextPart({ p, onMeasure }: { p: ThumbTextPart; onMeasure?: (id: string, box: PartBox, widths: number[]) => void }) {
   const f = thumbFont(p.font);
   const ref = useRef<SVGTextElement>(null);
   const [widths, setWidths] = useState<number[] | null>(null);
+  const [box, setBox] = useState<PartBox | null>(null);
   const ls = lines(p);
   const lh = textLineHeight(p);
   const sw = Math.max(0, p.stroke_width || 0);
@@ -38,18 +43,18 @@ function TextPart({ p, onMeasure }: { p: ThumbTextPart; onMeasure?: (id: string,
       const spans = Array.from(el.querySelectorAll('tspan'));
       const ws = spans.map((s) => { try { return s.getComputedTextLength(); } catch { return 0; } });
       setWidths((prev) => (prev && prev.length === ws.length && prev.every((v, i) => Math.abs(v - ws[i]) < 0.01) ? prev : ws));
-      if (onMeasure) {
-        try {
-          const b = el.getBBox();
-          let x0 = b.x - pad, y0 = b.y - pad, x1 = b.x + b.width + pad, y1 = b.y + b.height + pad;
-          if (p.bg) {
-            const mw = Math.max(0, ...ws);
-            x0 = Math.min(x0, p.x - p.bg.left); y0 = Math.min(y0, p.y - p.bg.top);
-            x1 = Math.max(x1, p.x + mw + p.bg.right); y1 = Math.max(y1, p.y + (ls.length - 1) * lh + p.bg.bottom);
-          }
-          onMeasure(p.id, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, ws);
-        } catch { /* 隠れている時は測れない */ }
-      }
+      try {
+        const b = el.getBBox();
+        let x0 = b.x - pad, y0 = b.y - pad, x1 = b.x + b.width + pad, y1 = b.y + b.height + pad;
+        if (p.bg) {
+          const mw = Math.max(0, ...ws);
+          x0 = Math.min(x0, p.x - p.bg.left); y0 = Math.min(y0, p.y - p.bg.top);
+          x1 = Math.max(x1, p.x + mw + p.bg.right); y1 = Math.max(y1, p.y + (ls.length - 1) * lh + p.bg.bottom);
+        }
+        const nb = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        setBox((prev) => (prev && Math.abs(prev.x - nb.x) < 0.01 && Math.abs(prev.y - nb.y) < 0.01 && Math.abs(prev.w - nb.w) < 0.01 && Math.abs(prev.h - nb.h) < 0.01 ? prev : nb));
+        onMeasure?.(p.id, nb, ws);
+      } catch { /* 隠れている時は測れない */ }
     };
     measure();
     let stop = false;
@@ -63,8 +68,11 @@ function TextPart({ p, onMeasure }: { p: ThumbTextPart; onMeasure?: (id: string,
   const shadow = p.shadow;
   const filterId = shadow ? `ts_${p.id}` : undefined;
   const maxW = widths ? Math.max(0, ...widths) : 0;
+  const rot = p.rotation || 0;
+  const [cx, cy] = partCenter(p, box || undefined);
   return (
-    <>
+    // 回してある文字は、測り終わるまで出さない（違う中心で回した形を一瞬でも見せない・書き出さない）
+    <g transform={rot ? `rotate(${rot} ${cx} ${cy})` : undefined} opacity={rot && !box ? 0 : undefined}>
       {filterId ? (
         <defs>
           <filter id={filterId} x="-30%" y="-60%" width="160%" height="220%" colorInterpolationFilters="sRGB">
@@ -128,7 +136,7 @@ function TextPart({ p, onMeasure }: { p: ThumbTextPart; onMeasure?: (id: string,
           <tspan key={i} x={p.x} y={p.y + i * lh}>{t || ' '}</tspan>
         ))}
       </text>
-    </>
+    </g>
   );
 }
 
@@ -143,8 +151,8 @@ type Props = {
   width?: number | string;        // 画面に出す幅（既定は 100%）
   marks?: ThumbMark[];
   onImageState?: (loaded: number, total: number) => void;
+  /** 文字の部品の範囲を測った時（エディターが選んだ枠・つまみに使う）。描く形はこれに左右されない */
   onMeasure?: (id: string, box: PartBox) => void;
-  boxes?: Record<string, PartBox>;
   partProps?: (p: ThumbPart) => Record<string, unknown>;
   overlay?: ReactNode;            // 選んだ部品の枠など（同じ座標で上に描く）
   style?: React.CSSProperties;
@@ -164,7 +172,7 @@ type Props = {
 };
 
 export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas(
-  { doc, width = '100%', marks, onImageState, onMeasure, boxes, partProps, overlay, style, className, view, clip = true, pasteboard, ...handlers }, ref,
+  { doc, width = '100%', marks, onImageState, onMeasure, partProps, overlay, style, className, view, clip = true, pasteboard, ...handlers }, ref,
 ) {
   const images = doc.parts.filter((p) => p.type === 'image' && !p.hidden);
   const loadedRef = useRef(new Set<string>());
@@ -187,10 +195,10 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
   const board = pasteboard;
   const renderParts = (ghost: boolean) => doc.parts.map((p) => {
         if (p.hidden) return null;
-        const rot = p.rotation || 0;
-        const [cx, cy] = partCenter(p, boxes?.[p.id]);
         const extra = ghost ? {} : (partProps?.(p) || {});
         if (p.type === 'image') {
+          const rot = p.rotation || 0;
+          const [cx, cy] = partCenter(p);
           const flip = p.flip_x ? `translate(${2 * p.x + p.w} 0) scale(-1 1)` : '';
           return (
             <g key={p.id} data-part-id={ghost ? undefined : p.id} opacity={p.opacity ?? 1} transform={rot ? `rotate(${rot} ${cx} ${cy})` : undefined} {...extra}>
@@ -210,7 +218,7 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
           );
         }
         return (
-          <g key={p.id} data-part-id={ghost ? undefined : p.id} opacity={p.opacity ?? 1} transform={rot ? `rotate(${rot} ${cx} ${cy})` : undefined} {...extra}>
+          <g key={p.id} data-part-id={ghost ? undefined : p.id} opacity={p.opacity ?? 1} {...extra}>
             <TextPart p={p} onMeasure={onMeasure && !ghost ? (id, box) => onMeasure(id, box) : undefined} />
           </g>
         );
@@ -345,7 +353,7 @@ export function PartPreview({ doc, part, box, className }: { doc: ThumbDoc; part
   const one: ThumbDoc = { ...doc, background: 'transparent', parts: [{ ...part, hidden: false, opacity: Math.max(0.35, part.opacity ?? 1) } as ThumbPart] };
   return (
     <span className={`pointer-events-none block overflow-hidden rounded-sm ${className || ''}`} style={{ background: CHECKER }} data-part-preview={part.id}>
-      <ThumbCanvas doc={one} clip={false} boxes={{ [part.id]: box }} view={partView(doc, part, shown, box)} width="100%"
+      <ThumbCanvas doc={one} clip={false} view={partView(doc, part, shown, box)} width="100%"
         style={{ width: '100%', height: '100%', aspectRatio: 'auto', background: 'transparent', overflow: 'hidden' }} />
     </span>
   );

@@ -11,6 +11,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
+  AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignStartHorizontal, AlignStartVertical,
+  AlignHorizontalSpaceAround, AlignVerticalSpaceAround,
   ArrowLeft, ArrowDown, ArrowUp, Check, Copy, Download, Eye, EyeOff, ImagePlus, LayoutGrid, Loader2, Lock, MessageSquare,
   Frame, MousePointer2, PenLine, Redo2, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
 } from 'lucide-react';
@@ -54,11 +56,20 @@ const r0 = (v: number) => Math.round(v);
 
 type JobState = { job_id: string; state: string; label: string; active: boolean; progress?: string | null; result?: string | null };
 
+// つかんで動かす・大きさを変えるのは、選んでいる部品の全部（1つでも複数でも同じ形）。回すのは1つの時だけ
 type Drag =
-  | { kind: 'move'; id: string; start: [number, number]; orig: ThumbPart; before: ThumbDoc }
-  | { kind: 'scale'; id: string; anchor: [number, number]; startDist: number; orig: ThumbPart; before: ThumbDoc }
-  | { kind: 'rotate'; id: string; center: [number, number]; startAngle: number; orig: ThumbPart; before: ThumbDoc }
+  | { kind: 'move'; ids: string[]; start: [number, number]; origs: Record<string, ThumbPart>; before: ThumbDoc }
+  | { kind: 'scale'; ids: string[]; anchor: [number, number]; startDist: number; origs: Record<string, ThumbPart>; before: ThumbDoc }
+  | { kind: 'rotate'; ids: string[]; center: [number, number]; startAngle: number; origs: Record<string, ThumbPart>; before: ThumbDoc }
+  | { kind: 'marquee'; start: [number, number]; base: string[]; moved: boolean; clickPick: string | null }
   | { kind: 'pen' };
+
+function unionBox(bs: PartBox[]): PartBox | null {
+  if (!bs.length) return null;
+  const x0 = Math.min(...bs.map((b) => b.x)), y0 = Math.min(...bs.map((b) => b.y));
+  const x1 = Math.max(...bs.map((b) => b.x + b.w)), y1 = Math.max(...bs.map((b) => b.y + b.h));
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
 
 const PEN_COLOR = '#ff2a2a';
 // コメントを付けた部品を、ダンに渡す絵の上で囲む色
@@ -128,7 +139,13 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const dirty = useRef(false);
   const saveTimer = useRef<number | null>(null);
   const [saving, setSaving] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [selected, setSelected] = useState<string | null>(null);
+  // 選んでいる部品（複数可。2026-11-24 本人「要素複数選択できるようにして。エディター直操作でもパーツ一覧でも」）。
+  // 並びは選んだ順。selected は1つだけ選んでいる時のその部品（右の欄の細かい直しは1つの時だけ）
+  const [selection, setSelection] = useState<string[]>([]);
+  const selected = selection.length === 1 ? selection[0] : null;
+  const setSelected = useCallback((id: string | null) => setSelection(id ? [id] : []), []);
+  const listAnchor = useRef<string | null>(null);
+  const [marquee, setMarquee] = useState<PartBox | null>(null);
   const [mode, setMode] = useState<'select' | 'pen'>('select');
   const [boxes, setBoxes] = useState<Record<string, PartBox>>({});
   const undoStack = useRef<ThumbDoc[]>([]);
@@ -161,7 +178,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   // 出力の形だけを見る（枠の外を切る）。既定は枠の外にはみ出た部品も見えて、つかめる作業台
   const [outputView, setOutputView] = useState(false);
   // 部品・書き込みに付けるコメントの欄（台本の画面と同じく、その場に出る）。part_id が無ければペンの書き込みへのコメント
-  const [composer, setComposer] = useState<{ partId: string | null } | null>(null);
+  const [composer, setComposer] = useState<{ partIds: string[] } | null>(null);
   const patternActions = useRef<ThumbPatternActions | null>(null);
   const setPatternActions = useCallback((a: ThumbPatternActions | null) => { patternActions.current = a; }, []);
   // つかんでいる・描いている間（その間は作業台の広さを止め、コメントのボタンを隠す）
@@ -478,6 +495,20 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     }
     const handle = target.closest('[data-handle]')?.getAttribute('data-handle');
     const sel = selected ? doc.parts.find((p) => p.id === selected) : undefined;
+    const group = selection.map((id) => doc.parts.find((p) => p.id === id)).filter((p): p is ThumbPart => !!p && !p.hidden);
+    const origsOf = (ps: ThumbPart[]) => Object.fromEntries(ps.map((p) => [p.id, clone(p)]));
+    const additive = ev.shiftKey || ev.metaKey || ev.ctrlKey;
+    if (handle && handle.startsWith('g-') && group.length > 1) {
+      // 複数の部品を囲む枠の角: 向かいの角を止めて、全部をまとめて大きさを変える
+      ev.preventDefault();
+      (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
+      const u = unionBox(group.map((p) => partBounds(p, boxOf(p), boxes[p.id])))!;
+      const corners: Record<string, [number, number]> = { 'g-nw': [u.x + u.w, u.y + u.h], 'g-ne': [u.x, u.y + u.h], 'g-sw': [u.x + u.w, u.y], 'g-se': [u.x, u.y] };
+      const anchor = corners[handle] || [u.x, u.y];
+      setGesture({ kind: 'part', board: liveBoard });
+      drag.current = { kind: 'scale', ids: group.map((p) => p.id), anchor, startDist: Math.hypot(pt[0] - anchor[0], pt[1] - anchor[1]) || 1, origs: origsOf(group), before: clone(doc) };
+      return;
+    }
     if (handle && sel) {
       ev.preventDefault();
       (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
@@ -485,20 +516,49 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       const center = partCenter(sel, boxes[sel.id]);
       if (handle === 'rotate') {
         setGesture({ kind: 'part', board: liveBoard });
-        drag.current = { kind: 'rotate', id: sel.id, center, startAngle: Math.atan2(pt[1] - center[1], pt[0] - center[0]), orig: clone(sel), before: clone(doc) };
+        drag.current = { kind: 'rotate', ids: [sel.id], center, startAngle: Math.atan2(pt[1] - center[1], pt[0] - center[0]), origs: origsOf([sel]), before: clone(doc) };
       } else {
         // つかんだ角の向かいの角を止めて、大きさを変える（回してある時は回した角）
         const corners: Record<string, [number, number]> = { nw: [b.x + b.w, b.y + b.h], ne: [b.x, b.y + b.h], sw: [b.x + b.w, b.y], se: [b.x, b.y] };
         const anchorLocal = corners[handle] || [b.x, b.y];
         const anchor = sel.rotation ? rotatePoint(anchorLocal, center, sel.rotation) : anchorLocal;
         setGesture({ kind: 'part', board: liveBoard });
-        drag.current = { kind: 'scale', id: sel.id, anchor, startDist: Math.hypot(pt[0] - anchor[0], pt[1] - anchor[1]) || 1, orig: clone(sel), before: clone(doc) };
+        drag.current = { kind: 'scale', ids: [sel.id], anchor, startDist: Math.hypot(pt[0] - anchor[0], pt[1] - anchor[1]) || 1, origs: origsOf([sel]), before: clone(doc) };
       }
       return;
     }
     // 押せる範囲: 作業台の全部（枠の外にはみ出た部品も選べる）。出力だけを見ている時はサムネの枠の中
     const inCanvas = outputView ? (pt[0] >= 0 && pt[1] >= 0 && pt[0] <= doc.width && pt[1] <= doc.height) : inBoard(pt);
     press.current = null;
+    const startMove = (ps: ThumbPart[]) => {
+      const movable = ps.filter((p) => !p.locked);
+      if (!movable.length) return;
+      drag.current = { kind: 'move', ids: movable.map((p) => p.id), start: pt, origs: origsOf(movable), before: clone(doc) };
+      setGesture({ kind: 'part', board: liveBoard });
+    };
+    const startMarquee = (base: string[], clickPick: string | null) => {
+      ev.preventDefault();
+      (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
+      drag.current = { kind: 'marquee', start: pt, base, moved: false, clickPick };
+    };
+    // Shift・⌘・Ctrl を押しながら押す: その部品を選んでいる物に足す／外す。何も無い所から引くと囲んで足す
+    if (additive && inCanvas) {
+      const part = hitPart(pt);
+      if (part && !(coversCanvas(part) && selection.length && !selection.includes(part.id))) {
+        ev.preventDefault();
+        (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
+        if (selection.includes(part.id)) {
+          setSelection((cur) => cur.filter((x) => x !== part.id));
+        } else {
+          const next = [...selection, part.id];
+          setSelection(next);
+          startMove(next.map((id) => doc.parts.find((p) => p.id === id)).filter((p): p is ThumbPart => !!p));
+        }
+        return;
+      }
+      startMarquee(selection, null);
+      return;
+    }
     // 選んでいる部品の上（四角の中）を押したら、透けた所でもその部品をつかむ（2026-11-24 本人「集中線が選択後に
     // 移動できない。長押しすると選択が外れる」）。動かさずに離した時だけ、その上に重なって見えている部品へ選び替える。
     // Alt（Mac は ⌥）を押しながらだと、その点に重なっている部品を手前から順に選び替える（下の部品へ届く）。
@@ -510,13 +570,25 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       }
       return;
     }
+    // 複数を選んでいる時: そのどれかの上を押したら全部をつかむ。動かさずに離したら、押した所の部品1つだけを選ぶ
+    if (group.length > 1 && inCanvas) {
+      const member = group.find((p) => insideBox(p, pt));
+      if (member) {
+        ev.preventDefault();
+        (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
+        const top = hitPart(pt);
+        press.current = { at: [ev.clientX, ev.clientY], pick: top && !coversCanvas(top) ? top.id : member.id };
+        startMove(group);
+        return;
+      }
+    }
     if (sel && !sel.hidden && insideBox(sel, pt)) {
       ev.preventDefault();
       (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
       const selIdx = doc.parts.findIndex((p) => p.id === sel.id);
       const above = partsAt(pt, true).find((p) => doc.parts.indexOf(p) > selIdx);
       press.current = { at: [ev.clientX, ev.clientY], pick: above?.id || null };
-      if (!sel.locked) { drag.current = { kind: 'move', id: sel.id, start: pt, orig: clone(sel), before: clone(doc) }; setGesture({ kind: 'part', board: liveBoard }); }
+      startMove([sel]);
       return;
     }
     if (ev.altKey && inCanvas) {
@@ -525,14 +597,17 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       return;
     }
     const part = inCanvas ? hitPart(pt) : undefined;
-    if (!part || (selected && selected !== part.id && coversCanvas(part))) {
-      setSelected(null);
+    // 何も無い所・サムネ全体を覆う背景から引くと、囲んだ部品をまとめて選ぶ。動かさずに離した時は、
+    // 何かを選んでいれば選択を外し、何も選んでいなければその背景を選ぶ（前と同じ）
+    if (!part || coversCanvas(part)) {
+      startMarquee([], part && !selection.length ? part.id : null);
+      setSelection([]);
       return;
     }
     ev.preventDefault();
     (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
     setSelected(part.id);
-    if (!part.locked) { drag.current = { kind: 'move', id: part.id, start: pt, orig: clone(part), before: clone(doc) }; setGesture({ kind: 'part', board: liveBoard }); }
+    startMove([part]);
   };
 
   // 右クリック: その点に重なっている部品を全部並べて、どれでも選べる（上にある・下にある・透けている物も）
@@ -569,21 +644,38 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       return;
     }
     const d = docRef.current;
-    let np: ThumbPart;
-    if (dr.kind === 'move') {
-      const dx = pt[0] - dr.start[0], dy = pt[1] - dr.start[1];
-      np = { ...dr.orig, x: dr.orig.x + dx, y: dr.orig.y + dy } as ThumbPart;
-    } else if (dr.kind === 'scale') {
-      const k = Math.max(0.05, Math.hypot(pt[0] - dr.anchor[0], pt[1] - dr.anchor[1]) / dr.startDist);
-      np = scalePart(dr.orig, dr.anchor, k);
-    } else {
-      const a = Math.atan2(pt[1] - dr.center[1], pt[0] - dr.center[0]);
-      let deg = (dr.orig.rotation || 0) + ((a - dr.startAngle) * 180) / Math.PI;
-      deg = Math.round(deg * 10) / 10;
-      if (!ev.shiftKey) for (const snap of [-180, -90, 0, 90, 180]) if (Math.abs(deg - snap) < 3) deg = snap;
-      np = { ...dr.orig, rotation: deg };
+    if (dr.kind === 'marquee') {
+      const m = { x: Math.min(dr.start[0], pt[0]), y: Math.min(dr.start[1], pt[1]), w: Math.abs(pt[0] - dr.start[0]), h: Math.abs(pt[1] - dr.start[1]) };
+      if (!dr.moved && Math.max(m.w, m.h) * scale < 4) return;
+      dr.moved = true;
+      setMarquee(m);
+      // 囲みに少しでも掛かった部品（サムネ全体を覆う背景は除く）
+      const hits = d.parts.filter((p) => !p.hidden && !coversCanvas(p)).filter((p) => {
+        const b = partBounds(p, boxOf(p), boxes[p.id]);
+        return b.x < m.x + m.w && b.x + b.w > m.x && b.y < m.y + m.h && b.y + b.h > m.y;
+      }).map((p) => p.id);
+      setSelection([...dr.base, ...hits.filter((id) => !dr.base.includes(id))]);
+      return;
     }
-    const next = { ...d, parts: d.parts.map((p) => (p.id === np.id ? np : p)) };
+    const changed: Record<string, ThumbPart> = {};
+    for (const id of dr.ids) {
+      const o = dr.origs[id];
+      if (!o) continue;
+      if (dr.kind === 'move') {
+        const dx = pt[0] - dr.start[0], dy = pt[1] - dr.start[1];
+        changed[id] = { ...o, x: o.x + dx, y: o.y + dy } as ThumbPart;
+      } else if (dr.kind === 'scale') {
+        const k = Math.max(0.05, Math.hypot(pt[0] - dr.anchor[0], pt[1] - dr.anchor[1]) / dr.startDist);
+        changed[id] = scalePart(o, dr.anchor, k);
+      } else {
+        const a = Math.atan2(pt[1] - dr.center[1], pt[0] - dr.center[0]);
+        let deg = (o.rotation || 0) + ((a - dr.startAngle) * 180) / Math.PI;
+        deg = Math.round(deg * 10) / 10;
+        if (!ev.shiftKey) for (const snap of [-180, -90, 0, 90, 180]) if (Math.abs(deg - snap) < 3) deg = snap;
+        changed[id] = { ...o, rotation: deg };
+      }
+    }
+    const next = { ...d, parts: d.parts.map((p) => changed[p.id] || p) };
     docRef.current = next;
     setDoc(next);
   };
@@ -594,19 +686,24 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     setGesture(null);
     const pr = press.current;
     press.current = null;
+    if (dr && dr.kind === 'marquee') {
+      setMarquee(null);
+      if (!dr.moved && dr.clickPick) setSelected(dr.clickPick);
+      return;
+    }
     // 動かさずに離した（クリック）: 選んでいる部品の上に重なって見えている部品があれば、そちらを選ぶ
     if (pr && pr.pick && ev && Math.hypot(ev.clientX - pr.at[0], ev.clientY - pr.at[1]) < 4) {
       if (dr && dr.kind !== 'pen' && docRef.current) {
         const d = docRef.current;
-        const back = { ...d, parts: d.parts.map((p) => (p.id === dr.id ? dr.orig : p)) };
+        const back = { ...d, parts: d.parts.map((p) => dr.origs[p.id] || p) };
         docRef.current = back; setDoc(back);
       }
       setSelected(pr.pick);
       return;
     }
     if (!dr || dr.kind === 'pen' || !docRef.current) return;
-    const now = docRef.current.parts.find((p) => p.id === dr.id);
-    if (now && JSON.stringify(now) !== JSON.stringify(dr.orig)) commit(docRef.current, dr.before);
+    const moved = docRef.current.parts.some((p) => dr.origs[p.id] && JSON.stringify(p) !== JSON.stringify(dr.origs[p.id]));
+    if (moved) commit(docRef.current, dr.before);
   };
 
   // ── キー ──
@@ -618,43 +715,93 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       if (mod && ev.key.toLowerCase() === 'z') { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); return; }
       if (mod && ev.key.toLowerCase() === 'y') { ev.preventDefault(); redo(); return; }
       const d = docRef.current;
-      const sel = selected && d ? d.parts.find((p) => p.id === selected) : undefined;
+      const sels = d ? selection.map((id) => d.parts.find((p) => p.id === id)).filter((p): p is ThumbPart => !!p) : [];
       if (ev.key === 'Escape' && composer) { setComposer(null); return; }
+      // Ctrl+A: 出ている部品を全部選ぶ
+      if (mod && ev.key.toLowerCase() === 'a' && d && mode === 'select') {
+        ev.preventDefault();
+        setSelection(d.parts.filter((p) => !p.hidden).map((p) => p.id));
+        return;
+      }
       // Ctrl+D: 部品を選んでいればその部品、選んでいなければ今の案を複製する（2026-11-24 本人「複製はCtrl+Dと…だけで良い」）
-      if (mod && ev.key.toLowerCase() === 'd' && !sel) {
+      if (mod && ev.key.toLowerCase() === 'd' && !sels.length) {
         if (patternActions.current) { ev.preventDefault(); patternActions.current.duplicateCurrent(); }
         return;
       }
-      if (!sel || !d) return;
-      if (mod && ev.key.toLowerCase() === 'd') { ev.preventDefault(); duplicate(sel); return; }
-      if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); remove(sel.id); return; }
-      if (ev.key === 'Escape') { setSelected(null); return; }
+      if (!sels.length || !d) return;
+      if (mod && ev.key.toLowerCase() === 'd') { ev.preventDefault(); duplicate(sels); return; }
+      if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); remove(sels.map((p) => p.id)); return; }
+      if (ev.key === 'Escape') { setSelection([]); return; }
       const step = ev.shiftKey ? 10 : 1;
       const mv: Record<string, [number, number]> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
       if (mv[ev.key]) {
         ev.preventDefault();
-        updatePart(sel.id, (p) => ({ ...p, x: p.x + mv[ev.key][0], y: p.y + mv[ev.key][1] } as ThumbPart));
+        const ids = new Set(sels.map((p) => p.id));
+        commit({ ...d, parts: d.parts.map((p) => (ids.has(p.id) ? { ...p, x: p.x + mv[ev.key][0], y: p.y + mv[ev.key][1] } as ThumbPart : p)) });
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  const remove = (id: string) => {
+  const remove = (ids: string | string[]) => {
     const d = docRef.current;
     if (!d) return;
-    commit({ ...d, parts: d.parts.filter((p) => p.id !== id) });
-    setSelected(null);
+    const gone = new Set(Array.isArray(ids) ? ids : [ids]);
+    commit({ ...d, parts: d.parts.filter((p) => !gone.has(p.id)) });
+    setSelection([]);
   };
-  const duplicate = (p: ThumbPart) => {
+  // 複製: 選んでいる部品の全部を、それぞれ元のすぐ手前に写す。写した方を選ぶ
+  const duplicate = (ps: ThumbPart | ThumbPart[]) => {
     const d = docRef.current;
     if (!d) return;
-    const copy = { ...clone(p), id: newPartId(p.type === 'text' ? 't' : 'i'), name: p.name ? `${p.name}（写し）` : undefined, x: p.x + 30, y: p.y + 30, locked: false } as ThumbPart;
-    const i = d.parts.findIndex((q) => q.id === p.id);
+    const list = Array.isArray(ps) ? ps : [ps];
     const parts = [...d.parts];
-    parts.splice(i + 1, 0, copy);
+    const made: string[] = [];
+    for (const p of list) {
+      const copy = { ...clone(p), id: newPartId(p.type === 'text' ? 't' : 'i'), name: p.name ? `${p.name}（写し）` : undefined, x: p.x + 30, y: p.y + 30, locked: false } as ThumbPart;
+      const i = parts.findIndex((q) => q.id === p.id);
+      parts.splice(i + 1, 0, copy);
+      made.push(copy.id);
+    }
     commit({ ...d, parts });
-    setSelected(copy.id);
+    setSelection(made);
+  };
+  // 揃える・等間隔に並べる（複数を選んだ時）。見えている範囲（回してあれば回した範囲）で揃える
+  const arrange = (how: 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom' | 'hspace' | 'vspace') => {
+    const d = docRef.current;
+    if (!d) return;
+    const ps = selection.map((id) => d.parts.find((p) => p.id === id)).filter((p): p is ThumbPart => !!p && !p.locked);
+    if (ps.length < 2) return;
+    const bs = new Map(ps.map((p) => [p.id, partBounds(p, boxOf(p), boxes[p.id])]));
+    const u = unionBox([...bs.values()])!;
+    const delta = new Map<string, [number, number]>();
+    if (how === 'hspace' || how === 'vspace') {
+      const hz = how === 'hspace';
+      const sorted = [...ps].sort((a, b) => (hz ? bs.get(a.id)!.x - bs.get(b.id)!.x : bs.get(a.id)!.y - bs.get(b.id)!.y));
+      const total = sorted.reduce((n, p) => n + (hz ? bs.get(p.id)!.w : bs.get(p.id)!.h), 0);
+      const gap = ((hz ? u.w : u.h) - total) / (sorted.length - 1);
+      let at = hz ? u.x : u.y;
+      for (const p of sorted) {
+        const b = bs.get(p.id)!;
+        delta.set(p.id, hz ? [at - b.x, 0] : [0, at - b.y]);
+        at += (hz ? b.w : b.h) + gap;
+      }
+    } else {
+      for (const p of ps) {
+        const b = bs.get(p.id)!;
+        const dx = how === 'left' ? u.x - b.x : how === 'right' ? u.x + u.w - (b.x + b.w) : how === 'hcenter' ? u.x + u.w / 2 - (b.x + b.w / 2) : 0;
+        const dy = how === 'top' ? u.y - b.y : how === 'bottom' ? u.y + u.h - (b.y + b.h) : how === 'vcenter' ? u.y + u.h / 2 - (b.y + b.h / 2) : 0;
+        delta.set(p.id, [dx, dy]);
+      }
+    }
+    commit({ ...d, parts: d.parts.map((p) => { const m = delta.get(p.id); return m ? { ...p, x: p.x + m[0], y: p.y + m[1] } as ThumbPart : p; }) });
+  };
+  const updateParts = (ids: string[], patch: Partial<ThumbPart>) => {
+    const d = docRef.current;
+    if (!d) return;
+    const set = new Set(ids);
+    commit({ ...d, parts: d.parts.map((p) => (set.has(p.id) ? ({ ...p, ...patch } as ThumbPart) : p)) });
   };
   const move = (id: string, dir: 'up' | 'down' | 'front' | 'back') => {
     const d = docRef.current;
@@ -748,24 +895,26 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const sendMarks = async () => {
     const d = docRef.current;
     const text = note.trim();
-    const target = composer?.partId ? d?.parts.find((p) => p.id === composer.partId) : undefined;
+    const targets = d && composer ? composer.partIds.map((id) => d.parts.find((p) => p.id === id)).filter((p): p is ThumbPart => !!p) : [];
+    const target = targets[0];
     if (!d || (!marks.length && !text)) return;
     if (!text && target && !marks.length) return;
     setSending(true);
     try {
       const pad = 12;
-      // ダンに渡す絵: ペンの線（赤）と、コメントを付けた部品の枠（水色）
-      const tb = target ? partBounds(target, boxOf(target), boxes[target.id]) : null;
-      const targetMark: ThumbMark | null = tb ? {
+      // ダンに渡す絵: ペンの線（赤）と、コメントを付けた部品の枠（水色。複数なら1つずつ）
+      const tbs = targets.map((p) => partBounds(p, boxOf(p), boxes[p.id]));
+      const tb = unionBox(tbs);
+      const targetMarks: ThumbMark[] = tbs.map((b) => ({
         color: TARGET_COLOR, width: Math.max(5, 3 / scale),
-        points: [[tb.x, tb.y], [tb.x + tb.w, tb.y], [tb.x + tb.w, tb.y + tb.h], [tb.x, tb.y + tb.h], [tb.x, tb.y]],
-      } : null;
+        points: [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h], [b.x, b.y]],
+      }));
       const mb = marksBounds(marks);
       const area = mb ? { x: mb.x - pad, y: mb.y - pad, w: mb.w + pad * 2, h: mb.h + pad * 2 } : tb;
       const box = area ? [area.x, area.y, area.w, area.h] : [];
       const hit = (b: PartBox) => box.length === 4 && b.x < box[0] + box[2] && b.x + b.w > box[0] && b.y < box[1] + box[3] && b.y + b.h > box[1];
       const under = mb ? [...d.parts].reverse().filter((p) => !p.hidden && hit(boxOf(p))).map((p) => `${p.id}（${partLabel(p)}）`) : [];
-      const sent = targetMark ? [...marks, targetMark] : marks;
+      const sent = [...marks, ...targetMarks];
       const anchor: [number, number] | null = mb ? [mb.x + mb.w, mb.y] : tb ? [tb.x + tb.w, tb.y] : null;
       const id = `ti_${Date.now().toString(36)}`;
       const res = await fetch(`/api/v1/production-assets/contents/${encodeURIComponent(contentId)}/instructions`, {
@@ -776,8 +925,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
             id, kind: 'thumb_marks', note: text,
             data: {
               marks: sent, box, parts_under: under,
-              target: target && tb ? partDetail(target, boxOf(target)) : null,
-              selected: target ? `${target.id}（${partLabel(target)}）` : null,
+              target: targets.length ? (targets.length > 1 ? `${targets.length}個の部品（まとめて選んだ）: ` : '') + targets.map((p) => partDetail(p, boxOf(p))).join('、') : null,
+              selected: targets.length ? targets.map((p) => `${p.id}（${partLabel(p)}）`).join('、') : null,
               job_id: resendOf?.job_id,
             },
           },
@@ -785,7 +934,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       });
       if (!res.ok) throw new Error(await res.text());
       const j = (await res.json()) as { job_id: string };
-      const instr: ThumbInstruction = { id, note: text, marks: sent, job_id: j.job_id, created_at: new Date().toISOString(), part_id: target?.id || null, anchor };
+      const instr: ThumbInstruction = { id, note: text, marks: sent, job_id: j.job_id, created_at: new Date().toISOString(), part_id: target?.id || null, part_ids: targets.length > 1 ? targets.map((p) => p.id) : null, anchor };
       const cur = docRef.current || d;
       const list = (cur.instructions || []).filter((x) => x.id !== resendOf?.id);
       commit({ ...cur, instructions: [...list, instr] });
@@ -936,6 +1085,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   };
 
   const sel = doc && selected ? doc.parts.find((p) => p.id === selected) : undefined;
+  const selParts = doc ? selection.map((id) => doc.parts.find((p) => p.id === id)).filter((p): p is ThumbPart => !!p) : [];
+  const multi = selParts.length > 1 ? selParts : null;
   const shownMarks = mode === 'pen' ? marks : showInstr ? instructions.find((i) => i.id === showInstr)?.marks : undefined;
 
   // ── 選んだ部品の枠と角 ──
@@ -958,7 +1109,36 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         ))}
       </g>
     );
+  })() : multi && mode === 'select' ? (() => {
+    // 複数を選んだ時: 1つずつの点線の枠と、全部を囲む枠の角（引くと全部をまとめて大きさを変える）
+    const shown = multi.filter((p) => !p.hidden);
+    const u = unionBox(shown.map((p) => partBounds(p, boxOf(p), boxes[p.id])));
+    const sw = 1.5 / scale;
+    return (
+      <g data-thumb-multi-overlay>
+        {shown.map((p) => {
+          const b = boxOf(p);
+          const [cx, cy] = partCenter(p, boxes[p.id]);
+          return <rect key={p.id} x={b.x} y={b.y} width={b.w} height={b.h} fill="none" stroke="#38bdf8" strokeWidth={sw} strokeDasharray={`${6 / scale} ${4 / scale}`}
+            transform={p.rotation ? `rotate(${p.rotation} ${cx} ${cy})` : undefined} pointerEvents="none" />;
+        })}
+        {u ? (
+          <>
+            <rect x={u.x} y={u.y} width={u.w} height={u.h} fill="none" stroke="#38bdf8" strokeWidth={sw * 1.5} pointerEvents="none" />
+            {([['g-nw', u.x, u.y], ['g-ne', u.x + u.w, u.y], ['g-sw', u.x, u.y + u.h], ['g-se', u.x + u.w, u.y + u.h]] as const).map(([k, x, y]) => (
+              <rect key={k} data-handle={k} x={x - handleR} y={y - handleR} width={handleR * 2} height={handleR * 2} fill="#fff" stroke="#38bdf8" strokeWidth={sw}
+                style={{ cursor: k === 'g-nw' || k === 'g-se' ? 'nwse-resize' : 'nesw-resize' }} />
+            ))}
+          </>
+        ) : null}
+      </g>
+    );
   })() : null;
+  // 囲んで選んでいる間の四角
+  const marqueeEl = marquee ? (
+    <rect x={marquee.x} y={marquee.y} width={marquee.w} height={marquee.h} fill="rgba(56,189,248,0.12)" stroke="#38bdf8"
+      strokeWidth={1 / scale} pointerEvents="none" data-thumb-marquee />
+  ) : null;
 
   // コメントの印（番号の丸）。押すとそのコメントを開く。大きさは寄っても引いても画面の上で同じ
   const instrAnchor = (ins: ThumbInstruction): [number, number] | null => {
@@ -994,30 +1174,34 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const lastCtx = useRef<string | null>(null);
   const linkRef = useRef(chatLink);
   useEffect(() => { linkRef.current = chatLink; }, [chatLink]);
-  const selPart = doc && selected ? doc.parts.find((p) => p.id === selected) : undefined;
-  const selBox = selPart ? boxOf(selPart) : null;
+  const selPart = selParts[0];
+  const selBox = selParts.length ? unionBox(selParts.map((p) => boxOf(p))) : null;
   const where = `サムネ「${title}」（作品 content_id=${contentId}、部屋 ${roomId}）`;
-  const partText = selPart && selBox ? partDetail(selPart, selBox) : '';
+  const partText = selParts.map((p) => partDetail(p, boxOf(p))).join('、');
   useEffect(() => {
     const link = linkRef.current;
     if (!link) return;
     if (lastCtx.current !== partText) { lastCtx.current = partText; link.onContext?.(partText); }
-    const key = selPart && mode === 'select' ? `${selPart.id}|${partText}` : '';
+    const key = selPart && mode === 'select' ? `${selection.join(',')}|${partText}` : '';
     if (key === lastPartKey.current) return;
     lastPartKey.current = key;
     if (!key || !selPart || !selBox) { dropAttach(link.projectId, 'thumb-part'); return; }
     const box = [selBox.x, selBox.y, selBox.w, selBox.h];
-    const id = selPart.id;
+    const ids = [...selection];
+    const many = ids.length > 1;
     putAttach(link.projectId, {
       key: 'thumb-part',
-      label: `選んだ部品：${selPart.type === 'text' ? `文字「${selPart.text.replace(/\n/g, ' ').slice(0, 14)}」` : partLabel(selPart)}`,
-      preview: selPart.type === 'image' ? selPart.src : undefined,
-      detail: `- みきさんが選んだ部品（「これ」「この文字」「この絵」はこれ）: ${where} の ${partText}。添付の絵の赤い枠がこの部品。`,
+      label: many ? `選んだ部品：${ids.length}個` : `選んだ部品：${selPart.type === 'text' ? `文字「${selPart.text.replace(/\n/g, ' ').slice(0, 14)}」` : partLabel(selPart)}`,
+      preview: !many && selPart.type === 'image' ? selPart.src : undefined,
+      detail: many
+        ? `- みきさんがまとめて選んだ部品${ids.length}個（「これ」「これら」はこれ）: ${where} の ${partText}。添付の絵の赤い枠がこれらを囲む範囲。`
+        : `- みきさんが選んだ部品（「これ」「この文字」「この絵」はこれ）: ${where} の ${partText}。添付の絵の赤い枠がこの部品。`,
       upload: () => link.snapshot({ box }),
       // 札の×は部品の選択も外す（枠が消え、ダンにも選んだ部品を渡さない。もう一度押せばまた添わる）2026-11-22
-      onRemove: () => setSelected(cur => (cur === id ? null : cur)),
+      onRemove: () => setSelection((cur) => cur.filter((x) => !ids.includes(x))),
     });
-  }, [partText, selPart, selBox, mode, where, putAttach, dropAttach]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [partText, selection.join(','), mode, where, putAttach, dropAttach]);
 
   const marksKey = useMemo(() => marks.map((m) => m.points.length).join(','), [marks]);
   useEffect(() => {
@@ -1110,7 +1294,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           <PartPreview doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === sel.id) || sel} box={boxOf(sel)} className="h-12 w-full" />
         </span>
         {!chatLink ? (
-          <button type="button" title="この部品にコメントしてダンに直してもらう" className="rounded p-1 hover:bg-muted" onClick={() => setComposer({ partId: sel.id })} data-thumb-comment-part>
+          <button type="button" title="この部品にコメントしてダンに直してもらう" className="rounded p-1 hover:bg-muted" onClick={() => setComposer({ partIds: [sel.id] })} data-thumb-comment-part>
             <MessageSquare className="h-4 w-4" />
           </button>
         ) : null}
@@ -1200,16 +1384,97 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         </div>
       )}
     </div>
-  ) : null;
+  ) : multi ? (() => {
+    const texts = multi.filter((p): p is ThumbTextPart => p.type === 'text');
+    const allText = texts.length === multi.length;
+    const ids = multi.map((p) => p.id);
+    const ab = 'flex h-8 items-center justify-center rounded border border-border hover:bg-muted disabled:opacity-40';
+    return (
+      <div className="space-y-3" data-thumb-props data-thumb-multi-props>
+        <div className="flex items-center gap-1">
+          <span className="flex-1 text-xs font-semibold">{multi.length}個の部品を選んでいます</span>
+          {!chatLink ? (
+            <button type="button" title="選んだ部品にまとめてコメントしてダンに直してもらう" className="rounded p-1 hover:bg-muted" onClick={() => setComposer({ partIds: ids })} data-thumb-comment-part>
+              <MessageSquare className="h-4 w-4" />
+            </button>
+          ) : null}
+          <button type="button" title="まとめて複製（Ctrl+D）" className="rounded p-1 hover:bg-muted" onClick={() => duplicate(multi)}><Copy className="h-4 w-4" /></button>
+          <button type="button" title="まとめて消す（Delete）" className="rounded p-1 hover:bg-muted hover:text-destructive" onClick={() => remove(ids)}><Trash2 className="h-4 w-4" /></button>
+        </div>
+        <div className="grid grid-cols-4 gap-1">
+          {multi.map((p) => (
+            <button key={p.id} type="button" title={`${partLabel(p)}（押すとこれだけを選ぶ）`} onClick={() => setSelected(p.id)}>
+              <PartPreview doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === p.id) || p} box={boxOf(p)} className="h-10 w-full" />
+            </button>
+          ))}
+        </div>
+        <div>
+          <span className={label}>揃える</span>
+          <div className="grid grid-cols-4 gap-1" data-thumb-align>
+            <button type="button" className={ab} title="左を揃える" onClick={() => arrange('left')} data-thumb-align-left><AlignStartVertical className="h-4 w-4" /></button>
+            <button type="button" className={ab} title="横の真ん中を揃える" onClick={() => arrange('hcenter')}><AlignCenterVertical className="h-4 w-4" /></button>
+            <button type="button" className={ab} title="右を揃える" onClick={() => arrange('right')}><AlignEndVertical className="h-4 w-4" /></button>
+            <button type="button" className={ab} title="横に等間隔" disabled={multi.length < 3} onClick={() => arrange('hspace')} data-thumb-align-hspace><AlignHorizontalSpaceAround className="h-4 w-4" /></button>
+            <button type="button" className={ab} title="上を揃える" onClick={() => arrange('top')} data-thumb-align-top><AlignStartHorizontal className="h-4 w-4" /></button>
+            <button type="button" className={ab} title="縦の真ん中を揃える" onClick={() => arrange('vcenter')}><AlignCenterHorizontal className="h-4 w-4" /></button>
+            <button type="button" className={ab} title="下を揃える" onClick={() => arrange('bottom')}><AlignEndHorizontal className="h-4 w-4" /></button>
+            <button type="button" className={ab} title="縦に等間隔" disabled={multi.length < 3} onClick={() => arrange('vspace')}><AlignVerticalSpaceAround className="h-4 w-4" /></button>
+          </div>
+        </div>
+        {allText ? (
+          <>
+            <label className="block"><span className={label}>書体（まとめて）</span>
+              <select className={field} value={texts.every((t) => t.font === texts[0].font) ? texts[0].font : ''} onChange={(e) => updateParts(ids, { font: e.target.value as ThumbFontId })}>
+                {texts.every((t) => t.font === texts[0].font) ? null : <option value="">（ばらばら）</option>}
+                {Object.entries(THUMB_FONTS).map(([k, f]) => <option key={k} value={k}>{f.label}</option>)}
+              </select>
+            </label>
+            <div>
+              <span className={label}>文字の色（まとめて）</span>
+              <div className="flex flex-wrap gap-1.5">
+                {['#ffffff', '#ffe400', '#ff2a2a', '#b05cff', '#00d0ff', '#111111'].map((c) => (
+                  <button key={c} type="button" title={c} onClick={() => updateParts(ids, { fill: c })} className="h-6 w-6 rounded-full border border-border" style={{ background: c }} />
+                ))}
+                <input type="color" className="h-6 w-8 rounded border border-border" value={texts[0].fill.slice(0, 7)} onChange={(e) => updateParts(ids, { fill: e.target.value })} />
+              </div>
+            </div>
+          </>
+        ) : null}
+        <div className="grid grid-cols-2 gap-1.5">
+          <button type="button" className="h-8 rounded border border-border text-xs hover:bg-muted" onClick={() => updateParts(ids, { hidden: true })}>まとめて隠す</button>
+          <button type="button" className="h-8 rounded border border-border text-xs hover:bg-muted" onClick={() => updateParts(ids, { locked: !multi.every((p) => p.locked) })}>{multi.every((p) => p.locked) ? 'まとめて固定を外す' : 'まとめて固定'}</button>
+        </div>
+      </div>
+    );
+  })() : null;
+
+  // 部品の一覧での選び方（エクスプローラーや Figma と同じ）
+  const onLayerClick = (e: React.MouseEvent, id: string) => {
+    setMode('select');
+    const order = [...doc.parts].reverse().map((q) => q.id);
+    if (e.shiftKey && listAnchor.current && order.includes(listAnchor.current)) {
+      const a = order.indexOf(listAnchor.current), b = order.indexOf(id);
+      const range = order.slice(Math.min(a, b), Math.max(a, b) + 1);
+      setSelection((cur) => ((e.metaKey || e.ctrlKey) ? [...cur, ...range.filter((x) => !cur.includes(x))] : range));
+      return;
+    }
+    listAnchor.current = id;
+    if (e.metaKey || e.ctrlKey) {
+      setSelection((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+      return;
+    }
+    setSelected(id);
+  };
 
   const layers = (
     <div data-thumb-layers>
       <div className="mb-1 text-[11px] font-semibold text-muted-foreground">部品（上が手前）</div>
       <ul className="space-y-1">
         {[...(viewDoc || doc).parts].reverse().map((p) => (
-          <li key={p.id} data-thumb-layer={p.id} className={`group flex items-center gap-1 rounded p-0.5 text-xs ${p.id === selected ? 'bg-sky-500/15 ring-2 ring-sky-500' : 'hover:bg-muted'}`}>
-            {/* 名前の文字ではなく、その部品だけの絵で見せる（名前はマウスを乗せた時だけ） */}
-            <button type="button" title={partLabel(p)} className={`min-w-0 flex-1 ${p.hidden ? 'opacity-40' : ''}`} onClick={() => { setSelected(p.id); setMode('select'); }}>
+          <li key={p.id} data-thumb-layer={p.id} data-selected={selection.includes(p.id) ? 'true' : undefined} className={`group flex items-center gap-1 rounded p-0.5 text-xs ${selection.includes(p.id) ? 'bg-sky-500/15 ring-2 ring-sky-500' : 'hover:bg-muted'}`}>
+            {/* 名前の文字ではなく、その部品だけの絵で見せる（名前はマウスを乗せた時だけ）。
+                ⌘/Ctrl で1つずつ足す・外す、Shift で前に押した所からここまでをまとめて選ぶ */}
+            <button type="button" title={`${partLabel(p)}（Shift・⌘/Ctrl で複数選べます）`} className={`min-w-0 flex-1 ${p.hidden ? 'opacity-40' : ''}`} onClick={(e) => onLayerClick(e, p.id)}>
               <PartPreview doc={viewDoc || doc} part={p} box={boxOf(p)} className="h-14 w-full" />
             </button>
             <button type="button" title={p.hidden ? '出す' : '隠す'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { hidden: !p.hidden })}>
@@ -1233,12 +1498,13 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           const active = st ? st.active : true;
           const num = instructions.indexOf(ins) + 1;
           const tp = ins.part_id ? (viewDoc || doc).parts.find((q) => q.id === ins.part_id) : undefined;
+          const tids = (ins.part_ids && ins.part_ids.length ? ins.part_ids : tp ? [tp.id] : []).filter((id) => (viewDoc || doc).parts.some((q) => q.id === id));
           return (
             <li key={ins.id} data-thumb-instruction={ins.id} className={`rounded border p-2 text-xs ${showInstr === ins.id ? 'border-sky-400 ring-1 ring-sky-400' : 'border-border'}`}
               onMouseEnter={() => setShowInstr(ins.id)} onMouseLeave={() => setShowInstr(null)}>
               <div className="flex items-start gap-1.5">
                 <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white ${active ? 'bg-sky-500' : 'bg-emerald-500'}`}>{num}</span>
-                <button type="button" className="min-w-0 flex-1 text-left" onClick={() => { setShowInstr((v) => (v === ins.id ? null : ins.id)); if (tp) { setSelected(tp.id); setMode('select'); } }}>
+                <button type="button" className="min-w-0 flex-1 text-left" onClick={() => { setShowInstr((v) => (v === ins.id ? null : ins.id)); if (tids.length) { setSelection(tids); setMode('select'); } }}>
                   {tp ? <PartPreview doc={viewDoc || doc} part={tp} box={boxOf(tp)} className="mb-1 h-10 w-full" /> : null}
                   <div className="font-medium">{ins.note || '（書き込みだけ）'}</div>
                   <div className="mt-1 flex items-start gap-1 text-muted-foreground">
@@ -1253,8 +1519,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
                   onClick={() => {
                     setResendOf(ins); setNote(ins.note);
                     const pens = ins.marks.filter((m) => m.color !== TARGET_COLOR);
-                    if (tp && !pens.length) { setMarks([]); setMode('select'); setSelected(tp.id); setComposer({ partId: tp.id }); }
-                    else { setMarks(pens); setMode('pen'); setSelected(null); setComposer(tp ? { partId: tp.id } : null); }
+                    if (tids.length && !pens.length) { setMarks([]); setMode('select'); setSelection(tids); setComposer({ partIds: tids }); }
+                    else { setMarks(pens); setMode('pen'); setSelected(null); setComposer(tids.length ? { partIds: tids } : null); }
                   }}>
                   書き直して、もう一度送る
                 </button>
@@ -1315,23 +1581,22 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
 
   // ── その場に出るコメントの欄（台本の画面のコメントと同じく、選んだ部品・描いた線の横に出る）──
   const penDrawing = gesture?.kind === 'pen';
-  const composerAt: { anchor: [number, number]; part: ThumbPart | null } | null = (() => {
+  const composerAt: { anchor: [number, number]; parts: ThumbPart[] } | null = (() => {
     if (chatLink) return null;
+    const cparts = composer ? composer.partIds.map((id) => doc.parts.find((p) => p.id === id)).filter((p): p is ThumbPart => !!p) : [];
     if (mode === 'pen') {
       const mb = marks.length && !penDrawing ? marksBounds(marks) : null;
       if (!mb) return null;
-      const part = composer?.partId ? doc.parts.find((p) => p.id === composer.partId) || null : null;
-      return { anchor: [mb.x + mb.w, mb.y], part };
+      return { anchor: [mb.x + mb.w, mb.y], parts: cparts };
     }
-    if (!composer?.partId) return null;
-    const part = doc.parts.find((p) => p.id === composer.partId);
-    if (!part || part.id !== selected) return null;
-    const tb = partBounds(part, boxOf(part), boxes[part.id]);
-    return { anchor: [tb.x + tb.w, tb.y], part };
+    if (!cparts.length || cparts.length !== selection.length || !cparts.every((p) => selection.includes(p.id))) return null;
+    const tb = unionBox(cparts.map((p) => partBounds(p, boxOf(p), boxes[p.id])))!;
+    return { anchor: [tb.x + tb.w, tb.y], parts: cparts };
   })();
-  // 選んだ部品の右上の小さな「コメント」ボタン（つかんでいる間は隠す）
-  const commentBtnAt: [number, number] | null = !chatLink && mode === 'select' && sel && !sel.hidden && !gesture && !composerAt ? (() => {
-    const tb = partBounds(sel, boxOf(sel), boxes[sel.id]);
+  // 選んだ部品の右上の小さな「コメント」ボタン（つかんでいる間は隠す）。複数を選んでいれば全部を囲む範囲の右上
+  const shownSel = selParts.filter((p) => !p.hidden);
+  const commentBtnAt: [number, number] | null = !chatLink && mode === 'select' && shownSel.length && !gesture && !marquee && !composerAt ? (() => {
+    const tb = unionBox(shownSel.map((p) => partBounds(p, boxOf(p), boxes[p.id])))!;
     return toStagePx(tb.x + tb.w, tb.y);
   })() : null;
   const COMPOSER_W = 272;
@@ -1342,7 +1607,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const floating = (
     <>
       {commentBtnAt ? (
-        <button type="button" onPointerDown={(e) => e.stopPropagation()} onClick={() => sel && setComposer({ partId: sel.id })}
+        <button type="button" onPointerDown={(e) => e.stopPropagation()} onClick={() => setComposer({ partIds: shownSel.map((p) => p.id) })}
           title="この部品にコメントしてダンに直してもらう"
           className="absolute z-20 flex h-8 items-center gap-1 rounded-full bg-sky-600 px-2.5 text-xs font-semibold text-white shadow-lg hover:bg-sky-500"
           style={floatPos(commentBtnAt, 96, 32)} data-thumb-comment-btn>
@@ -1351,14 +1616,16 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       ) : null}
       {composerAt ? (() => {
         const [px, py] = toStagePx(composerAt.anchor[0], composerAt.anchor[1]);
-        const target = composerAt.part;
+        const targets = composerAt.parts;
         return (
           <div onPointerDown={(e) => e.stopPropagation()} className="absolute z-30 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-xl"
             style={{ width: COMPOSER_W, ...floatPos([px, py], COMPOSER_W, 150) }} data-thumb-composer>
-            {target ? (
+            {targets.length ? (
               <div className="mb-1.5 flex items-center gap-1.5">
-                <PartPreview doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === target.id) || target} box={boxOf(target)} className="h-8 w-14 shrink-0" />
-                <span className="text-[11px] text-muted-foreground">この部品へのコメント{marks.length ? '（赤い線つき）' : ''}</span>
+                {targets.slice(0, 4).map((target) => (
+                  <PartPreview key={target.id} doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === target.id) || target} box={boxOf(target)} className="h-8 w-12 shrink-0" />
+                ))}
+                <span className="text-[11px] text-muted-foreground">{targets.length > 1 ? `${targets.length}個の部品` : 'この部品'}へのコメント{marks.length ? '（赤い線つき）' : ''}</span>
               </div>
             ) : <div className="mb-1.5 text-[11px] text-muted-foreground">赤い線へのコメント</div>}
             <textarea
@@ -1402,11 +1669,10 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           doc={viewDoc || doc}
           width={boardW}
           pasteboard={outputView || !board ? undefined : board}
-          boxes={boxes}
           marks={shownMarks}
           onMeasure={(id, box) => setBoxes((b) => (b[id] && Math.abs(b[id].x - box.x) < 0.5 && Math.abs(b[id].y - box.y) < 0.5 && Math.abs(b[id].w - box.w) < 0.5 && Math.abs(b[id].h - box.h) < 0.5 ? b : { ...b, [id]: box }))}
           partProps={partProps}
-          overlay={<>{overlay}{pins}</>}
+          overlay={<>{overlay}{marqueeEl}{pins}</>}
           style={{ touchAction: 'none', cursor: mode === 'pen' ? 'crosshair' : undefined }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -1434,9 +1700,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
               const p = doc.parts.find((q) => q.id === id);
               if (!p) return null;
               return (
-                <button key={id} type="button" title={partLabel(p)} className={`flex w-full items-center gap-1.5 px-1.5 py-1 text-left hover:bg-muted ${id === selected ? 'bg-sky-500/15' : ''}`}
+                <button key={id} type="button" title={partLabel(p)} className={`flex w-full items-center gap-1.5 px-1.5 py-1 text-left hover:bg-muted ${selection.includes(id) ? 'bg-sky-500/15' : ''}`}
                   onClick={() => { setSelected(id); setMode('select'); setPickMenu(null); }}>
-                  <PartPreview doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === id) || p} box={boxOf(p)} className={`h-10 min-w-0 flex-1 ${id === selected ? 'ring-2 ring-sky-500' : ''}`} />
+                  <PartPreview doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === id) || p} box={boxOf(p)} className={`h-10 min-w-0 flex-1 ${selection.includes(id) ? 'ring-2 ring-sky-500' : ''}`} />
                   {p.locked ? <Lock className="h-3 w-3 shrink-0 opacity-60" /> : null}
                 </button>
               );
