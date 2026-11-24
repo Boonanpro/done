@@ -23,7 +23,7 @@ from typing import Any, Literal
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.chat_artifact_routes import get_current_user
@@ -9561,6 +9561,8 @@ def use_sfx_from_library(data: UseSfxRequest, current_user: TokenData = Depends(
 
 class ThumbnailSaveRequest(BaseModel):
     doc: dict[str, Any]
+    # その形の元にした rev。後にほかの所（ダン・別の画面）で保存されていたら 409 と今の形を返す
+    base_rev: int | None = None
 
 
 @router.get("/contents/{content_id}/thumbnail")
@@ -9568,7 +9570,8 @@ def get_thumbnail_doc(content_id: str, room_id: str = Query(...), current_user: 
     _room_dir(room_id)
     from app.services import thumbnail_doc
     try:
-        return {"doc": thumbnail_doc.versioned(room_id, thumbnail_doc.get(room_id, content_id))}
+        return {"doc": thumbnail_doc.versioned(room_id, thumbnail_doc.get(room_id, content_id)),
+                "activity": thumbnail_doc.activity(room_id, content_id), "now": time.time()}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -9580,7 +9583,9 @@ def save_thumbnail_doc(content_id: str, data: ThumbnailSaveRequest, room_id: str
     _room_dir(room_id)
     from app.services import thumbnail_doc
     try:
-        doc = thumbnail_doc.save(room_id, content_id, data.doc, "owner")
+        doc = thumbnail_doc.save(room_id, content_id, data.doc, "owner", base_rev=data.base_rev)
+    except thumbnail_doc.StaleDoc as stale:
+        return JSONResponse(status_code=409, content={"detail": str(stale), "doc": thumbnail_doc.versioned(room_id, stale.current)})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"rev": doc["rev"]}
@@ -9599,7 +9604,7 @@ def create_video_thumbnail(content_id: str, room_id: str = Query(...), current_u
     if not video or thumbnail_doc.is_thumbnail(video):
         raise HTTPException(status_code=404, detail="動画の作品が見つかりません")
     doc = {"width": 1920, "height": 1080, "background": "#111111", "parts": [], "title": video.get("title") or ""}
-    return thumbnail_doc.create(room_id, "サムネ", doc, video_id=content_id)
+    return thumbnail_doc.create(room_id, "サムネ", doc, video_id=content_id, actor="owner")
 
 
 class ThumbnailPatternRequest(BaseModel):
@@ -9616,7 +9621,8 @@ def list_thumbnail_patterns(content_id: str, room_id: str = Query(...), current_
     _room_dir(room_id)
     from app.services import thumbnail_doc
     pats = thumbnail_doc.thumbnails_of(room_id, content_id)
-    return {"patterns": [{"id": c["id"], "title": c.get("title") or "", "updated_at": c.get("updated_at"),
+    return {"now": time.time(), "patterns": [{"id": c["id"], "title": c.get("title") or "", "updated_at": c.get("updated_at"),
+                          "created_at": c.get("created_at"),
                           "doc": thumbnail_doc.versioned(room_id, ((c.get("timeline") or {}).get("thumbnail")) or {})}
                          for c in pats]}
 

@@ -22,7 +22,7 @@ import { PartPreview, ThumbCanvas, partBounds, partCenter, type PartBox } from '
 import { ThumbPatterns, type ThumbPatternActions, type ThumbPatternLink } from './thumb-patterns';
 import { useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
 import {
-  THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, newPartId, removeFinish,
+  THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, mergeThumbDocs, newPartId, removeFinish,
   type ThumbDoc, type ThumbFinishJob, type ThumbFontId, type ThumbInstruction, type ThumbMark, type ThumbPart, type ThumbTextPart,
 } from './thumb-doc';
 
@@ -72,6 +72,12 @@ function unionBox(bs: PartBox[]): PartBox | null {
 }
 
 const PEN_COLOR = '#ff2a2a';
+// ダンの直しを見せる長さ（前の形から今の形へ動く0.7秒＋光と「ダン」の印が残る間）
+const DAN_MOVE_MS = 700;
+const DAN_FX_MS = 3200;
+type DanActivity = { parts: string[]; label: string; at: number; until: number };
+type DanFx = { t0: number; from: Record<string, ThumbPart>; ghosts: Array<{ part: ThumbPart; after: string | null }>; touched: string[]; gone: ThumbPart[] };
+const LERP_KEYS = ['x', 'y', 'w', 'h', 'size', 'rotation', 'opacity', 'stroke_width', 'outline_width', 'letter_spacing'] as const;
 // コメントを付けた部品を、ダンに渡す絵の上で囲む色
 const TARGET_COLOR = '#38bdf8';
 // 作業台（サムネの枠の外）の余白。枠の周りに少しと、はみ出た部品の周り
@@ -136,6 +142,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const docRef = useRef<ThumbDoc | null>(null);
   docRef.current = doc;
   const baseRev = useRef<number>(-1);
+  // 手元の形の元にした保存の形（ほかの所＝ダン・別の画面の直しを、手元の直しと重ね合わせる時の基準）
+  const baseDoc = useRef<ThumbDoc | null>(null);
   const dirty = useRef(false);
   const saveTimer = useRef<number | null>(null);
   const [saving, setSaving] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -148,8 +156,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const [marquee, setMarquee] = useState<PartBox | null>(null);
   const [mode, setMode] = useState<'select' | 'pen'>('select');
   const [boxes, setBoxes] = useState<Record<string, PartBox>>({});
-  const undoStack = useRef<ThumbDoc[]>([]);
-  const redoStack = useRef<ThumbDoc[]>([]);
+  // 元に戻す・やり直すは「本人の1手の前後」。今の形にその1手だけを当てる（あとから入ったダンの直しは巻き戻さない）
+  const undoStack = useRef<Array<{ before: ThumbDoc; after: ThumbDoc }>>([]);
+  const redoStack = useRef<Array<{ before: ThumbDoc; after: ThumbDoc }>>([]);
   const [, bump] = useState(0);
   const drag = useRef<Drag | null>(null);
   const press = useRef<{ at: [number, number]; pick: string | null } | null>(null);
@@ -184,19 +193,76 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   // つかんでいる・描いている間（その間は作業台の広さを止め、コメントのボタンを隠す）
   const [gesture, setGesture] = useState<{ kind: 'pen' | 'part'; board: PartBox | null } | null>(null);
 
+  // ── ダンの手を見せる（2026-11-24 本人「ダンが何かやる時は必ずその操作を見える化しなさい。動画タイムラインや台本ページと
+  //    同じように」）。保存された形が前と違えば、変わった部品を前の形から今の形へ動かし、光と「ダン」の印を出す。
+  //    動画のエディターと同じく、本人の画面（選択・拡大・位置）は動かさない。今起きた直しだけを見せる（古い直しは見せない）
+  const [activity, setActivity] = useState<DanActivity | null>(null);
+  const [danFx, setDanFx] = useState<DanFx | null>(null);
+  const [fxNow, setFxNow] = useState(0);
+  const showDanChange = useCallback((prev: ThumbDoc | null, next: ThumbDoc, serverNow?: number) => {
+    if (!prev || next.saved_by !== 'dan' || typeof document === 'undefined' || document.hidden) return;
+    const at = next.saved_at ? Date.parse(next.saved_at) / 1000 : 0;
+    const now = serverNow || Date.now() / 1000;
+    if (!at || now - at > 8) return;
+    const pm = new Map(prev.parts.map((p) => [p.id, p]));
+    const nm = new Map(next.parts.map((p) => [p.id, p]));
+    const from: Record<string, ThumbPart> = {};
+    const ghosts: Array<{ part: ThumbPart; after: string | null }> = [];
+    const touched: string[] = [];
+    next.parts.forEach((p) => {
+      const o = pm.get(p.id);
+      if (!o) { from[p.id] = { ...p, opacity: 0 } as ThumbPart; touched.push(p.id); return; }
+      if (JSON.stringify(o) === JSON.stringify(p)) return;
+      touched.push(p.id);
+      from[p.id] = o;
+      // 絵が差し替わった（描き直した）時は、前の絵を上に重ねて薄くしていく
+      if (o.type === 'image' && p.type === 'image' && o.src !== p.src) ghosts.push({ part: { ...o, id: `${o.id}__was` }, after: p.id });
+    });
+    prev.parts.forEach((o, i) => {
+      if (nm.has(o.id)) return;
+      ghosts.push({ part: { ...o, id: `${o.id}__gone` }, after: i > 0 ? prev.parts[i - 1].id : null });
+    });
+    if (!touched.length && !ghosts.length) return;
+    setDanFx({ t0: performance.now(), from, ghosts, touched, gone: ghosts.filter((g) => g.part.id.endsWith('__gone')).map((g) => g.part) });
+  }, []);
+  useEffect(() => {
+    if (!danFx) return;
+    let raf = 0;
+    const tick = () => {
+      const t = performance.now() - danFx.t0;
+      setFxNow(t);
+      if (t < DAN_FX_MS) raf = requestAnimationFrame(tick);
+      else setDanFx(null);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [danFx]);
+
+  // 保存されている形を受け取る。手元に保存前の直しがあれば、それを今の形に重ねる（ダンの直しを消さない）
+  const adoptServer = (next: ThumbDoc, force: boolean, serverNow?: number) => {
+    const rev = next.rev ?? 0;
+    if (!force && (rev === baseRev.current || drag.current)) return;
+    const shown = docRef.current;
+    let merged = next;
+    if (!force && dirty.current && baseDoc.current && shown) merged = mergeThumbDocs(baseDoc.current, shown, next);
+    baseRev.current = rev;
+    baseDoc.current = next;
+    docRef.current = merged;
+    setDoc(merged);
+    if (!force) showDanChange(shown, { ...merged, saved_by: next.saved_by, saved_at: next.saved_at }, serverNow);
+  };
+
   // ── 読み込み・ダンの直しを読み直す・保存 ──
   const load = useCallback(async (force = false) => {
     try {
       const res = await fetch(api(`${encodeURIComponent(contentId)}/thumbnail`, roomId), { credentials: 'include', cache: 'no-store' });
       if (!res.ok) return;
-      const j = (await res.json()) as { doc: unknown };
+      const j = (await res.json()) as { doc: unknown; activity?: DanActivity | null; now?: number };
+      setActivity(j.activity && j.activity.label ? j.activity : null);
       const next = asThumbDoc(j.doc);
-      const rev = next.rev ?? 0;
-      if (force || (rev !== baseRev.current && !dirty.current && !drag.current)) {
-        baseRev.current = rev;
-        setDoc(next);
-      }
+      adoptServer(next, force, j.now);
     } catch { /* 次に読み直す */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, contentId]);
 
   useEffect(() => {
@@ -208,24 +274,38 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   useEffect(() => { void loadThumbFonts(doc); }, [doc]);
 
   const flush = useCallback(async () => {
-    const d = docRef.current;
-    if (!d || !dirty.current) return;
-    dirty.current = false;
-    setSaving('saving');
-    try {
-      const res = await fetch(api(`${encodeURIComponent(contentId)}/thumbnail`, roomId), {
-        method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ doc: d }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const j = (await res.json()) as { rev: number };
-      baseRev.current = j.rev;
-      setDoc((cur) => (cur ? { ...cur, rev: j.rev } : cur));
-      setSaving('saved');
-    } catch {
-      dirty.current = true;
-      setSaving('error');
+    // 保存は「この形はこの rev を元にした」と添えて出す。その間にダンなどが保存していたら断られるので、
+    // 今の形を受け取って手元の直しを重ね直し、もう一度出す（古い手元の形で上書きしない）
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const d = docRef.current;
+      if (!d || !dirty.current) return;
+      dirty.current = false;
+      setSaving('saving');
+      try {
+        const res = await fetch(api(`${encodeURIComponent(contentId)}/thumbnail`, roomId), {
+          method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ doc: d, base_rev: baseRev.current >= 0 ? baseRev.current : null }),
+        });
+        if (res.status === 409) {
+          const j = (await res.json()) as { doc: unknown };
+          dirty.current = true;
+          adoptServer(asThumbDoc(j.doc), false);
+          continue;
+        }
+        if (!res.ok) throw new Error(await res.text());
+        const j = (await res.json()) as { rev: number };
+        baseRev.current = j.rev;
+        baseDoc.current = { ...d, rev: j.rev, saved_by: 'owner' };
+        setDoc((cur) => (cur ? { ...cur, rev: j.rev } : cur));
+        setSaving('saved');
+        return;
+      } catch {
+        dirty.current = true;
+        setSaving('error');
+        return;
+      }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, contentId]);
 
   const scheduleSave = useCallback(() => {
@@ -240,7 +320,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const commit = useCallback((next: ThumbDoc, before?: ThumbDoc) => {
     const prev = before || docRef.current;
     if (prev) {
-      undoStack.current.push(clone(prev));
+      undoStack.current.push({ before: clone(prev), after: clone(next) });
       if (undoStack.current.length > 100) undoStack.current.shift();
       redoStack.current = [];
     }
@@ -257,15 +337,17 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   }, [commit]);
 
   const undo = useCallback(() => {
-    const prev = undoStack.current.pop();
-    if (!prev || !docRef.current) return;
-    redoStack.current.push(clone(docRef.current));
-    setDoc(prev); docRef.current = prev; scheduleSave(); bump((n) => n + 1);
+    const step = undoStack.current.pop();
+    if (!step || !docRef.current) return;
+    redoStack.current.push(step);
+    const next = mergeThumbDocs(step.after, step.before, docRef.current);
+    setDoc(next); docRef.current = next; scheduleSave(); bump((n) => n + 1);
   }, [scheduleSave]);
   const redo = useCallback(() => {
-    const next = redoStack.current.pop();
-    if (!next || !docRef.current) return;
-    undoStack.current.push(clone(docRef.current));
+    const step = redoStack.current.pop();
+    if (!step || !docRef.current) return;
+    undoStack.current.push(step);
+    const next = mergeThumbDocs(step.before, step.after, docRef.current);
     setDoc(next); docRef.current = next; scheduleSave(); bump((n) => n + 1);
   }, [scheduleSave]);
 
@@ -321,6 +403,30 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     ...doc,
     parts: doc.parts.map((p) => (p.type === 'image' && p.src ? { ...p, src: `${p.src}${p.src.includes('?') ? '&' : '?'}r=${bust}` } : p)),
   } : doc), [doc, bust]);
+
+  // 画面に描く形: ダンの直しが今入ったところなら、前の形から今の形へ動いている途中の形（保存する形は doc のまま）
+  const shownDoc = useMemo(() => {
+    const d = viewDoc || doc;
+    if (!d || !danFx || fxNow >= DAN_MOVE_MS) return d;
+    const e = 1 - Math.pow(1 - Math.min(1, fxNow / DAN_MOVE_MS), 3);
+    const parts: ThumbPart[] = d.parts.map((p) => {
+      const f = danFx.from[p.id];
+      if (!f) return p;
+      const q = { ...p } as Record<string, unknown>;
+      const fr = f as unknown as Record<string, unknown>, to = p as unknown as Record<string, unknown>;
+      for (const k of LERP_KEYS) {
+        const a = typeof fr[k] === 'number' ? (fr[k] as number) : k === 'opacity' ? 1 : null;
+        const b = typeof to[k] === 'number' ? (to[k] as number) : k === 'opacity' ? 1 : null;
+        if (a != null && b != null) q[k] = a + (b - a) * e;
+      }
+      return q as unknown as ThumbPart;
+    });
+    for (const g of danFx.ghosts) {
+      const i = g.after ? parts.findIndex((p) => p.id === g.after) : -1;
+      parts.splice(i + 1, 0, { ...g.part, opacity: (g.part.opacity ?? 1) * (1 - e) } as ThumbPart);
+    }
+    return { ...d, parts };
+  }, [viewDoc, doc, danFx, fxNow]);
 
   const boxOf = useCallback((p: ThumbPart): PartBox => {
     if (p.type === 'image') return { x: p.x, y: p.y, w: p.w, h: p.h };
@@ -1140,6 +1246,48 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       strokeWidth={1 / scale} pointerEvents="none" data-thumb-marquee />
   ) : null;
 
+  // ── ダンが触っている所: 今入った直し（光が残る間）→ thumb.py が知らせた作業中の部品 → 動いているコメントの直し ──
+  const danTarget: { ids: string[]; box: PartBox | null; label: string; working: boolean } | null = (() => {
+    if (!doc) return null;
+    const known = (ids: string[]) => ids.filter((id) => doc.parts.some((p) => p.id === id && !p.hidden));
+    const boxIds = (ids: string[]) => unionBox(ids.map((id) => doc.parts.find((p) => p.id === id)!).map((p) => partBounds(p, boxOf(p), boxes[p.id])));
+    if (danFx && fxNow < DAN_FX_MS) {
+      const ids = known(danFx.touched);
+      const b = ids.length ? boxIds(ids) : unionBox(danFx.gone.map((p) => partBounds(p, boxOf(p), boxes[p.id])));
+      if (b) return { ids, box: b, label: activity?.label || (danFx.gone.length && !ids.length ? '消しました' : '直しました'), working: false };
+    }
+    if (activity) {
+      const ids = known(activity.parts || []);
+      return { ids, box: ids.length ? boxIds(ids) : null, label: activity.label, working: true };
+    }
+    for (const ins of [...instructions].reverse()) {
+      const st = ins.job_id ? jobs[ins.job_id] : undefined;
+      if (!st || !st.active) continue;
+      const ids = known(ins.part_ids && ins.part_ids.length ? ins.part_ids : ins.part_id ? [ins.part_id] : []);
+      const pens = ins.marks.filter((m) => m.color !== TARGET_COLOR);
+      const b = ids.length ? boxIds(ids) : marksBounds(pens.length ? pens : ins.marks);
+      return { ids, box: b, label: st.progress || st.label || '直しています', working: true };
+    }
+    return null;
+  })();
+  const fade = danFx && !danTarget?.working ? Math.max(0, Math.min(1, (DAN_FX_MS - fxNow) / 600)) : 1;
+  const danMarks = danTarget && danTarget.box ? (
+    <g pointerEvents="none" data-dan-touch={danTarget.working ? 'working' : 'done'} opacity={fade}>
+      {(danTarget.ids.length ? danTarget.ids.map((id) => doc!.parts.find((p) => p.id === id)!).map((p) => ({ id: p.id, b: boxOf(p), p })) : [{ id: 'box', b: danTarget.box, p: null as ThumbPart | null }]).map(({ id, b, p }) => {
+        const [cx, cy] = p ? partCenter(p, boxes[p.id]) : [0, 0];
+        return (
+          <rect key={id} x={b.x} y={b.y} width={b.w} height={b.h} fill="rgba(56,189,248,0.08)" stroke="#38bdf8" strokeWidth={3 / scale}
+            transform={p?.rotation ? `rotate(${p.rotation} ${cx} ${cy})` : undefined}
+            style={{ filter: 'drop-shadow(0 0 6px rgba(56,189,248,.9))' }}>
+            {danTarget.working ? <animate attributeName="stroke-opacity" values="1;0.35;1" dur="1.4s" repeatCount="indefinite" /> : null}
+          </rect>
+        );
+      })}
+    </g>
+  ) : null;
+  // 「ダン」の手（動画のエディターと同じ形）。触っている所の真ん中を指す
+  const danHandAt: [number, number] | null = danTarget?.box ? toStagePx(danTarget.box.x + danTarget.box.w / 2, danTarget.box.y + danTarget.box.h / 2) : null;
+
   // コメントの印（番号の丸）。押すとそのコメントを開く。大きさは寄っても引いても画面の上で同じ
   const instrAnchor = (ins: ThumbInstruction): [number, number] | null => {
     if (ins.anchor) return ins.anchor;
@@ -1319,7 +1467,11 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
                 if (!(textRef.current as unknown as { __editing?: boolean })?.__editing) {
                   (textRef.current as unknown as { __editing?: boolean }).__editing = true;
                   commit(next);
-                } else { setDoc(next); docRef.current = next; scheduleSave(); }
+                } else {
+                  setDoc(next); docRef.current = next; scheduleSave();
+                  const top = undoStack.current[undoStack.current.length - 1];
+                  if (top) top.after = clone(next);
+                }
               }}
               onBlur={() => { if (textRef.current) (textRef.current as unknown as { __editing?: boolean }).__editing = false; }}
               className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
@@ -1606,6 +1758,15 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   });
   const floating = (
     <>
+      {danHandAt && danTarget ? (
+        <div aria-hidden className="pointer-events-none absolute z-40" data-dan-hand
+          style={{ left: danHandAt[0], top: danHandAt[1], opacity: fade, transition: 'left .42s cubic-bezier(.3,.7,.2,1), top .42s cubic-bezier(.3,.7,.2,1), opacity .3s' }}>
+          <MousePointer2 className="h-5 w-5 fill-sky-400 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]" />
+          <span className="ml-3 mt-[-2px] flex w-max max-w-[240px] items-center gap-1 rounded-full bg-sky-500 px-2 py-[2px] text-[11px] font-semibold leading-tight text-white shadow">
+            {danTarget.working ? <Loader2 className="h-3 w-3 animate-spin" /> : null}ダン<span className="truncate font-normal">{danTarget.label}</span>
+          </span>
+        </div>
+      ) : null}
       {commentBtnAt ? (
         <button type="button" onPointerDown={(e) => e.stopPropagation()} onClick={() => setComposer({ partIds: shownSel.map((p) => p.id) })}
           title="この部品にコメントしてダンに直してもらう"
@@ -1666,13 +1827,13 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       <div style={{ width: boardW }} className={`relative shrink-0 ${outputView ? 'shadow-lg' : ''}`} data-thumb-stage>
         <ThumbCanvas
           ref={svgRef}
-          doc={viewDoc || doc}
+          doc={shownDoc || doc}
           width={boardW}
           pasteboard={outputView || !board ? undefined : board}
           marks={shownMarks}
           onMeasure={(id, box) => setBoxes((b) => (b[id] && Math.abs(b[id].x - box.x) < 0.5 && Math.abs(b[id].y - box.y) < 0.5 && Math.abs(b[id].w - box.w) < 0.5 && Math.abs(b[id].h - box.h) < 0.5 ? b : { ...b, [id]: box }))}
           partProps={partProps}
-          overlay={<>{overlay}{marqueeEl}{pins}</>}
+          overlay={<>{danMarks}{overlay}{marqueeEl}{pins}</>}
           style={{ touchAction: 'none', cursor: mode === 'pen' ? 'crosshair' : undefined }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
