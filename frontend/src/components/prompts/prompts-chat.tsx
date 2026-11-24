@@ -2,7 +2,7 @@
 
 // 指示文の画面で、ダンと話しながら一緒に指示文を見直す会話（2026-11-21 本人「指示文の見直しはお前が単体でやるより俺と一緒に
 // やった方が良い気がするけど、指示文を見直すページにチャットが無いからやりにくい」）。
-// - 部屋は1つ（「ダン開発室: 指示文の見直し」。一覧に出さない。app/api/prompts_screen.py の /prompts/chat）。/prompts と
+// - 本人はダン開発室の部屋で話す（app/api/prompts_screen.py の /prompts/chat）。/prompts と
 //   開発室の「指示文」が同じ部屋で話す。
 // - 発言ごとに、今開いている指示文と選んでいる行・文、保存していない書きかけを <dan-context> で添える（画面には出さない。
 //   本人の吹き出しには「どの文の何行目について」だけを小さく出す）。「ここ」「この行」で通じるように。
@@ -131,8 +131,8 @@ function ContextChip({ ctx, onClear, onClearPick }: { ctx: PromptChatContext; on
  * 会話の中身（発言の一覧・作業中の1行・入力欄）。PC は全文の横の列に、スマホは下から出す欄に入れる。
  * onPulse: ダンが動いている間（数秒ごと）と、ダンの返事が来た時・作業が終わった時に呼ぶ（全文の欄が新しい版を見に行く）。
  */
-export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBusy, header }: {
-  ctx: PromptChatContext; onClearSelection: () => void; onClearPick?: () => void; onPulse: () => void; onBusy?: (busy: boolean) => void; header?: ReactNode;
+export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBusy, onRoom, header }: {
+  ctx: PromptChatContext; onClearSelection: () => void; onClearPick?: () => void; onPulse: () => void; onBusy?: (busy: boolean) => void; onRoom?: (id: string, development: boolean) => void; header?: ReactNode;
 }) {
   const [room, setRoom] = useState('');
   const [error, setError] = useState('');
@@ -175,12 +175,13 @@ export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBus
       .then(async got => {
         if (!live) return;
         setRoom(got.room_id);
+        onRoom?.(got.room_id, Boolean(got.development));
         await readAll(got.room_id);
         await readBusy(got.room_id);
       })
       .catch(err => { if (live) setError(err instanceof Error ? err.message : '会話を開けませんでした。'); });
     return () => { live = false; };
-  }, [readAll, readBusy]);
+  }, [readAll, readBusy, onRoom]);
 
   // 新着の線。この部屋の発言と、作業の始まり・終わりだけを拾う
   useEffect(() => {

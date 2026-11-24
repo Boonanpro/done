@@ -60,17 +60,21 @@
   {
    "id": "call/router-look",
    "title": "この頼みは画面を見ないと分からないか",
-   "place": "voice",
+   "place": "router",
    "reader": "振り分け（Jev）",
    "when": "通話で本人が何か頼むたび",
    "source": "app/services/voice_router.py",
    "why": "画面を見るのは要る時だけにするため。見ると決めた時だけ、共有中の画面やエディターの位置を判断と作業に渡す。",
-   "kind": "sections"
+   "kind": "sections",
+   "keys": [
+    "look",
+    "no"
+   ]
   },
   {
    "id": "call/router-look-ask",
    "title": "画面を見るかの問い",
-   "place": "voice",
+   "place": "router",
    "reader": "振り分け（Jev）",
    "when": "通話で本人が何か頼むたび",
    "source": "app/services/voice_router.py",
@@ -1068,6 +1072,26 @@
    "module": "app.services.editor_film_plan",
    "attr": "INSTRUCTIONS",
    "why": "まだプログラムの中にあるので、ここでは読むだけ。直したい時はダンに言うと、この画面で直せる形に移す。"
+  },
+  {
+   "id": "call/router-model",
+   "title": "振り分けに使うモデル",
+   "place": "router",
+   "reader": "通話の振り分け",
+   "when": "次に通話の振り分けを判断する時",
+   "source": "app/services/voice_router.py",
+   "why": "Jevの自動更新または提供されている固定版のモデル名を指定します。",
+   "kind": "jev_model"
+  },
+  {
+   "id": "call/router-threshold",
+   "title": "Jevの判断を採用する確率の下限",
+   "place": "router",
+   "reader": "通話の振り分け",
+   "when": "次に通話の振り分けを判断する時",
+   "source": "app/services/voice_router.py",
+   "why": "行き先や画面を見る判断を採用する下限です。0から1の値で、届かない行き先は判断役に渡します。先読みした行き先には0.85以上も必要です。",
+   "kind": "probability"
   }
  ]
 }

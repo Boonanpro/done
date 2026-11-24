@@ -94,6 +94,17 @@ def questions(running, targets):
     return out
 
 
+def unavailable_reason(code):
+    return {
+        'disabled': 'Jevが無効になっています。',
+        'decision_budget': 'この通話の利用制限または以前の失敗によりJevの呼び出しを見送りました。',
+        'state_too_large': '渡す内容が大きすぎるためJevを呼び出せませんでした。',
+        'invalid_questions': '問いの形式に誤りがあり、Jevを呼び出せませんでした。',
+        'not_configured': 'Jevの接続情報を取得できませんでした。',
+        'approved_budget_unavailable': '承認済みの利用枠を確保できませんでした。',
+    }.get(code, 'Jevから判断が返りませんでした。')
+
+
 def look_question():
     """Does the request need what is on the owner's screen? (2026-11-25, the owner: 「Jevが『今は画面を見た方が良い』と判断したら
     その時は見させる」). Only then the router fetches the screen he shares and gives it to the work; the speech model is told
@@ -101,31 +112,40 @@ def look_question():
     return {'type': 'choice', 'criteria': _PROMPTS['LOOK'](), 'instructions': _PROMPTS['LOOK_ASK']()}
 
 
-def looks(answers, words):
+def looks(answers, words, threshold=CONFIDENT):
     """True when Jev says the request needs the screen, or he asked Dan to look (「画面見て」 always looks)."""
     if LOOK_ASKED.search(words or ''):
         return True
     choice, p = chosen(answers, 'look')
-    return choice == 'look' and p >= CONFIDENT
+    return choice == 'look' and p >= threshold
 
 
-def decide(answers, running):
+def decide(answers, running, threshold=CONFIDENT):
     """(route, probability) from Jev's answers: what the words do to a running work first, then the route."""
+    route, probability, _, _ = route_choice(answers, running, threshold)
+    return route, probability
+
+
+def route_choice(answers, running, threshold):
+    """Return the effective route and the precise question/option that determined it."""
     best = None
+    statuses = []
     for i, work in enumerate(running[-4:]):
-        what, p = chosen(answers, f'work_{i}')
-        if what in ('stop', 'change') and p >= CONFIDENT and (best is None or p > best[1]):
-            best = (f'{what}:{work["kind"]}:{work["id"]}', p)
+        question = f'work_{i}'
+        what, p = chosen(answers, question)
+        if what in ('stop', 'change') and p >= threshold and (best is None or p > best[1]):
+            best = (f'{what}:{work["kind"]}:{work["id"]}', p, question, what)
+        if what == 'status' and p >= threshold:
+            statuses.append(('status', p, question, what))
     if best is not None:
         return best
     route, probability = chosen(answers, 'route')
     replied, sure = chosen(answers, 'reply')
-    if replied == 'reply' and sure >= CONFIDENT and route not in ('status', 'end', 'clock', 'calendar'):
-        return 'reply', sure
-    asking = [chosen(answers, f'work_{i}') for i in range(len(running[-4:]))]
-    if any(what == 'status' and p >= CONFIDENT for what, p in asking) and route not in ('end',):
-        return 'status', max(p for what, p in asking if what == 'status')
-    return (route if probability >= CONFIDENT else 'other'), probability
+    if replied == 'reply' and sure >= threshold and route not in ('status', 'end', 'clock', 'calendar'):
+        return 'reply', sure, 'reply', replied
+    if statuses and route != 'end':
+        return max(statuses, key=lambda item: item[1])
+    return (route if route and probability >= threshold else 'other'), probability, 'route', route
 
 
 def fit(state, asked):
@@ -339,15 +359,31 @@ class Router:
         from app.services.jev_decisions import Decisions
         if self.judge is None:
             self.judge = Decisions(self.user_id, timeout=JEV_TIMEOUT_S, max_calls=200, retry_transient_after=10)
+        words = self.request_words()
+        turn = next((i for i in range(len(self.dialogue.history) - 1, -1, -1) if self.dialogue.history[i]['role'] == 'user'), -1)
+        threshold = float(prompt_store.text('call/router-threshold'))
+        model = prompt_store.text('call/router-model').strip()
+
+        def observed(result, reason, decision_ms=None, criterion=''):
+            route = result[0]
+            look = False if route.startswith(NO_LOOK) else self.look
+            decision = dict(words=words, route=route, look=look, reason=reason, criterion=criterion,
+                            ms=decision_ms, turn=turn, model=model)
+            if turn >= 0:
+                self.dialogue.routing_events.append(decision)
+            return result
+
         sketch = getattr(self.dialogue, 'sketch', None)
         self.look = None   # not asked yet (a drawing on the board goes to the backend without Jev)
         if sketch and sketch.frames:
             # The text-only fast routes cannot resolve a pointing gesture. The normal visual backend has the same work tools.
-            return 'other', '', '', 1.0, 0
+            return observed(('other', '', '', 1.0, 0), '手描きボードの絵があり、画像を読める判断役に直接渡しました。')
         running = self.running()
-        early = self.early_route(running)
+        early = self.early_route(running, threshold, model)
         if early is not None:
-            return early
+            prior = self.dialogue.prefetch.route_answer[1]
+            return observed(early, '話している間の判断が最後の発言と一致しました。', prior.get('elapsed_ms'),
+                            prior.get('route_criteria', {}).get(early[0], ''))
         targets = self.targets or {}   # read at the call's start (warm); a request before that has no pages to name
         state = {'conversation': self.conversation(), 'running_work': [w['label'] for w in running[-4:]],
                  'screen': getattr(self.stage, 'caption', '') if self.stage is not None else ''}
@@ -356,18 +392,30 @@ class Router:
             state['call_place'] = place
         asked = questions(running, {name: f'「{name}」' for name in targets})
         fit(state, asked)
-        got = await self.judge.choose(state, asked)
+        got = await self.judge.choose(state, asked, model=model)
         if not got.get('available'):
             # unknown: the earlier backend reads the screen he shares itself and the editor's moments as before
-            self.look = True if LOOK_ASKED.search(self.request_words()) else None
-            return 'other', '', '', 0.0, got.get('elapsed_ms')
-        self.look = looks(got['answers'], self.request_words())
-        route, probability = decide(got['answers'], running)
+            self.look = True if LOOK_ASKED.search(words) else None
+            return observed(('other', '', '', 0.0, got.get('elapsed_ms')), unavailable_reason(got.get('reason')) + ' 予備の担当に渡しました。', got.get('elapsed_ms'))
+        self.look = looks(got['answers'], words, threshold)
+        route, probability, key, answer = route_choice(got['answers'], running, threshold)
+        criterion = asked.get(key, {}).get('criteria', {}).get(answer, '')
+        reason = f'選んだ基準の確率が{probability:.0%}で、採用する下限は{threshold:.0%}です。'
+        if key == 'route' and probability < threshold:
+            reason = f'行き先の確率が{probability:.0%}で下限の{threshold:.0%}に届かず、判断役に渡しました。'
+        if route.startswith(NO_LOOK):
+            reason += ' この行き先は通話の情報だけで答えるため、画面を使いません。'
+        elif LOOK_ASKED.search(words):
+            reason += ' 画面を見るよう頼まれました。'
+        else:
+            look_key, look_p = chosen(got['answers'], 'look')
+            reason += f' 画面の選択は「{"見る" if look_key == "look" else "見ない"}」で{look_p:.0%}でした。'
         target, sure = chosen(got['answers'], 'target')
         span, _ = chosen(got['answers'], 'calendar')
-        return route, (targets.get(target, '') if sure >= CONFIDENT else ''), span, probability, got.get('elapsed_ms')
+        return observed((route, targets.get(target, '') if sure >= threshold else '', span, probability, got.get('elapsed_ms')),
+                        reason, got.get('elapsed_ms'), criterion)
 
-    def early_route(self, running):
+    def early_route(self, running, threshold=CONFIDENT, model='jev-latest'):
         """The route Jev chose while the owner was still speaking (voice_prefetch asks the same question), when the finished
         words are the ones judged and nothing is running that the words could be about."""
         prefetch = getattr(self.dialogue, 'prefetch', None)
@@ -376,9 +424,14 @@ class Router:
         if running or not judged or judged[0] != latest or len(latest) < 12 or not (judged[1] or {}).get('available'):
             return None
         route, probability = chosen(judged[1].get('answers'), 'route')
-        if not route or probability < .85 or route in ('show', 'calendar'):
+        if judged[1].get('requested_model', 'jev-latest') != model:
             return None
-        self.look = looks(judged[1].get('answers'), latest)
+        if 'route_question' in judged[1] and (judged[1]['route_question'] != _PROMPTS['ASK']()
+                or judged[1]['route_criteria'] != _PROMPTS['ROUTES']() or judged[1]['look_question'] != look_question()):
+            return None
+        if not route or probability < max(.85, threshold) or route in ('show', 'calendar'):
+            return None
+        self.look = looks(judged[1].get('answers'), latest, threshold)
         return route, '', '', probability, 0
 
     async def run(self, route, target, span, delegation_id, created):

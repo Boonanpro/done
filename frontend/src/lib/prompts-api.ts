@@ -21,6 +21,7 @@ export interface PromptSummary {
   kind?: string;
   readonly?: boolean;
   chars: number;
+  value?: string;
   sha?: string;
   last_by?: string | null;
   last_at?: string | null;
@@ -75,7 +76,7 @@ export interface ChatStep { id: string; event_type: string; tool_name: string | 
 const dan = <T,>(path: string, body?: Record<string, unknown>) => promptRequest<T>(path, body, '/api/v1');
 
 export const promptsChat = {
-  room: () => promptRequest<{ project_id: string; room_id: string; title: string }>('/chat'),
+  room: () => promptRequest<{ project_id: string; room_id: string; title: string; development?: boolean }>('/chat'),
   messages: (room: string, limit = 40, before?: string) =>
     dan<{ messages: ChatMessage[] }>(`/chat/rooms/${room}/messages?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`).then(r => r.messages),
   active: (room: string) => dan<{ active: boolean; started_at?: number | string | null }>(`/chat/dan/sessions/${room}/active`),

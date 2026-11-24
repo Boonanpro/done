@@ -317,7 +317,7 @@ async def test_merged_stage_survives_call_end_and_decision_extraction_failure(mo
 async def test_combined_classification_selects_read_in_one_request():
     class Judge:
         calls = 0
-        async def choose(self, state, questions):
+        async def choose(self, state, questions, *, model="jev-latest"):
             self.calls += 1
             assert set(questions) == {'kind','read'}
             return {'available':True,'answers':{'kind':{'choice':'read','probabilities':{'read':1}},

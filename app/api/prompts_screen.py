@@ -11,7 +11,7 @@ from app.services import prompt_store
 from app.services.owner import resolve_owner_user_id
 from app.services.skill_versions import skill_pages
 
-from app.api.conversation_circuit import router as circuit_router
+from app.api.conversation_circuit import owner as circuit_owner, router as circuit_router
 from app.api.prompt_programs import router as program_router
 
 router = APIRouter(prefix='/prompts', tags=['prompts'])
@@ -27,7 +27,11 @@ def _list(include_skills=True):
         if item.get('kind') == 'skill':
             registered[item['id']] = item
             continue
-        try: items.append(prompt_store.summary(item['id']))
+        try:
+            summary = prompt_store.summary(item['id'])
+            if item.get('kind') in ('probability', 'jev_model'):
+                summary['value'] = prompt_store.text(item['id'])
+            items.append(summary)
         except Exception as exc:
             items.append({**item, 'error': type(exc).__name__})
     if include_skills:
@@ -36,7 +40,9 @@ def _list(include_skills=True):
     return {'places': data['places'], 'prompts': items}
 
 
-def _check_skill_owner(prompt_id, current_user):
+def _check_edit_owner(prompt_id, current_user):
+    if prompt_id in ('call/router-model', 'call/router-threshold') and current_user.user_id != resolve_owner_user_id():
+        raise HTTPException(403, '通話の設定は本人だけが開けます。')
     if prompt_id.startswith('skill/') and current_user.user_id != resolve_owner_user_id():
         raise HTTPException(403, 'スキルは本人だけが開けます。')
 
@@ -55,7 +61,7 @@ async def list_prompts(current_user: TokenData = Depends(get_current_user)):
 
 @router.get('/item')
 async def get_prompt(id: str, current_user: TokenData = Depends(get_current_user)):
-    _check_skill_owner(id, current_user)
+    _check_edit_owner(id, current_user)
     try: return await asyncio.to_thread(_item, id)
     except KeyError: raise HTTPException(404, 'その指示文はありません。')
 
@@ -68,7 +74,7 @@ def _sha(prompt_id):
 @router.get('/sha')
 async def prompt_sha(id: str, current_user: TokenData = Depends(get_current_user)):
     """Only the version mark: the screen asks this every few seconds while Dan works in the chat, to show Dan's change at once."""
-    _check_skill_owner(id, current_user)
+    _check_edit_owner(id, current_user)
     try: return await asyncio.to_thread(_sha, id)
     except KeyError: raise HTTPException(404, 'その指示文はありません。')
 
@@ -88,7 +94,7 @@ class SaveBody(BaseModel):
 
 @router.post('/item')
 async def save_prompt(body: SaveBody, current_user: TokenData = Depends(get_current_user)):
-    _check_skill_owner(body.id, current_user)
+    _check_edit_owner(body.id, current_user)
     try:
         out = await asyncio.to_thread(prompt_store.save, body.id, body.text, 'owner', body.note, body.base_sha or None)
     except KeyError: raise HTTPException(404, 'その指示文はありません。')
@@ -105,7 +111,7 @@ class RevertBody(BaseModel):
 
 @router.post('/revert')
 async def revert_prompt(body: RevertBody, current_user: TokenData = Depends(get_current_user)):
-    _check_skill_owner(body.id, current_user)
+    _check_edit_owner(body.id, current_user)
     try:
         out = await asyncio.to_thread(prompt_store.revert, body.id, body.sha, 'owner', body.base_sha or None)
     except KeyError: raise HTTPException(404, 'その版はありません。')
@@ -153,11 +159,27 @@ def _chat_write(data):
 _chat_lock = asyncio.Lock()
 
 
+@router.get('/development')
+async def development_state(user=Depends(circuit_owner)):
+    from app.services import development_board, voice_calls
+    changes = await asyncio.to_thread(development_board.recent)
+    call = await asyncio.to_thread(voice_calls.active, DEV_LEAD_ROOM)
+    return {'changes': changes, 'session': call['session_id'] if call else ''}
+
+
 @router.get('/chat')
 async def prompts_chat_room(current_user: TokenData = Depends(get_current_user)):
     """The one room for talking about the instructions with Dan. Made on first use (hidden from the room list)."""
     from app.services.project_service import ProjectService
     service = ProjectService()
+    owner_id = await asyncio.to_thread(resolve_owner_user_id)
+    if not owner_id:
+        raise HTTPException(503, '開発室の持ち主を確認できませんでした。')
+    if current_user.user_id == owner_id:
+        project = await service.get_project_by_room_id(DEV_LEAD_ROOM)
+        if not project or project.get('user_id') != current_user.user_id:
+            raise HTTPException(404, 'ダン開発室を開けませんでした。')
+        return {'project_id': project['id'], 'room_id': DEV_LEAD_ROOM, 'title': project['title'], 'development': True}
     async with _chat_lock:
         saved = (await asyncio.to_thread(_chat_read)).get(current_user.user_id) or {}
         if saved.get('project_id'):

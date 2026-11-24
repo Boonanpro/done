@@ -110,11 +110,12 @@ type Gesture =
   | { kind: 'frame'; id: string; x: number; y: number; box: Box; inside: Record<string, Box>; via: Record<string, Pt[]>; moved: boolean }
   | { kind: 'point'; key: string; index: number; x: number; y: number; start: Pt; via: Pt[] | null; seg: number; moved: boolean };
 
-export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPick, toolbar }: {
+export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPick, toolbar, annotation }: {
   trace?: Trace; skills: PromptSummary[]; onSkills: (reader: string, id?: string) => void;
   counts: Record<string, number>; active: string; glow?: string; onPick: (id: string) => void;
   /** 右上の操作の帯の左に足す物（スキルを探す など） */
   toolbar?: ReactNode;
+  annotation?: { node: string; title: string; body: ReactNode; open: () => void; close: () => void };
 }) {
   const port = useRef<HTMLDivElement>(null);
   const marker = useId().replace(/:/g, '');
@@ -229,7 +230,7 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
 
   // 選んだ箱・今の段階の箱が見えていなければ、その箱を真ん中へ
   useEffect(() => {
-    const id = active || trace?.current;
+    const id = active || trace?.current || annotation?.node;
     const n = id ? BY_ID.get(id) : undefined;
     const el = port.current, v = viewRef.current;
     if (!n || !el || !v) return;
@@ -238,7 +239,7 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
     if (L >= 0 && T >= 0 && R <= el.clientWidth && B <= el.clientHeight) return;
     setView({ ...v, tx: el.clientWidth / 2 - (b.x + b.w / 2) * v.s, ty: el.clientHeight / 2 - (b.y + b.h / 2) * v.s });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, trace?.current]);
+  }, [active, trace?.current, annotation?.node]);
 
   const toBoard = (clientX: number, clientY: number): Pt => {
     const el = port.current!, v = viewRef.current!, r = el.getBoundingClientRect();
@@ -375,6 +376,17 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
   let grid = 18 * s;
   while (grid < 12) grid *= 4;
   while (grid > 72) grid /= 4;
+  const annotated = annotation && BY_ID.get(annotation.node);
+  const anchorBox = annotated && boxOf(annotated);
+  const panelWidth = Math.min(320, (port.current?.clientWidth || 336) - 16);
+  let panelLeft = 8, panelTop = 52;
+  if (anchorBox && view && port.current) {
+    const left = view.tx + anchorBox.x * s, right = left + anchorBox.w * s;
+    panelTop = view.ty + anchorBox.y * s;
+    if (right + 8 + panelWidth <= port.current.clientWidth) panelLeft = right + 8;
+    else if (left >= panelWidth + 8) panelLeft = left - panelWidth - 8;
+    else panelTop += anchorBox.h * s + 8;
+  }
   const hitWidth = Math.max(8, 14 / s);
   const handle = Math.max(8, 14 / s);
   const tool = 'inline-flex h-8 min-w-8 items-center justify-center gap-1 rounded-md border border-stone-300 bg-white/95 px-2 text-xs font-semibold text-stone-800 shadow-sm hover:bg-stone-100';
@@ -403,7 +415,7 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
             const pick = () => { const visit = trace?.visits.get(n.id); if (visit != null) trace?.inspect?.(n.id, visit); onPick(n.id); };
             const state = trace?.current === n.id ? 'current' : trace?.visits.has(n.id) ? 'visited' : undefined;
             return (
-              <div key={n.id} data-node-wrap={n.id} className="group absolute" style={{ left: b.x, top: b.y, width: b.w, height: b.h }}>
+              <div key={n.id} data-annotated={annotation?.node === n.id || undefined} data-node-wrap={n.id} className="group absolute data-[annotated=true]:rounded-lg data-[annotated=true]:ring-4 data-[annotated=true]:ring-indigo-500" style={{ left: b.x, top: b.y, width: b.w, height: b.h }}>
                 {n.height ? <button type="button" data-arch-node={n.id} aria-label={n.name} data-trace-state={state} onClick={pick}
                   className={cn('flex h-full w-full flex-col items-center justify-end gap-1 rounded-lg text-stone-900 hover:bg-stone-100/70 focus-visible:outline-2', (on || trace?.current === n.id) && 'ring-2 ring-emerald-600')}>
                   {n.id === 'pc' ? <span className="flex min-h-0 w-full flex-1 flex-col items-center">
@@ -506,6 +518,15 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
         </div>}
       </div>
 
+      {view && annotation && anchorBox && <aside data-board-annotation={annotation.node} aria-label={annotation.title}
+        className="absolute z-10 max-h-[46%] overflow-auto overscroll-contain rounded-lg border border-indigo-300 bg-white p-3 text-xs leading-relaxed shadow-md"
+        style={{width:'min(320px, calc(100% - 16px))',
+          left: panelLeft, top: 'clamp(52px, '+panelTop+'px, 51%)'}}>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <button type="button" className="font-semibold text-indigo-900 hover:underline" onClick={annotation.open}>{annotation.title} ›</button>
+          <button type="button" onClick={annotation.close} aria-label="図の説明を閉じる" className="px-2 text-base">×</button>
+        </div>{annotation.body}
+      </aside>}
       {/* 操作の帯（ボードの上に浮かせる） */}
       <div className="pointer-events-none absolute right-2 top-2 z-10 flex flex-wrap items-center justify-end gap-1">
         <span className="pointer-events-auto flex flex-wrap items-center gap-1">

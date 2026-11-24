@@ -3,18 +3,19 @@ place: prompts
 name: ダンを動かしている指示文
 open: /prompts
 ready: 'textarea, button:has(img[src^="/prompts/arch/"])'
-watches: [frontend/src/app/prompts/page.tsx, frontend/src/components/prompts/prompts-screen.tsx, frontend/src/components/prompts/prompts-chat.tsx, frontend/src/components/prompts/reader-skills.tsx, frontend/src/components/prompts/skill-library.tsx, frontend/src/components/prompts/line-diff.ts, frontend/src/components/prompts/architecture.ts, frontend/src/components/prompts/architecture-trace.ts, frontend/src/components/prompts/conversation-circuit.tsx, frontend/src/components/prompts/request-playback.tsx, frontend/src/app/prompts/circuit/page.tsx, frontend/src/lib/prompts-api.ts, app/api/prompts_screen.py, app/services/prompt_store.py, app/prompts/catalog.json]
+watches: [frontend/src/components/prompts/development-board.tsx, frontend/src/components/prompts/arch-board.tsx, frontend/src/app/prompts/page.tsx, frontend/src/components/prompts/prompts-screen.tsx, frontend/src/components/prompts/prompts-chat.tsx, frontend/src/components/prompts/reader-skills.tsx, frontend/src/components/prompts/skill-library.tsx, frontend/src/components/prompts/line-diff.ts, frontend/src/components/prompts/architecture.ts, frontend/src/components/prompts/architecture-trace.ts, frontend/src/components/prompts/conversation-circuit.tsx, frontend/src/components/prompts/request-playback.tsx, frontend/src/app/prompts/circuit/page.tsx, frontend/src/lib/prompts-api.ts, app/api/prompts_screen.py, app/services/prompt_store.py, app/prompts/catalog.json]
 errors: [ログインが切れています, 失敗しました]
 speak: |
   - 構成図は左の欄いっぱいの自由なボードです。左に切り抜いたみきさんの姿、その右にPC・スマホ・エディター・ダンピン（切り抜き）の4つの入口があり、PC・スマホ・エディターは「チャット」へ、4つ全部が「音声」へつながります。チャットは上の段（会話の本体→チャットのダン・エディターのダンと制作）、音声は下の段（道具と通話のサーバー→通話のダン→振り分け→係）を通り、右に「届いた返事」と「作業の部屋」、下に「動画を作る・直す時」の枠があります。ホイールで寄る・引く（6000%まで。PC・スマホの画面の中身が読めます）、空いた所を押したまま動かすと移動、箱や枠は押したまま動かすと位置が、右下の角を引くと大きさが、線は途中を押したまま動かすと曲がります（点を2回押すと消える）。並べ方は保存され、「元の並べ方」で戻せます。スマホは指1本で移動、2本でつまんで寄る・引く。再生すると、記録のある依頼と返答を「この依頼の会話」で読めます。
   - 構成図の上の「今動いている依頼」で見たいチャット・通話・並行作業を押すと、その依頼だけの作業が箱の横と「作業の様子」に出ます。「前の会話を流し直す」で部屋と依頼を選び、図の下の「流れを再生」で再生・一時停止・コマ送り・速度変更ができます。光った箱を押すと、その段階で記録された指示文・渡した本文・秒数が開きます。「依頼を試す」で渡す直前までか実際に進めるかを選べます。
   - 構成図の緑の枝には、ダンがどんな依頼で読むスキルかが出ます。「すべて」でそのダンの頼み別の枝を開けます。通話で制作を頼んだ時は並行作業につながります。
   - 構成図の「スキルを探す」で全スキルの手順書と参考ページを検索し、編集・復元できます。
+  - 「通話する」でこの開発室から普段の通話を始める。発言ごとに「振り分け」の横で、先読み・行き先・画面を見るか・判断の理由と時間が読める。「この判断を比較に残す」で次の発言と並べられる。「振り分け」の箱の「動作の設定」には、その時のモデル名と判断を採用する確率の下限が出る。どちらも押すと編集できる。利用枠や接続の都合でJevが答えられなかった時は、その理由も表示する。変更案・作業中の内容・確認結果は対象の箱の横に出る。
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: d6d03e6ffe51bf67
-described: f07a7bfa9a4e9194
+fingerprint: 96e9c9aaf6888b5c
+described: 86b15fc0b01b002a
 last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で追う操作は記載どおり"
 ---
 # ダンを動かしている指示文
@@ -32,7 +33,7 @@ last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で�
 - 場所ごとの一覧。札: 直したことのある文は「最終更新 月/日 時:分」だけ（誰が直したか・元の文のままかは出さない。11/22 本人）、灰＝プログラムの中（読むだけ）。
 - 全文の欄（「この文は、ここでそのまま書き直せます」。欄は中身の高さまで伸びる）、下に貼り付いた保存の帯（書き直すと「なぜ直したか」・直す前に戻す・保存が出る）、たたんだ「この文について」と「履歴」（押すとその版、この版に戻す・プログラムの中にあった頃に直された日）。
 - スマホの幅では、一覧と全文が入れ替わり（「一覧に戻る」）。PC でも 1280 より狭い時（開発室の中など）は、一覧と全文が入れ替わり、右に会話の列が出る。
-- 「ダンと話して直す」の会話（2026-11-21 本人「指示文の見直しはお前と一緒にやった方が良いけど、ページにチャットが無いからやりにくい」）。PC は全文の横の列（スクロールしても見えたまま）、スマホは右下の「ダンと話す」で下から出る。部屋は1つ（「ダン開発室: 指示文の見直し」、一覧に出さない。app/api/prompts_screen.py の /prompts/chat、~/.dan/workspace/prompts/.chat/chat.json）で、/prompts と開発室の「指示文」が同じ部屋で話す。
+- 「ダンと話して直す」の会話（2026-11-21 本人「指示文の見直しはお前と一緒にやった方が良いけど、ページにチャットが無いからやりにくい」）。PC は全文の横の列（スクロールしても見えたまま）、スマホは右下の「ダンと話す」で下から出る。本人の会話は「ダン開発室」の部屋そのもの。/prompts と開発室の「指示文」の両方で、この部屋にある相談の続きを読んで話せる。
   - 入力欄の上の札に、今開いている文と、全文の中で選んだ所（何行目・何という文）が出る。発言ごとにそれを `<dan-context>` で添える（画面には出ない。本人の吹き出しの上に「どの文の何行目」だけ小さく出る）。保存していない書きかけがあれば、その違いも添える。
   - 会話欄の「チャットのモデル」で、指示文の会話が次の返答に使うモデルを選べます。
   - ダンの返事の画像は1枚ずつ縦横比のまま出て、押すと画面いっぱいに開き、左右で会話の中のほかの画像へ送れる（チャットと同じ見る画面。11/22 本人「クリックしても大きく表示できない」）。
@@ -56,7 +57,7 @@ last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で�
 - ダンの画面は html と body のスクロールを止めている。この画面は自分の枠（h-dvh・overflow-y-auto）でスクロールする。外すと全文の欄まで下りられなくなる（11/17 の「見るだけで編集できない」の原因）。
 - 開発室の中では、開発室の初期化（余白を0にする等）を .promptsPane で外している。
 - 会話の列の高さは、この画面をスクロールさせている枠の高さに合わせる（開発室の中は上に切り替えの帯があり、画面の高さで作ると入力欄が下に隠れる）。
-- 会話で試すと本物のダンが答え、本物の指示文を直す。直す試験は影響の小さい文（work/relay-header など）で行い、すぐ「元に戻す」で戻す。試した部屋は chat.json から外して、みきさんには新しい部屋で始まるようにする。
+- 開発室の会話と通話は本人が普段使うもの。画面の確認は発信せずに行う。
 
 - 文の置き場所は ~/.dan/workspace/prompts。本番で保存すると、次の通話・次の作業から本当に効きます。
 
@@ -65,10 +66,11 @@ last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で�
 
 `python scripts/place_map.py stamp prompts` が書き直す。手で直さない。
 
-- 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/circuit/page.tsx`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/architecture-trace.ts`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/conversation-circuit.tsx`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/request-playback.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
-- ラベル: 「ダンに書く」、「止める」、「送る」、「作業中」、「引く」、「寄る」、「閉じる」、「選んだ場所の中身」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「この依頼の会話」、「スキル一覧」、「スキル・参考ページを検索」
+- 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/circuit/page.tsx`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/arch-board.tsx`, `frontend/src/components/prompts/architecture-trace.ts`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/conversation-circuit.tsx`, `frontend/src/components/prompts/development-board.tsx`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/request-playback.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
+- ラベル: 「図の説明を閉じる」、「引く」、「寄る」、「確認する発言」、「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「構成図に表示する変更や判断」、「選んだ場所の中身」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「この依頼の会話」、「スキル一覧」、「スキル・参考ページを検索」
 - 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」、「node-facts」、「node-programs」
-- 見出し: 「プログラムの中にあった頃に直された日」、「作業の様子」
+- ボタンの字: 「×」
+- 見出し: 「プログラムの中にあった頃に直された日」、「動作の設定」、「作業の様子」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "f3bf5950cb", "app/prompts/catalog.json": "411e89c51e", "app/services/prompt_store.py": "750e86435b", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/architecture-trace.ts": "258b49bdd5", "frontend/src/components/prompts/architecture.ts": "286a4b37ac", "frontend/src/components/prompts/conversation-circuit.tsx": "fb5529b4b6", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "ceb98a46cb", "frontend/src/components/prompts/prompts-screen.tsx": "fb6edc03e9", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "d084b2ce2a", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "93f3485b6b"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "0a52e92302", "app/prompts/catalog.json": "147765ba7f", "app/services/prompt_store.py": "3f32aa2266", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/arch-board.tsx": "e269df9b77", "frontend/src/components/prompts/architecture-trace.ts": "b7c601bd50", "frontend/src/components/prompts/architecture.ts": "037259d858", "frontend/src/components/prompts/conversation-circuit.tsx": "5f7ab329b4", "frontend/src/components/prompts/development-board.tsx": "21886e59dd", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "e05db8aa92", "frontend/src/components/prompts/prompts-screen.tsx": "e4a1bce605", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "d084b2ce2a", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "b703f67e84"} -->
 <!-- place_map:auto:end -->

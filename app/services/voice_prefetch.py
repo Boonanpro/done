@@ -248,11 +248,31 @@ class Prefetch:
             # when the owner's finished words are these, the delegation takes this answer instead of asking again.
             asked['route'] = {'type': 'choice', 'criteria': dict(voice_router.ROUTES), 'instructions': voice_router.ASK}
             asked['look'] = voice_router.look_question()   # does it need his screen (voice_router.looks)
+        history = getattr(self.dialogue, 'history', [])
+        turn = next((i for i in range(len(history)-1, -1, -1) if history[i]['role'] == 'user'), -1)
         state = {'utterance_so_far': text}
         editor = getattr(self.dialogue, 'editor', None) if self.dialogue is not None else None
         if editor is not None:   # the same place the delegation's route is chosen with (voice_router.route)
             state['call_place'] = await asyncio.to_thread(editor.place)
-        got = await self.judge.choose(state, asked)
+        if 'route' in asked:
+            threshold = float(voice_router.prompt_store.text('call/router-threshold'))
+            model = voice_router.prompt_store.text('call/router-model').strip()
+            got = await self.judge.choose(state, asked, model=model)
+            got['requested_model'] = model
+            got['route_criteria'] = asked['route']['criteria']
+            got['route_question'] = asked['route']['instructions']
+            got['look_question'] = asked['look']
+            if turn >= 0:
+                answers = got.get('answers') or {}
+                choice, probability = voice_router.chosen(answers, 'route')
+                self.dialogue.routing_events.append(dict(
+                    words=text, turn=turn, preliminary=True, route=choice,
+                    look=voice_router.looks(answers, text, threshold) if answers else None,
+                    ms=got.get('elapsed_ms'), model=model,
+                    criterion=asked['route']['criteria'].get(choice, ''),
+                    reason=f'発言の途中で選んだ候補です（確率{probability:.0%}）。' if answers else voice_router.unavailable_reason(got.get('reason'))))
+        else:
+            got = await self.judge.choose(state, asked)
         self.route_answer = (text, got)
         if got.get('available'):
             self.counts['jev'] += 1

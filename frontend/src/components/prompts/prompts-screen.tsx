@@ -18,6 +18,8 @@ import { ApiError } from '@/lib/api-client';
 import { promptsApi, type PromptItem, type PromptSummary, type PromptVersion, type PromptWorking } from '@/lib/prompts-api';
 import { cn } from '@/lib/utils';
 import { BOARD_NODES, NODES, VIDEO_NODES, type ArchNode } from './architecture';
+import { useCall } from '@/components/voice/call-provider';
+import { ChangeList, useDevelopmentBoard, TurnDecision, type Turn } from './development-board';
 import { ArchBoard } from './arch-board';
 import { ConversationCircuit, type TrialControls } from './conversation-circuit';
 import type { Trace } from './architecture-trace';
@@ -455,6 +457,18 @@ const GLOW_CSS = `
 export function PromptsScreen({ place, id, onGo, embedded = false }: {
   place: string; id: string; onGo: (next: { place: string; id?: string }) => void; embedded?: boolean;
 }) {
+  const [conversation, setConversation] = useState({ room: '', development: false });
+  const onRoom = useCallback((room: string, development: boolean) => setConversation({room, development}), []);
+  const call = useCall();
+  const { setFocus } = call;
+  useEffect(() => {
+    if (conversation.development) setFocus(conversation.room);
+  }, [conversation, setFocus]);
+  const board = useDevelopmentBoard(conversation.development);
+  const [baseline, setBaseline] = useState<Turn | null>(null);
+  const [showLastCall, setShowLastCall] = useState(false);
+  const [hiddenActivity, setHiddenActivity] = useState('');
+  const [notedBox, setNotedBox] = useState('');
   const [prompts, setPrompts] = useState<PromptSummary[]>([]);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
@@ -573,7 +587,8 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   }, [prompts]);
 
   const here = (node?.prompts || []).map(pid => byId.get(pid)).filter((p): p is PromptSummary => !!p);
-  const editable = here.filter(p => !p.readonly);
+  const parameters = here.filter(p => p.kind === 'probability' || p.kind === 'jev_model');
+  const editable = here.filter(p => !p.readonly && !parameters.includes(p));
   const readonly = here.filter(p => p.readonly);
   // 読む文が無く、プログラムと動き方だけの箱（動画の枝の道具など）は、右の全文の枠を出さずに横いっぱいに出す
   const progOnly = !!node && !here.length && !!(node.programs?.length || node.facts?.length);
@@ -595,11 +610,40 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   };
 
   // 構成図のボード。いつもの時は左の欄いっぱい、依頼の流れを再生する時はその枠の中で決まった高さ
+  const showingCall = (!notedBox && !!board.session) || (showLastCall && board.turns.length > 0);
+  const lastChange = board.changes[0];
+  const activityNode = showingCall ? 'router' : notedBox || lastChange?.node || '';
+  const changesHere = board.changes.filter(change => change.node === activityNode);
+  const activityKey = showingCall ? 'voice/'+board.session : activityNode+'/'+(changesHere[0]?.id || '');
+  const showActivity = !place && !id && activityNode && hiddenActivity !== activityKey;
   const renderDiagram = (trace?: Trace) => <div className={trace ? 'h-[min(70dvh,760px)]' : 'absolute inset-0'}>
-    <ArchBoard trace={trace} skills={skills} onSkills={(name, pid) => navigate({ place: 'reader-' + name, id: pid })} counts={counts}
+    <ArchBoard trace={trace}
+      annotation={!trace && showActivity ? {
+        node: activityNode,
+        title: showingCall ? 'Jevの判断' : (BY_ID.get(activityNode)?.name || activityNode) + 'の変更',
+        body: showingCall ? <TurnDecision baseline={baseline} setBaseline={setBaseline} key={board.session || 'previous'} turns={board.turns} live={!!board.session} />
+          : <ChangeList changes={changesHere} />,
+        close: () => setHiddenActivity(activityKey),
+        open: () => navigate({place: activityNode}),
+      } : undefined} skills={skills} onSkills={(name, pid) => navigate({ place: 'reader-' + name, id: pid })} counts={counts}
       active={place === 'video' ? 'v-owner' : library ? 'skills' : node?.id || ''} glow={work?.state === 'editing' ? workNode : ''}
       onPick={p => { navigate({ place: p }); }}
-      toolbar={<button type="button" className="inline-flex h-8 items-center gap-1 rounded-md border border-stone-300 bg-white/95 px-2 text-xs font-semibold text-stone-800 shadow-sm hover:bg-stone-100" onClick={() => navigate({ place: 'skills' })}><BookOpen size={13} />スキルを探す</button>} />
+      toolbar={<>
+      {conversation.development && <button type="button" aria-label={call.room ? '通話を切る' : '開発室で通話する'}
+        className="rounded-md border border-teal-800 bg-teal-800 px-3 py-1.5 text-xs font-semibold text-white"
+        onClick={() => call.room ? call.end() : call.start(conversation.room, {chatTitle:'ダン開発室'})}>{call.room ? '通話を切る' : '通話する'}</button>}
+      {!trace && (lastChange || board.session || board.turns.length > 0) && <select aria-label="構成図に表示する変更や判断"
+        className="max-w-36 rounded-md border bg-white px-1 py-1.5 text-xs" value="" onChange={e => {
+          const value = e.target.value;
+          if (!value || !navigate({place:''})) return;
+          setNotedBox(value === 'call' ? '' : value);
+          setShowLastCall(value === 'call'); setHiddenActivity('');
+        }}>
+        <option value="">変更・判断を見る</option>
+        {(board.session || board.turns.length > 0) && <option value="call">通話の判断</option>}
+        {[...new Set(board.changes.map(c => c.node))].map(key => <option key={key} value={key}>{BY_ID.get(key)?.name || key}の変更</option>)}
+      </select>}
+      <button type="button"  className="inline-flex h-8 items-center gap-1 rounded-md border border-stone-300 bg-white/95 px-2 text-xs font-semibold text-stone-800 shadow-sm hover:bg-stone-100" onClick={() => navigate({ place: 'skills' })}><BookOpen size={13} />スキルを探す</button></>} />
   </div>;
 
   const row = (p: PromptSummary) => (
@@ -608,7 +652,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
         className={cn('w-full rounded-lg border px-3 py-2 text-left transition hover:border-amber-400 hover:bg-amber-50',
           p.id === id ? 'border-amber-500 bg-amber-50' : 'border-stone-200 bg-white',
           work?.state === 'editing' && work.id === p.id && 'dan-working-glow border-violet-500')}>
-        <div className="text-sm font-semibold leading-snug text-stone-900">{p.title}</div>
+        <div className="text-sm font-semibold leading-snug text-stone-900">{p.title}{p.value && <span className="ml-2 font-mono text-teal-800">{p.value}</span>}</div>
         <div className="mt-1 flex flex-wrap items-center gap-2">
           {work?.state === 'editing' && work.id === p.id
             ? <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-900"><Sparkles className="h-3 w-3 animate-pulse" />ダンが直しています</span>
@@ -638,6 +682,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           <button type="button" aria-label="閉じる" onClick={() => setHidWork(workKey)} className="rounded p-1 text-violet-800 hover:bg-violet-100"><X className="h-4 w-4" /></button>
         </div>
       ) : null}
+      {board.error && <p role="status" className="text-xs text-amber-800">{board.error}</p>}
       <div ref={circuit} className="flex min-h-[calc(100dvh-12px)] flex-1 flex-col lg:min-h-0"><ConversationCircuit controls={trial} visible onEdit={p => { if (navigate({place:p})) requestAnimationFrame(() => list.current?.scrollIntoView({block:"start"})); }} renderDiagram={renderDiagram}
         onPrompt={(pid, source) => {
           const owner = NODES.find(n => n.id === source && n.prompts?.includes(pid)) || NODES.find(n => n.prompts?.includes(pid));
@@ -678,7 +723,10 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           ) : (
             <p className="text-sm text-stone-500">図の箱を押すと、ここにその箱が読む指示文が並びます。</p>
           )}
+          {node && <ChangeList changes={board.changes.filter(c => c.node === node.id)} />}
+          {node?.id === 'router' && (board.session || board.turns.length > 0) && <TurnDecision baseline={baseline} setBaseline={setBaseline} turns={board.turns} live={!!board.session} />}
           {node?.facts?.length ? <ul className="list-disc space-y-1 pl-5 text-sm text-stone-700" data-testid="node-facts">{node.facts.map(f => <li key={f}>{f}</li>)}</ul> : null}
+          {parameters.length > 0 && <section><h3 className="mb-1 text-sm font-semibold">動作の設定</h3><ul className="space-y-1">{parameters.map(row)}</ul></section>}
           {editable.length ? <ul className="space-y-2">{editable.map(row)}</ul> : null}
           {readonly.length ? (
             <details open={!editable.length}>
@@ -732,7 +780,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
         'lg:relative lg:inset-auto lg:z-auto lg:flex lg:h-full lg:w-[var(--side-w)] lg:shrink-0 lg:overflow-visible lg:rounded-none lg:border-l lg:border-t-0 lg:border-stone-200 lg:shadow-none',
       )}>
       <SideResizeHandle side={side} className="hidden lg:block" />
-      <PromptsChat ctx={talkCtx} onPulse={bump} onBusy={setTalkBusy} onClearSelection={() => setPicked(v => ({ ...v, sel: null }))} onClearPick={clearPick}
+      <PromptsChat ctx={talkCtx} onRoom={onRoom} onPulse={bump} onBusy={setTalkBusy} onClearSelection={() => setPicked(v => ({ ...v, sel: null }))} onClearPick={clearPick}
         header={(
           <div className="flex items-center justify-end border-b border-stone-200 px-2 py-1 lg:hidden">
             <button type="button" onClick={() => setTalkOpen(false)} aria-label="会話を閉じる" className="rounded p-1 text-stone-500 hover:bg-stone-100"><X className="h-5 w-5" /></button>

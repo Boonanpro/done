@@ -31,7 +31,7 @@ class Judge:
     def __init__(self, *answers, available=True):
         self.answers, self.available, self.asked = list(answers), available, []
 
-    async def choose(self, state, questions):
+    async def choose(self, state, questions, *, model="jev-latest"):
         self.asked.append((state, questions))
         if not self.available:
             return {'available': False, 'elapsed_ms': 1}
@@ -279,7 +279,7 @@ def router_for(monkeypatch, route, reply=0.0):
     d = Dialogue()
     r = voice_router.Router('s', 'u', 'r', d, send, lambda *a, **k: None, {'dan_words': 0.0})
     class Judge:
-        async def choose(self, state, asked):
+        async def choose(self, state, asked, *, model="jev-latest"):
             answers = {'route': answer(route, .95)}
             if reply: answers['reply'] = answer('reply', reply)
             return {'available': True, 'answers': answers, 'elapsed_ms': 1}
@@ -363,7 +363,7 @@ async def test_a_client_delegation_on_the_real_sideband_is_answered_with_its_id(
     monkeypatch.setattr('app.services.command_job_state.list_owned', lambda user, room: [])
     class Jev:
         def __init__(self, *a, **k): pass
-        async def choose(self, state, questions):
+        async def choose(self, state, questions, *, model="jev-latest"):
             assert state['conversation'][-1] == {'role': '本人', 'text': '今どうなってる？'}
             return {'available': True, 'elapsed_ms': 150, 'answers': {'route': answer('status', .95), 'calendar': answer('other', .9)}}
         async def __aexit__(self, *a): return None
@@ -446,3 +446,36 @@ def test_notice_of_work_begun_is_never_the_line_dan_says(monkeypatch):
     assert [e['type'] for e in sent] == ['session.thinking.append', 'session.commentary.append']
     assert sent[0]['delegation_id'] == 'd1' and '台本の直し' in sent[0]['content']
     assert [f['spoken'] for p, f in log if p == 'route_answered'] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_board_reports_the_inputs_and_decision_before_and_after_edit(monkeypatch, tmp_path):
+    from app.services import prompt_store
+    from app.api import voicelog_routes
+    from app.services import voice_live
+    monkeypatch.setenv('DAN_PROMPTS_DIR', str(tmp_path))
+    judged = {'route': answer('make', .75), 'look': answer('look', .75)}
+    class Model:
+        async def choose(self, state, questions, *, model):
+            return {'available': True, 'answers': judged, 'elapsed_ms': 178, 'model': model}
+
+    r, _, _ = router(monkeypatch, Model(), said=('この字幕を大きくして',))
+    monkeypatch.setattr(r, 'running', lambda: [])
+    monkeypatch.setattr(voicelog_routes, '_get_user', lambda req: SimpleNamespace(user_id='u'))
+    monkeypatch.setitem(voice_live._sessions, 's', {'user_id':'u', 'dialogue':r.dialogue})
+    first = await r.route()
+    # The normal handoff advances the request boundary here. No work is dispatched in this comparison.
+    r.mark = (0, len(r.dialogue.history[0]['text']))
+    prompt_store.save('call/router-threshold', '0.9', by='owner')
+    prompt_store.save('call/router-model', 'jev-1.13.0', by='owner')
+    r.dialogue.add('assistant', '続けてどうぞ')
+    r.dialogue.add('user', 'この図を小さくして')
+    second = await r.route()
+    snapshot = await voicelog_routes.live_routing('s', None)
+    after, before = [row['decisions'][0] for row in snapshot['turns']]
+    assert first[0] == 'make' and before['route'] == '制作' and before['look'] is True
+    assert before['words'] == 'この字幕を大きくして' and before['ms'] == 178
+    assert before['criterion'] and '60%' in before['reason']
+    assert second[0] == 'other' and after['route'] == '担当に相談' and after['look'] is False
+    assert after['words'] == 'この図を小さくして' and after['model'] == 'jev-1.13.0' and '90%' in after['reason']
+    assert not any('routing' in turn for turn in r.dialogue.history)

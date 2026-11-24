@@ -36,7 +36,7 @@ def answer(choice, p):
 
 class Judge:
     def __init__(self, answers): self.answers, self.asked = answers, []
-    async def choose(self, state, questions):
+    async def choose(self, state, questions, *, model="jev-latest"):
         self.asked.append(questions)
         return {'available': True, 'answers': self.answers, 'elapsed_ms': 150}
     async def __aexit__(self, *a): return None
@@ -179,7 +179,7 @@ async def test_when_jev_does_not_answer_the_backend_gets_the_shared_screen(tmp_p
     page.show('green')
     await say(dialogue, clock, 'これって', '安い？')
     class Down(Judge):
-        async def choose(self, state, questions): return {'available': False, 'reason': 'unavailable', 'elapsed_ms': 1}
+        async def choose(self, state, questions, *, model="jev-latest"): return {'available': False, 'reason': 'unavailable', 'elapsed_ms': 1}
     r, sent, model = luna_router(monkeypatch, dialogue, Down({}))
     await r.answer('d6', time.monotonic())
     serving.cancel()

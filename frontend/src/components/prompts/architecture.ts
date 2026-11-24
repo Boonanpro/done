@@ -84,7 +84,7 @@ export const NODES: ArchNode[] = [
   { id: 'editor', name: 'エディターのダンと制作', model: '部屋のモデル（チャットと同じ）', icon: 'editor', x: 1340, y: 240, w: 210, same: 'chat', skills: true, video: true, prompts: ['work/editor-handoff'],
     line: '作品ごとの隠れた部屋の、ふつうのチャット。チャットのダンと同じ決まりで動き、その作品のタイムラインの道具が足される。' },
   { id: 'router', name: '振り分け', model: 'Jev', icon: 'router', x: 1620, y: 560, w: 181,
-    prompts: ['call/router-routes', 'call/router-ask', 'call/router-work', 'call/router-reply', 'call/router-calendar', 'call/router-promise-words', 'call/editor-place'],
+    prompts: ['call/router-model', 'call/router-threshold', 'call/router-look-ask', 'call/router-look', 'call/router-routes', 'call/router-ask', 'call/router-work', 'call/router-reply', 'call/router-calendar', 'call/router-promise-words', 'call/editor-place'],
     line: '通話のダンが任せた頼みを、どこへ回すか一瞬で選ぶ。' },
   { id: 'editorTalk', name: 'エディターの「話す」', model: 'GPT-Live ＋ GPT-6 Astra', icon: 'editorTalk', x: 1080, y: 900, w: 210,
     prompts: ['code/editor-live', 'code/editor-reasoning', 'code/editor-conversation'],
