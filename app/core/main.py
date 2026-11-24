@@ -129,6 +129,15 @@ async def lifespan(app: FastAPI):
 
     if is_standby():
         logger.info("standby: shared work (follow-ups, mail, Instagram, run recovery, publication) is left to the active Dan")
+        # A generation Core still closes its own runs whose work is gone: no other Core may judge them (run_is_mine).
+        # Without this, a turn lost in a generation stayed 'running' for good, and every restart waited on it
+        # until it gave up after 24 h (2026-11-23..24, run d6681ac6 of 手描き説明の読み取り確認).
+        if os.environ.get("DAN_GENERATION"):
+            try:
+                from app.services import run_reconciler
+                asyncio.create_task(run_reconciler.loop())
+            except Exception as e:
+                logger.warning("run reconciler failed to schedule: %s", e)
     else:
         # 続報ポーラー: 予約された follow-up を期限到来時に発火し、ダンを再起動して
         # チャットに報告させる（ターン制エージェントが「完了したら報告します」を守れる
