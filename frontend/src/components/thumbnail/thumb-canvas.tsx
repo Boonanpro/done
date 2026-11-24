@@ -5,7 +5,7 @@
 // 文字は本物の文字（SVG の text）で、縁は丸い角の stroke を文字の後ろに描き、影は縁ごとぼかした黒。
 // 元のサムネ（Python の PIL で描いていた）と同じ書体・縁・影の付け方にそろえてある。
 
-import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { forwardRef, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
 import { thumbFont, type ThumbDoc, type ThumbMark, type ThumbPart, type ThumbTextPart } from './thumb-doc';
 
@@ -168,6 +168,8 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
     onImageState?.(loadedRef.current.size, keep.size);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srcKey]);
+  // 部品はサムネの枠で切る。選んだ枠とつまみ（overlay）だけは枠の外にもはみ出して描き、押せるようにする 2026-11-24
+  const clipId = `thumbclip${useId().replace(/[^a-zA-Z0-9]/g, '')}`;
   const done = (src: string) => {
     loadedRef.current.add(src);
     onImageState?.(loadedRef.current.size, new Set(images.map((p) => (p as { src: string }).src)).size);
@@ -181,8 +183,10 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
       xmlns="http://www.w3.org/2000/svg"
       className={className}
       {...handlers}
-      style={{ display: 'block', background: doc.background || '#111', aspectRatio: `${doc.width} / ${doc.height}`, ...style }}
+      style={{ display: 'block', overflow: 'visible', background: doc.background || '#111', aspectRatio: `${doc.width} / ${doc.height}`, ...style }}
     >
+      <defs><clipPath id={clipId}><rect x={0} y={0} width={doc.width} height={doc.height} /></clipPath></defs>
+      <g clipPath={`url(#${clipId})`}>
       {doc.parts.map((p) => {
         if (p.hidden) return null;
         const rot = p.rotation || 0;
@@ -225,6 +229,7 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
           pointerEvents="none"
         />
       ))}
+      </g>
       {overlay}
     </svg>
   );
