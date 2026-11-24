@@ -313,6 +313,41 @@ async def receive_sketch(room_id: str, body: SketchFrame, request: Request):
         raise HTTPException(422, '絵を読み込めませんでした') from exc
 
 
+class LiveFocus(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+    room_id: str = Field(min_length=1, max_length=80)
+
+
+@router.post('/live/backend/focus')
+async def receive_focus(body: LiveFocus, request: Request):
+    """The room on the owner's screen during a call (components/voice/call-provider.tsx). One call moves between timelines
+    and chats; the work he asks for goes to the room he looks at (voice_sideband.Dialogue.set_focus, voice_router.work_room)."""
+    from app.services import voice_live
+    from app.services.voice_sideband import note
+    user = _get_user(request)
+    state = voice_live.get_session(body.session_id, user.user_id)
+    if not state:
+        raise HTTPException(404, 'この音声接続は見つかりません')
+    room = await ChatService().get_room(body.room_id, user.user_id)
+    if not room:
+        raise HTTPException(403, 'この部屋へのアクセス権がありません')
+    dialogue = state.get('dialogue')
+    if dialogue is None:
+        return {'accepted': False}
+    title = ''
+    try:
+        from app.services.project_service import ProjectService
+        project = await ProjectService().get_project_by_room_id(body.room_id)
+        title = str((project or {}).get('title') or '').removeprefix('ダン開発室: ')
+    except Exception:
+        pass
+    changed = await asyncio.to_thread(dialogue.set_focus, body.room_id, title)
+    if changed:
+        note(body.session_id, state.get('room_id'), 'focus_changed', focus_room=body.room_id,
+             editor=bool(getattr(dialogue, 'editor', None)), same_room=body.room_id == state.get('room_id'))
+    return {'accepted': True, 'changed': changed}
+
+
 class LiveCloseRequest(BaseModel):
     session_id: str
 

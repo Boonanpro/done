@@ -72,8 +72,9 @@ def _same(a: dict[str, Any], b: dict[str, Any]) -> bool:
 class Moments:
     """Kept on the call's Dialogue (voice_sideband): `heard(turn)` on each delta of the owner's words."""
 
-    def __init__(self, asset_room_id: str, content_id: str):
+    def __init__(self, asset_room_id: str, content_id: str, room_id: str = ''):
         self.asset_room_id, self.content_id = asset_room_id, content_id
+        self.room_id = room_id   # the work's own chat room (editor_rooms)
         self.path = _state_path(asset_room_id)
         self.read_at = 0.0
         self.mtime = 0
@@ -117,6 +118,7 @@ class Moments:
         if moments and _same(moments[-1], m):
             return
         m['at'] = round(time.time(), 2)
+        m['content'] = self.content_id   # one call moves between works: a moment belongs to the work it was on
         moments.append(m)
         del moments[:-MOMENTS_PER_TURN]
 
@@ -187,14 +189,14 @@ def turns_text(turns: list[dict[str, Any]], asset_room_id: str, content_id: str,
             continue
         row = ('本人' if t.get('role') == 'user' else 'ダン') + ': ' + words
         if t.get('role') == 'user':
-            row += ''.join(chr(10) + '  ' + moment_text(m, clips, assets) for m in (t.get('editor') or []))
+            row += ''.join(chr(10) + '  ' + moment_text(m, clips, assets) for m in _of(t, content_id))
         rows.append(row)
     return chr(10).join(rows)[-limit:]
 
 
 def last_moment_text(turns: list[dict[str, Any]], asset_room_id: str, content_id: str) -> str:
     """Where the owner was in the editor at the end of his last turn ('' when nothing was recorded)."""
-    m = latest_moments(turns, 1)
+    m = latest_moments(turns, 1, content_id)
     if not m:
         return ''
     try:
@@ -204,7 +206,12 @@ def last_moment_text(turns: list[dict[str, Any]], asset_room_id: str, content_id
     return moment_text(m[-1], clips, assets)
 
 
-def latest_moments(turns: list[dict[str, Any]], n: int = FRAMES) -> list[dict[str, Any]]:
+def _of(turn: dict[str, Any], content_id: str | None) -> list[dict[str, Any]]:
+    """The turn's moments on this work (a moment from before the call could move between works has no 'content')."""
+    return [m for m in (turn.get('editor') or []) if not content_id or m.get('content', content_id) == content_id]
+
+
+def latest_moments(turns: list[dict[str, Any]], n: int = FRAMES, content_id: str | None = None) -> list[dict[str, Any]]:
     """The last moments of the owner's last turns that differ in where they were (newest last)."""
     out: list[dict[str, Any]] = []
     for t in reversed(turns):
@@ -212,7 +219,7 @@ def latest_moments(turns: list[dict[str, Any]], n: int = FRAMES) -> list[dict[st
             if out:
                 break
             continue
-        for m in reversed(t.get('editor') or []):
+        for m in reversed(_of(t, content_id)):
             if not any(_same(m, o) for o in out):
                 out.insert(0, m)
             if len(out) >= n:
@@ -251,7 +258,7 @@ def draw_frame(asset_room_id: str, content_id: str, m: dict[str, Any], dest: Pat
 
 def note_for(asset_room_id: str, content_id: str, turns: list[dict[str, Any]]) -> tuple[str, list[tuple[dict[str, Any], Path]]]:
     """The paragraph the call's work gets, and the frames to draw (moment, where) after the work has started."""
-    todo = [(m, frame_file(asset_room_id)) for m in latest_moments(turns)]
+    todo = [(m, frame_file(asset_room_id)) for m in latest_moments(turns, FRAMES, content_id)]
     frames = ''
     if todo:
         frames = ('その時の完成画面の絵（指していた所は赤い丸。裏で描いているので、まだ無ければ少し待つ。描けなかった時は render_frame で'

@@ -11,6 +11,7 @@ import { Toaster } from '@/components/ui/sonner';
 import { getQueryClient } from '@/lib/query-client';
 import { PERSIST_BUSTER, PERSIST_MAX_AGE_MS, makeQueryPersister, shouldPersistQuery } from '@/lib/query-persister';
 import { PwaNotificationBadgeSync } from '@/components/pwa-notification-badge-sync';
+import { CallProvider } from '@/components/voice/call-provider';
 
 interface ProvidersProps {
   children: React.ReactNode;
@@ -35,7 +36,8 @@ export function Providers({ children }: ProvidersProps) {
           上書きされない（hydrate は新しい時だけ）。本人の Chrome では読み戻しに5〜30秒かかり、その間チャットが空のままだった（2026-11-21） */}
       <IsRestoringProvider value={false}>
         <PwaNotificationBadgeSync />
-        {children}
+        {/* 通話は画面全体で1つ。部屋・タイムラインを移っても切れない（components/voice/call-provider.tsx） */}
+        <CallProvider>{children}</CallProvider>
       </IsRestoringProvider>
       <Toaster
         position="bottom-right"

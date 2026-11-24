@@ -1511,6 +1511,18 @@ def note_withdrawn(room_id: str, texts) -> None:
     _withdrawn_words[room_id] = kept + [(words(x), now) for x in texts if words(x)]
 
 
+def _last_message_sender(room_id: str) -> Optional[str]:
+    """部屋の最後の発言の送り手（human / ai / system）。読めなければ None（その時は👍をそのまま保存する）。"""
+    try:
+        from app.services.supabase_client import get_supabase_client
+        rows = (get_supabase_client().client.table("chat_messages").select("sender_type")
+                .eq("room_id", room_id).order("created_at", desc=True).limit(1).execute().data or [])
+        return rows[0].get("sender_type") if rows else None
+    except Exception as e:
+        _cli_debug(f"[REPLY] last sender lookup failed (room {room_id[:8]}): {e}")
+        return None
+
+
 def _answers_withdrawn(room_id: str) -> bool:
     content, started = _turn_inputs.get(room_id, ("", 0.0))
     return any(words and words in content and at >= started for words, at in _withdrawn_words.get(room_id, []))
@@ -1587,6 +1599,13 @@ def _save_ai_message_sync(
         if ends_turn:
             turn_flow.turn_answered(room_id)
         _cli_debug(f"[REPLY] silent reply not saved (room {room_id[:8]})")
+        return False
+    from app.agent.reply_text import is_reaction, is_stray_reaction
+    if is_reaction(content) and is_stray_reaction(content, _last_message_sender(room_id)):
+        # 本人の発言に答えていない番の👍（裏の知らせで起こされた番）。押す先が無く、ダン自身の発言に付いて見えるので保存しない。
+        if ends_turn:
+            turn_flow.turn_answered(room_id)
+        _cli_debug(f"[REPLY] reaction with no owner message to react to, not saved (room {room_id[:8]})")
         return False
     content = sanitize_artifact_public_urls(content)
     if blocks:

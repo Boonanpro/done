@@ -54,6 +54,25 @@ export function openEditorWindow(roomId: string, contentId?: string | null): voi
   } catch {
     alreadyOpen = false;
   }
+  // 同じ部屋のエディターが別の作品を出していれば、読み直さずにその窓の中で作品を切り替える。読み直すと、その窓で
+  // かけていた通話が切れる（2026-11-24 本人「1回の通話の中でいろんなタイムラインに修正指示を出したい」）。
+  // 切り替わらなければ（この仕組みの無い古い窓）1.5秒後に今までどおり読み直す。
+  let sameRoom = false;
+  try {
+    sameRoom = win.location.pathname === '/production-workspace' && new URLSearchParams(win.location.search).get('room_id') === roomId;
+  } catch {
+    sameRoom = false;
+  }
+  if (!alreadyOpen && sameRoom && contentId) {
+    win.postMessage({ type: 'dan-editor-open', contentId }, window.location.origin);
+    window.setTimeout(() => {
+      try {
+        if (new URLSearchParams(win.location.search).get('content_id') !== contentId) win.location.replace(url);
+      } catch { /* 窓が閉じられた */ }
+    }, 1500);
+    win.focus();
+    return;
+  }
   if (!alreadyOpen) {
     if (win.location.href === 'about:blank') {
       win.document.open();

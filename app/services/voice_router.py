@@ -330,9 +330,9 @@ class Router:
         targets = self.targets or {}   # read at the call's start (warm); a request before that has no pages to name
         state = {'conversation': self.conversation(), 'running_work': [w['label'] for w in running[-4:]],
                  'screen': getattr(self.stage, 'caption', '') if self.stage is not None else ''}
-        editor = getattr(self.dialogue, 'editor', None)
-        if editor is not None:   # a call from the editor: 「この字幕」 is in the work on his screen (voice_editor)
-            state['call_place'] = await asyncio.to_thread(editor.place)
+        place = await asyncio.to_thread(screen_place, self.dialogue)
+        if place:   # the work in the editor or the room on his screen: 「この字幕」 is there (voice_editor, Dialogue.place)
+            state['call_place'] = place
         asked = questions(running, {name: f'「{name}」' for name in targets})
         fit(state, asked)
         got = await self.judge.choose(state, asked)
@@ -484,6 +484,10 @@ class Router:
 
     async def to_chat_dan(self, words, route, delegation_id, created, carried=''):
         label = label_of(words)
+        target = work_room(self.dialogue, self.room_id)
+        if target != self.room_id:   # Dan knows, and can say, which work or room he took it to
+            title = await asyncio.to_thread(room_title, target)
+            if title: label = f'{label}（{title}で）'
         with prompt_store.observed_reads() as reads:
             out = await start_chat_dan(self.user_id, self.room_id, self.dialogue, words, carried=carried)
         if not out.get('accepted'):
@@ -491,7 +495,7 @@ class Router:
             return await self.reply(delegation_id, created, f'「{label}」を始められなかった。{out.get("error") or ""}')
         job_id = (out.get('receipt') or {}).get('id')
         if job_id: self.jobs[job_id] = label
-        self.record('route_job_started', route=route, job_id=str(job_id), prompts=list(reads))
+        self.record('route_job_started', route=route, job_id=str(job_id), prompts=list(reads), other_room=target != self.room_id)
         await self.reply(delegation_id, created, prompt_store.fill('call/router-job-started', label=label), spoken=False)
 
     async def stop(self, route, delegation_id, created):
@@ -602,7 +606,8 @@ class Router:
             said = (await asyncio.to_thread(editor.place) + chr(10)
                     + await asyncio.to_thread(voice_editor.turns_text, self.dialogue.history, editor.asset_room_id, editor.content_id, 16000))
         else:
-            said = turns_text(self.dialogue.history, 16000)
+            place = await asyncio.to_thread(screen_place, self.dialogue)
+            said = (place + chr(10) if place else '') + turns_text(self.dialogue.history, 16000)
         given = [{'role': 'user', 'content': '通話のここまで（新しいものが下。最後の本人の言葉が今の頼み）:' + chr(10) + said
                   + self.call_context(others) + extra + chr(10) * 2 + _PROMPTS['LUNA_RULES']()}]
         sketch = getattr(self.dialogue, 'sketch', None)
@@ -716,6 +721,40 @@ SUMMON_REPLY_S = 600   # a reply this long after a summons was said still answer
 # CALL_JOB_NOTE: the text is ~/.dan/workspace/prompts/call/call-job-note.md (seed app/prompts/seed/), read at each use (prompt_store).
 
 
+def work_room(dialogue, call_room):
+    """The room the owner's request is for: the room on his screen when he said his last words (Dialogue.focus_room,
+    kept on each turn), else the call's own room. One call moves between timelines and chats (2026-11-24, the owner)."""
+    turns = getattr(dialogue, 'history', dialogue) or []
+    said = next((t.get('room') for t in reversed(turns) if isinstance(t, dict) and t.get('role') == 'user' and t.get('room')), '')
+    return said or getattr(dialogue, 'focus_room', '') or call_room
+
+
+def screen_place(dialogue):
+    place = getattr(dialogue, 'place', None)
+    if callable(place):
+        try: return place() or ''
+        except Exception: return ''
+    editor = getattr(dialogue, 'editor', None)
+    return editor.place() if editor is not None else ''
+
+
+def room_title(room_id):
+    """The name the owner knows the room by: the work's title for a work's room in the editor, else the room's title."""
+    try:
+        from app.services import voice_editor
+        place = voice_editor.call_editor(room_id)
+        if place:
+            from app.services import timeline_live as tl
+            content, _ = tl.live_sequence(place['asset_room_id'], place['content_id'])
+            if (content or {}).get('title'): return f"「{content['title']}」"
+        from app.services.supabase_client import get_supabase_client
+        rows = (get_supabase_client().client.table('projects').select('title').eq('room_id', room_id).limit(1).execute().data or [])
+        title = str((rows[0] if rows else {}).get('title') or '').strip()
+        return f'「{title[:40]}」' if title else ''
+    except Exception:
+        return ''
+
+
 async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=False):
     """Chat Dan takes the work: a parallel job of the room on the parallel-work model (engine 'make', the same harness as the
     chat), with the owner's words and the call's transcript. Nothing in between rewrites the request."""
@@ -723,9 +762,11 @@ async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=Fal
     from app.services import voice_editor
     turns = getattr(dialogue, 'history', dialogue)
     editor = getattr(dialogue, 'editor', None)   # a call from one work in the editor (voice_editor)
+    if editor is not None and getattr(editor, 'room_id', '') and editor.room_id != room_id:
+        editor = None   # he has moved on since he said it: the moments of the work he said it in
     if editor is None:   # handed over by the general backend's start_work: it passes the turns, not the call
         place = await asyncio.to_thread(voice_editor.call_editor, room_id)
-        editor = voice_editor.Moments(place['asset_room_id'], place['content_id']) if place else None
+        editor = voice_editor.Moments(place['asset_room_id'], place['content_id'], room_id=room_id) if place else None
     frames = []
     if editor is not None:
         from app.services import editor_handoff, timeline_draft
@@ -758,13 +799,15 @@ async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=Fal
 async def start_chat_dan(user_id, room_id, dialogue, words, carried='', *, internal_check=False):
     from app.services import voice_editor
     from app.services.command_center import execute
-    task, editor, frames = await prepare_chat_task(room_id, dialogue, words, carried)
+    target = work_room(dialogue, room_id)   # the room on his screen when he said it; the call's room is where it reports
+    task, editor, frames = await prepare_chat_task(target, dialogue, words, carried)
     if frames:   # drawn after the work has started: the work takes some seconds to start and reads them then
         loop = asyncio.get_running_loop()
         for moment, dest in frames:
             loop.run_in_executor(None, voice_editor.draw_frame, editor.asset_room_id, editor.content_id, moment, dest)
     try:
-        return await execute({'action': 'work', 'task': task, 'engine': 'make'},
+        return await execute({'action': 'work', 'task': task, 'engine': 'make',
+                              **({'target_room_id': target} if target != room_id else {})},
                              room_id, user_id, voice_handoff=True, internal_check=internal_check)
     except Exception as exc:
         return {'accepted': False, 'error': type(exc).__name__}
