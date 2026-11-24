@@ -84,6 +84,18 @@ def alive(run, newest_turn_run_by_room):
     return newest_turn_run_by_room.get(run.get('room_id')) == run['id'] and room_turn_alive(run.get('room_id'))
 
 
+def owner_gone(run):
+    """A run started by another generation Core on this machine whose process has ended. That Core can no longer close
+    it, and no work can be behind it, so any Core here may. Runs of the other machine are never taken."""
+    import sys
+    meta = run.get('metadata') or {}
+    machine, owner = meta.get('machine') or '', meta.get('process_owner')
+    if not machine.startswith(sys.platform + '@') or not owner:
+        return False
+    from app.core.generations import living
+    return not living(owner)
+
+
 def reconcile_once(dry_run=False):
     """Close the quiet active runs with no live work in this Core. dry_run lists them without closing (only this Core can
     judge liveness: run elsewhere, every chat turn looks dead)."""
@@ -105,7 +117,7 @@ def reconcile_once(dry_run=False):
     closed = 0
     from app.core.standby import run_is_mine
     for run in rows:
-        if not run_is_mine(run):   # started on the other machine (Mac / Windows): only that Core can judge it
+        if not (run_is_mine(run) or owner_gone(run)):   # started on the other machine (Mac / Windows): only that Core can judge it
             continue
         if alive(run, newest):
             continue
