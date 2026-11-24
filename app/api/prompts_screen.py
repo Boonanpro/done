@@ -174,3 +174,58 @@ async def prompts_chat_room(current_user: TokenData = Depends(get_current_user))
         data[current_user.user_id] = {'project_id': project['id'], 'room_id': project['room_id'], 'created': project.get('created_at')}
         await asyncio.to_thread(_chat_write, data)
         return {'project_id': project['id'], 'room_id': project['room_id'], 'title': CHAT_TITLE}
+
+
+# ---- 構成図のボードの並べ方（2026-11-24 本人「要素や札のサイズ・位置、線の伸び方も調整したい」）----
+# みきさんが動かした箱・枠の位置と大きさ、線の通る点だけを持つ（決まった並べ方は frontend の architecture.ts）。
+# PC とスマホで同じ並べ方を見るので、端末ではなくここに置く。
+BOARD_FILE = 'layout.json'
+BOARD_KEYS = ('nodes', 'frames', 'edges')
+
+
+def _board_path():
+    return prompt_store.root() / '.board' / BOARD_FILE
+
+
+def _board_read():
+    try: data = json.loads(_board_path().read_text(encoding='utf-8'))
+    except (OSError, ValueError): data = {}
+    return {k: data.get(k) if isinstance(data.get(k), dict) else {} for k in BOARD_KEYS}
+
+
+def _board_clean(body):
+    out = {k: {} for k in BOARD_KEYS}
+    for kind in ('nodes', 'frames'):
+        for key, box in (body.get(kind) or {}).items():
+            try: out[kind][str(key)[:80]] = {f: round(float(box[f]), 1) for f in ('x', 'y', 'w', 'h')}
+            except (KeyError, TypeError, ValueError): continue
+    for key, via in (body.get('edges') or {}).items():
+        try: out['edges'][str(key)[:120]] = [[round(float(x), 1), round(float(y), 1)] for x, y in via][:40]
+        except (TypeError, ValueError): continue
+    return out
+
+
+@router.get('/board-layout')
+async def board_layout(current_user: TokenData = Depends(get_current_user)):
+    return await asyncio.to_thread(_board_read)
+
+
+class BoardBody(BaseModel):
+    nodes: dict = {}
+    frames: dict = {}
+    edges: dict = {}
+
+
+@router.post('/board-layout')
+async def save_board_layout(body: BoardBody, current_user: TokenData = Depends(get_current_user)):
+    if current_user.user_id != resolve_owner_user_id():
+        raise HTTPException(403, '並べ方は本人だけが変えられます。')
+    data = _board_clean(body.model_dump())
+    def write():
+        path = _board_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        tmp.replace(path)
+    await asyncio.to_thread(write)
+    return data
