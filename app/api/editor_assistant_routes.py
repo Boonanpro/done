@@ -628,7 +628,7 @@ EDITOR_TOOLS = list(_EDITOR_TOOLS) + [
     function('revise_presentation',REVISE_DESCRIPTION,REVISE_PROPERTIES,['item_id','changes']),
     function('read_presentations','提示済みの実物を履歴から読む。過去の画像・文字・動画・3D・改訂元をID付きで取得。beforeでさらに遡る。',{'before':{'type':'number'},'limit':{'type':'integer'}},[]),
     function('choose_reference','ユーザーが選んだ提案と好みを保存。次の制作担当へ実物を引き継ぐ。',{'item_id':{'type':'string'},'feedback':{'type':'string'}},['item_id']),
-    function('read_editor_context','発言時の再生位置・マウス・選択範囲・作品の方針・以前の編集を読む。画面に関係する依頼で必要なときに使う。',{},[]),
+    function('read_editor_context','発言時の再生位置・マウス・選択範囲・作品の方針・以前の編集を読む。今どこを見ているか・何を選んでいるかを聞かれた時と、「ここ」「この〜」を含む頼みでは、答える前に読む。',{},[]),
     function('answer_question','制作担当の質問に対するユーザーの回答・条件変更を同じ仕事へ返す。質問への問い返し、雑談、会話への苦情は回答として送らない。',
              {'question_id':{'type':'string'},'text':{'type':'string'}},['question_id','text']),
     function('wait_for_user','返答を必要としない独り言、考え中の発話、雑音には音声を出さず待つ。マイクも制作も止めない。',{},[]),
