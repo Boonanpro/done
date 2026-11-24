@@ -47,6 +47,7 @@ CASES: list[tuple[str, str]] = [
     ("frontend/src/app/artifacts/publish/page.tsx", "infra"),
     ("frontend/src/app/api/v1/inspector-overrides/route.ts", "infra"),
     ("frontend/public/favicon.ico", "infra"),
+    ("frontend/public/prompts/arch/chat-pc.webp", "infra"),
     ("frontend/public/icon-192x192.png", "infra"),
     ("frontend/public/manifest.json", "infra"),
     ("frontend/public/sw.js", "infra"),
