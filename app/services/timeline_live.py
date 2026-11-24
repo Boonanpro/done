@@ -53,6 +53,12 @@ def editor_state(room_id: str, max_age_s: float = 900.0) -> dict[str, Any] | Non
     if not isinstance(data, dict) or time.time() - st.st_mtime > max_age_s:
         return None
     data["age_s"] = round(time.time() - st.st_mtime, 1)
+    if data.get("playing") and data.get("playhead") is not None and data.get("at"):
+        # while playing the editor tells the playhead every 0.5 s: now it is that plus the time since (≤3 s)
+        try:
+            data["playhead"] = round(float(data["playhead"]) + min(max(0.0, time.time() - float(data["at"])), 3.0), 2)
+        except (TypeError, ValueError):
+            pass
     if str(data.get("editor") or "") != "editor":
         # library screen: no content is actually open (the id is just the first doc entry)
         data["content_id"] = ""

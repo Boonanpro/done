@@ -1568,11 +1568,16 @@ export function VideoReviewEditor({
     });
   }, []);
 
-  // 「ここ」「この字幕」をダンが分かるよう、再生位置と選んだクリップを知らせる（0.4秒まとめて。ネイティブ版と同じ
-  // editor_state.json。読むのは「ダンと制作」と本体のチャットと通話のダン: app/services/timeline_live.py）
+  // 「ここ」「この字幕」をダンが分かるよう、再生位置と選んだクリップを知らせる（ネイティブ版と同じ
+  // editor_state.json。読むのは「ダンと制作」と本体のチャットと通話のダン: app/services/timeline_live.py）。
+  // 止まっている時は0.15秒まとめて、再生中は0.5秒ごとに必ず送る。前は再生中も「2秒変化が無ければ」送る形で、
+  // 再生位置は0.125秒ごとに変わるので再生中は一度も届かず、ダンは再生前の位置を見ていた（2026-11-24）
+  const editorStateSentRef = useRef(0);
   useEffect(() => {
     if (!roomId || !contentId) return;
+    const wait = playing ? Math.max(0, 500 - (performance.now() - editorStateSentRef.current)) : 150;
     const timer = window.setTimeout(() => {
+      editorStateSentRef.current = performance.now();
       const ids = new Set(selectedSequenceClipIds.length ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
       const selected: Array<Record<string, unknown>> = [];
       (editSequence?.tracks || []).forEach((track, lane) => {
@@ -1590,7 +1595,7 @@ export function VideoReviewEditor({
             inside: previewPoint.at > 0, age_ms: Math.max(0, Date.now() - Math.abs(previewPoint.at)) } : null,
         }),
       }).catch(() => {});
-    }, playing ? 2000 : 400);
+    }, wait);
     return () => window.clearTimeout(timer);
   }, [roomId, contentId, currentTime, playing, selectedSequenceClipId, selectedSequenceClipIds, editSequence, previewPoint]);
 
