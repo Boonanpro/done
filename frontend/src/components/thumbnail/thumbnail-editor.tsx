@@ -291,7 +291,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   // 保存されている形を受け取る。手元に保存前の直しがあれば、それを今の形に重ねる（ダンの直しを消さない）
   const adoptServer = (next: ThumbDoc, force: boolean, serverNow?: number) => {
     const rev = next.rev ?? 0;
-    if (!force && (rev === baseRev.current || drag.current)) return;
+    // 保存より前に出した読み直しの返事が後から届くことがある（古い形で画面が戻り、直後の Ctrl+Z や並べ替えが消えた）。
+    // rev は保存のたびに増えるので、今持っている形より古い返事は使わない
+    if (!force && (rev <= baseRev.current || drag.current)) return;
     const shown = docRef.current;
     let merged = next;
     if (!force && dirty.current && baseDoc.current && shown) merged = mergeThumbDocs(baseDoc.current, shown, next);
