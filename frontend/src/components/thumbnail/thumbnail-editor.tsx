@@ -58,6 +58,10 @@ type Drag =
   | { kind: 'pen' };
 
 const PEN_COLOR = '#ff2a2a';
+// サムネの周りの余白（角のつまみと回すつまみが出る所）
+const STAGE_MARGIN = 28;
+// 絵の透けた所を押しても、その絵は選ばない（下の部品を選ぶ）。この濃さより薄い所は透けている扱い
+const HIT_ALPHA = 24;
 
 function api(path: string, roomId: string) {
   return `/api/v1/production-assets/contents/${path}${path.includes('?') ? '&' : '?'}room_id=${encodeURIComponent(roomId)}`;
@@ -237,7 +241,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const ro = new ResizeObserver(() => {
       const r = el.getBoundingClientRect();
       const ratio = doc ? doc.width / doc.height : 16 / 9;
-      setStageW(Math.max(200, Math.floor(Math.min(r.width, (compact ? r.width / ratio : r.height) * ratio))));
+      // 周りに余白を残す（ふちまである部品の角のつまみが、画面の端で切れずに掴めるように）2026-11-24
+      const m = STAGE_MARGIN * 2;
+      setStageW(Math.max(200, Math.floor(Math.min(r.width - m, (compact ? (r.width - m) / ratio : r.height - m) * ratio))));
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -307,6 +313,84 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     return [pt.x, pt.y];
   };
 
+  // ── 押した所にある部品（2026-11-24 本人「クリックできない素材がある」「関係ない所を押しても選択が外れない」）──
+  // SVG の絵は透けた所も四角ごと押されてしまうので、絵の濃さを読んで、実際に見えている一番手前の部品を選ぶ。
+  // 固定の部品も選べる（引きずっても動かないだけで、角で大きさは変えられる）。
+  const alphaCache = useRef(new Map<string, { w: number; h: number; a: Uint8ClampedArray } | 'loading' | 'fail'>());
+  useEffect(() => {
+    const d = viewDoc || doc;
+    if (!d) return;
+    for (const p of d.parts) {
+      if (p.type !== 'image' || !p.src || alphaCache.current.has(p.src)) continue;
+      const src = p.src;
+      alphaCache.current.set(src, 'loading');
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const k = Math.min(1, 640 / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+          const w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k));
+          const cv = document.createElement('canvas');
+          cv.width = w; cv.height = h;
+          const cx = cv.getContext('2d', { willReadFrequently: true });
+          if (!cx) throw new Error('no ctx');
+          cx.drawImage(img, 0, 0, w, h);
+          const data = cx.getImageData(0, 0, w, h).data;
+          const a = new Uint8ClampedArray(w * h);
+          for (let i = 0; i < w * h; i++) a[i] = data[i * 4 + 3];
+          alphaCache.current.set(src, { w, h, a });
+        } catch {
+          alphaCache.current.set(src, 'fail');
+        }
+      };
+      img.onerror = () => alphaCache.current.set(src, 'fail');
+      img.src = src;
+    }
+  }, [viewDoc, doc]);
+
+  const hitPart = (pt: [number, number]): ThumbPart | undefined => {
+    if (!doc) return undefined;
+    const shown = (viewDoc || doc).parts;
+    for (let i = doc.parts.length - 1; i >= 0; i--) {
+      const p = doc.parts[i];
+      if (p.hidden || (p.opacity ?? 1) < 0.05) continue;
+      const b = boxOf(p);
+      const [lx, ly] = p.rotation ? rotatePoint(pt, partCenter(p, boxes[p.id]), -p.rotation) : pt;
+      if (lx < b.x || ly < b.y || lx > b.x + b.w || ly > b.y + b.h) continue;
+      if (p.type === 'image') {
+        const sp = shown[i];
+        const al = sp && sp.type === 'image' ? alphaCache.current.get(sp.src) : undefined;
+        if (al && typeof al === 'object' && p.w > 0 && p.h > 0) {
+          let u = (lx - p.x) / p.w;
+          if (p.flip_x) u = 1 - u;
+          const v = (ly - p.y) / p.h;
+          const px = Math.floor(u * al.w), py = Math.floor(v * al.h);
+          // 押した所のまわり少しを見る（細い線や縁も押しやすく）
+          let max = 0;
+          for (let dy = -2; dy <= 2 && max < HIT_ALPHA; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+              const x = px + dx, y = py + dy;
+              if (x < 0 || y < 0 || x >= al.w || y >= al.h) continue;
+              const val = al.a[y * al.w + x];
+              if (val > max) max = val;
+            }
+          }
+          if (max < HIT_ALPHA) continue;
+        }
+      }
+      return p;
+    }
+    return undefined;
+  };
+
+  // サムネ全体を覆う部品（背景など）。ほかの部品を選んでいる時にここを押すと、まず選択を外すだけにする
+  const coversCanvas = (p: ThumbPart) => {
+    if (!doc) return false;
+    const b = boxOf(p);
+    const iw = Math.max(0, Math.min(doc.width, b.x + b.w) - Math.max(0, b.x));
+    const ih = Math.max(0, Math.min(doc.height, b.y + b.h) - Math.max(0, b.y));
+    return iw * ih >= doc.width * doc.height * 0.9;
+  };
+
   // ── 指・マウスの操作 ──
   const onPointerDown = (ev: React.PointerEvent<SVGSVGElement>) => {
     if (!doc) return;
@@ -338,16 +422,24 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       }
       return;
     }
-    const id = target.closest('[data-part-id]')?.getAttribute('data-part-id');
-    const part = id ? doc.parts.find((p) => p.id === id) : undefined;
-    if (part && !part.locked) {
-      ev.preventDefault();
-      (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
-      setSelected(part.id);
-      drag.current = { kind: 'move', id: part.id, start: pt, orig: clone(part), before: clone(doc) };
-    } else {
+    const inCanvas = pt[0] >= 0 && pt[1] >= 0 && pt[0] <= doc.width && pt[1] <= doc.height;
+    const part = inCanvas ? hitPart(pt) : undefined;
+    if (!part || (selected && selected !== part.id && coversCanvas(part))) {
       setSelected(null);
+      return;
     }
+    ev.preventDefault();
+    (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
+    setSelected(part.id);
+    if (!part.locked) drag.current = { kind: 'move', id: part.id, start: pt, orig: clone(part), before: clone(doc) };
+  };
+
+  // サムネの外（まわりの余白）を押したら選択を外す
+  const onStagePointerDown = (ev: React.PointerEvent<HTMLDivElement>) => {
+    if (mode !== 'select') return;
+    const svg = svgRef.current;
+    if (svg && svg.contains(ev.target as Node)) return;
+    setSelected(null);
   };
 
   const onPointerMove = (ev: React.PointerEvent<SVGSVGElement>) => {
@@ -642,25 +734,24 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const b = boxOf(sel);
     const [cx, cy] = partCenter(sel, boxes[sel.id]);
     const sw = 1.5 / scale;
+    const roomAbove = b.y * scale + STAGE_MARGIN;
+    const rotY = roomAbove >= 28 + handleR * scale ? b.y - 28 / scale : b.y + 28 / scale;
     return (
       <g transform={sel.rotation ? `rotate(${sel.rotation} ${cx} ${cy})` : undefined}>
         <rect x={b.x} y={b.y} width={b.w} height={b.h} fill="none" stroke="#38bdf8" strokeWidth={sw * 1.5} strokeDasharray={`${6 / scale} ${4 / scale}`} pointerEvents="none" />
-        {!sel.locked ? (
-          <>
-            <line x1={b.x + b.w / 2} y1={b.y} x2={b.x + b.w / 2} y2={b.y - 28 / scale} stroke="#38bdf8" strokeWidth={sw} pointerEvents="none" />
-            <circle data-handle="rotate" cx={b.x + b.w / 2} cy={b.y - 28 / scale} r={handleR} fill="#fff" stroke="#38bdf8" strokeWidth={sw} style={{ cursor: 'grab' }} />
-            {([['nw', b.x, b.y], ['ne', b.x + b.w, b.y], ['sw', b.x, b.y + b.h], ['se', b.x + b.w, b.y + b.h]] as const).map(([k, x, y]) => (
-              <rect key={k} data-handle={k} x={x - handleR} y={y - handleR} width={handleR * 2} height={handleR * 2} fill="#fff" stroke="#38bdf8" strokeWidth={sw}
-                style={{ cursor: k === 'nw' || k === 'se' ? 'nwse-resize' : 'nesw-resize' }} />
-            ))}
-          </>
-        ) : null}
+        {/* 固定の部品にも角のつまみを出す（引きずっても動かないだけ）。上に余白が無い時は回すつまみを内側に */}
+        <line x1={b.x + b.w / 2} y1={b.y} x2={b.x + b.w / 2} y2={rotY} stroke="#38bdf8" strokeWidth={sw} pointerEvents="none" />
+        <circle data-handle="rotate" cx={b.x + b.w / 2} cy={rotY} r={handleR} fill="#fff" stroke="#38bdf8" strokeWidth={sw} style={{ cursor: 'grab' }} />
+        {([['nw', b.x, b.y], ['ne', b.x + b.w, b.y], ['sw', b.x, b.y + b.h], ['se', b.x + b.w, b.y + b.h]] as const).map(([k, x, y]) => (
+          <rect key={k} data-handle={k} x={x - handleR} y={y - handleR} width={handleR * 2} height={handleR * 2} fill="#fff" stroke="#38bdf8" strokeWidth={sw}
+            style={{ cursor: k === 'nw' || k === 'se' ? 'nwse-resize' : 'nesw-resize' }} />
+        ))}
       </g>
     );
   })() : null;
 
   const partProps = useCallback((p: ThumbPart) => ({
-    style: { cursor: mode === 'pen' ? 'crosshair' : p.locked ? 'default' : 'move', pointerEvents: mode === 'pen' || p.locked ? 'none' : 'auto' },
+    style: { cursor: mode === 'pen' ? 'crosshair' : p.locked ? 'default' : 'move', pointerEvents: mode === 'pen' ? 'none' : 'auto' },
   }), [mode]);
 
   // ── 横の会話に添える（chatLink の時だけ）──
@@ -874,7 +965,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
             <button type="button" title={p.hidden ? '出す' : '隠す'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { hidden: !p.hidden })}>
               {p.hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
             </button>
-            <button type="button" title={p.locked ? '動かせるようにする' : '動かないようにする'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { locked: !p.locked })}>
+            <button type="button" title={p.locked ? '引きずって動かせるようにする' : '引きずっても動かないようにする（選ぶ・角で大きさを変えるのはできる）'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { locked: !p.locked })}>
               {p.locked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5 opacity-40" />}
             </button>
           </li>
@@ -976,8 +1067,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const stage = (
     <div className={`relative min-h-0 min-w-0 ${compact ? 'w-full' : 'h-full w-full'}`}>
     <div ref={stageWrap} className={`min-h-0 min-w-0 overflow-auto ${compact ? 'w-full' : 'h-full w-full'}`}
-      style={compact ? { height: Math.round(stageW * doc.height / doc.width) } : undefined} data-thumb-stage-wrap>
-      <div className="flex min-h-full min-w-full w-max items-center justify-center">
+      style={compact ? { height: Math.round(stageW * doc.height / doc.width) + STAGE_MARGIN * 2 } : undefined} data-thumb-stage-wrap
+      onPointerDown={onStagePointerDown}>
+      <div className="flex min-h-full min-w-full w-max items-center justify-center" style={{ padding: STAGE_MARGIN }}>
       <div style={{ width: viewW }} className="relative shrink-0 shadow-lg" data-thumb-stage>
         <ThumbCanvas
           ref={svgRef}
