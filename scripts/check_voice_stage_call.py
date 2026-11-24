@@ -83,7 +83,7 @@ READ_STAGE = '''
           media: (() => { const m = stage && stage.querySelector('[data-stage-media]'); return m ? {status: m.getAttribute('data-stage-media-status'), revision: m.getAttribute('data-stage-media-revision'), src: (m.querySelector('img') || {}).getAttribute ? (m.querySelector('img') || {getAttribute: () => ''}).getAttribute('src') : ''} : null; })(),
           orb: orb ? Math.round(orb.getBoundingClientRect().width) : null,
           connecting: !!Array.from(document.querySelectorAll('div')).find(d => d.textContent === '接続中…'),
-          panel: !!document.querySelector('button[aria-label="音声モードを閉じる"]'),
+          panel: !!document.querySelector('button[aria-label="通話を終了"]'),
           note: (Array.from(document.querySelectorAll('.text-destructive')).map(d => d.textContent).join(' | ') || '').slice(0, 200),
           audio: !!(document.querySelector('audio') && document.querySelector('audio').srcObject)};
 }
@@ -112,10 +112,10 @@ async def main(base, token_file, project_id, wav, out_dir, seconds=None):
         page = await context.new_page()
         t0 = time.monotonic()   # the video starts with the page
         await page.goto(f'{base}/chat/{project_id}', wait_until='domcontentloaded')
-        await page.get_by_role('button', name='音声').wait_for(timeout=60000)
+        await page.get_by_role('button', name='通話を始める', exact=True).wait_for(timeout=60000)
         await page.wait_for_timeout(1500)
         mark('page_ready')
-        await page.get_by_role('button', name='音声').click()
+        await page.get_by_role('button', name='通話を始める', exact=True).click()
         mark('clicked')
         # connected: the remote audio arrived and 「接続中…」 is gone
         for _ in range(120):
@@ -143,7 +143,7 @@ async def main(base, token_file, project_id, wav, out_dir, seconds=None):
             await page.wait_for_timeout(300)
         audio_b64 = await page.evaluate(STOP_RECORDER)
         mark('hangup', state=await page.evaluate(READ_STAGE))
-        close = page.get_by_role('button', name='音声モードを閉じる')
+        close = page.get_by_role('button', name='通話を終了')
         if await close.count(): await close.click()   # gone already when the call ended by itself
         else: mark('panel_gone')
         await page.wait_for_timeout(2500)

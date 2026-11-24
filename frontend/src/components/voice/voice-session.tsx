@@ -2,6 +2,7 @@
 
 /** Live 1 owns conversation; the server answers delegations and speaks job results into the call. */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { CallSketch } from './call-sketch';
 import { X } from 'lucide-react';
 
 import { VoiceEdgeGlow } from './voice-edge-glow';
@@ -19,18 +20,13 @@ type RtEvent = { type: string; [key: string]: unknown };
 interface VoiceSessionProps {
   roomId: string;
   chatTitle?: string;
-  onSession?: (id: string | null) => void;
   onClose: () => void;
   /** ダンが画面に出す物の札の幅（エディターの会話は狭い） */
   stageWidthClass?: string;
 }
 
-export function VoiceSession({ roomId, onClose, onSession, stageWidthClass = 'w-[520px]' }: VoiceSessionProps) {
+export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }: VoiceSessionProps) {
   const [status, setStatus] = useState<Status>('idle');
-  useEffect(() => {
-    onSession?.(status === 'connected' ? liveSessionIdRef.current : null);
-    return () => onSession?.(null);
-  }, [status, onSession]);
   const [error, setError] = useState<string | null>(null);
   const [stageShown, setStageShown] = useState(false);   // a scene is on the stage: its card shows bottom-right
   const liveSessionIdRef = useRef('');
@@ -409,12 +405,13 @@ export function VoiceSession({ roomId, onClose, onSession, stageWidthClass = 'w-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 音声モードの見た目（2026-11-22 本人）: 右下のオーブと作業の1行をやめ、画面全体のふちを声に合わせて光らせる。
-  // 作業の様子はチャットに出る。止めるのはチャットの上の「話す／音声」ボタン。ダンが画面に出す物（voice_stage）が
-  // ある時だけ、右下にその札を出す（VoiceStage は幅を測るので、隠す時も display:none にせず見えなくするだけ）。
   return (
     <>
       <VoiceEdgeGlow getUserLevel={getUserLevel} getAiLevel={getAiLevel} active={status === 'connected'} />
+
+      {status === 'connected' && <div className="fixed left-1/2 top-3 z-[61] -translate-x-1/2">
+        <CallSketch key={liveSessionIdRef.current} room={roomId} session={liveSessionIdRef.current} />
+      </div>}
 
       {(status === 'connecting' || status === 'error') && (
         <div className="dark pointer-events-auto fixed left-1/2 top-3 z-[61] flex -translate-x-1/2 items-center gap-2 rounded-full border border-neutral-800 bg-neutral-950/90 px-3 py-1 text-xs text-neutral-300 shadow-lg" data-voice-status={status}>

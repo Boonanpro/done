@@ -13,8 +13,8 @@ watches:
   - mobile/chatTimeline.ts
   - mobile/send-card.tsx
   - mobile/draft-body-editor.tsx
-fingerprint: 6cbf102115e99fbf
-described: ae77ae258153228a
+fingerprint: 58bc4be2f4a7ba83
+described: f3967b3659f3bcad
 last_review: "2026-11-12 説明は変えない: 書き直した返事の下書きの添付を重ねて出さないだけ。見える部品は変わらない"
 ---
 # スマホのダンのアプリ
@@ -27,7 +27,7 @@ last_review: "2026-11-12 説明は変えない: 書き直した返事の下書�
 - `chat` 会話。本文は `mobile/chat-markdown.tsx` が段落・見出し・表・コードに分けて描き、文中の太字・コード・斜体は `renderInlineMarkdown`（mobile/App.tsx）が描く。部品は `mobile/chat-shapes.tsx`、描けない部品は読める文章にする。地図（タイルの計算は `mobile/chat-shapes-map-geometry.ts`）・写真の札・引用・出どころ・動画のコマ・前後の画像も描き、ピン・札・コマを押すと「<題> → <押した物>」が本人の発言として届く（1.0.90 から）。
 - `live-rows` 作業中の数行（mobile/chatTimeline.ts）。
 - `send-card` 送信案。本文は省略せず、会話をスクロールして最後まで読める。本文を押すと編集画面が開き、キーボードの上に収まる入力欄の中をスクロールして編集する。
-- `voice` 通話。
+- `voice` チャット入力欄の横の電話マークで通話を始める。長押しで音声機器を選べる。通話中の「手描きボード」を開いて指で描ける。閉じても通話は続き、もう一度開くと描き足せる。
 - `summon` ダンが本人を今すぐ呼ぶ通知（1.0.82〜）。チャンネル「ダンからの呼び出し」で目覚ましのような音とバイブ。最初の1回の後、30〜60秒ごとに鳴らし直す。押すと止まり、鳴らし直しの方を押すとその部屋で通話が始まって、ダンが呼んだ理由を言う。
 - `open-artifact` 成果物を、使い捨ての入館証を付けて公開版の写しで開く（/enter）。
 
@@ -56,5 +56,5 @@ last_review: "2026-11-12 説明は変えない: 書き直した返事の下書�
 
 - 見張るファイル: `mobile/App.tsx`, `mobile/chat-markdown.tsx`, `mobile/chat-shapes-answer-sends.ts`, `mobile/chat-shapes-answers.ts`, `mobile/chat-shapes-chart-geometry.ts`, `mobile/chat-shapes-job-report.ts`, `mobile/chat-shapes-live-line.ts`, `mobile/chat-shapes-map-geometry.ts`, `mobile/chat-shapes-plain.ts`, `mobile/chat-shapes-schema.ts`, `mobile/chat-shapes-use-answer-send.ts`, `mobile/chat-shapes.tsx`, `mobile/chatTimeline.ts`, `mobile/draft-body-editor.tsx`, `mobile/markdown-blocks.ts`, `mobile/send-card.tsx`
 
-<!-- place_map:files {"mobile/App.tsx": "2283059762", "mobile/chat-markdown.tsx": "6138f892a5", "mobile/chat-shapes-answer-sends.ts": "cfb8091ea4", "mobile/chat-shapes-answers.ts": "627b924799", "mobile/chat-shapes-chart-geometry.ts": "bc8c8b4951", "mobile/chat-shapes-job-report.ts": "ec51b5dac3", "mobile/chat-shapes-live-line.ts": "1c45000b28", "mobile/chat-shapes-map-geometry.ts": "126abfee3c", "mobile/chat-shapes-plain.ts": "3904066682", "mobile/chat-shapes-schema.ts": "f0a3fdb9aa", "mobile/chat-shapes-use-answer-send.ts": "fee1a83345", "mobile/chat-shapes.tsx": "c9625f0dd7", "mobile/chatTimeline.ts": "9fd4e61113", "mobile/draft-body-editor.tsx": "38639d86f5", "mobile/markdown-blocks.ts": "a88af55511", "mobile/send-card.tsx": "d56539e528"} -->
+<!-- place_map:files {"mobile/App.tsx": "11bc8f7a89", "mobile/chat-markdown.tsx": "6138f892a5", "mobile/chat-shapes-answer-sends.ts": "cfb8091ea4", "mobile/chat-shapes-answers.ts": "627b924799", "mobile/chat-shapes-chart-geometry.ts": "bc8c8b4951", "mobile/chat-shapes-job-report.ts": "ec51b5dac3", "mobile/chat-shapes-live-line.ts": "1c45000b28", "mobile/chat-shapes-map-geometry.ts": "126abfee3c", "mobile/chat-shapes-plain.ts": "3904066682", "mobile/chat-shapes-schema.ts": "c798178eda", "mobile/chat-shapes-use-answer-send.ts": "fee1a83345", "mobile/chat-shapes.tsx": "adf3c44691", "mobile/chatTimeline.ts": "9fd4e61113", "mobile/draft-body-editor.tsx": "38639d86f5", "mobile/markdown-blocks.ts": "a88af55511", "mobile/send-card.tsx": "989c3f55ce"} -->
 <!-- place_map:auto:end -->

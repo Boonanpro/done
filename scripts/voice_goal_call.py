@@ -4,7 +4,7 @@ Why: the owner refused a check that replayed the 13:35 call word for word (「40
 weight wrong, so replaying it after a fix tests nothing). Here the owner's side is decided turn by turn from the goal and
 from what Dan actually said and showed, the way a person on the phone does it:
 
-  - The chat page opens in Chromium as the owner (a short-lived token) in a fresh room made for this run, and its 音声
+  - The chat page opens in Chromium as the owner (a short-lived token) in a fresh room made for this run, and its phone
     button starts the same call the owner starts (WebRTC to the speech model, the server's sideband, the backend).
   - The microphone is replaced by an audio stream this script feeds. Each thing the owner says is written by a model
     (OWNER_MODEL) from the scenario's goal and manner, the conversation so far (Dan's words as the call transcribed them)
@@ -126,7 +126,7 @@ STOP_RECORDER = '''async () => {
 SCREEN = '''() => {
   const stage = document.querySelector('[data-voice-stage]');
   return {caption: stage ? ((stage.querySelector('[data-stage-caption]') || {}).textContent || '') : '',
-          panel: !!document.querySelector('button[aria-label="音声モードを閉じる"]'),
+          panel: !!document.querySelector('button[aria-label="通話を終了"]'),
           connecting: !!Array.from(document.querySelectorAll('div')).find(d => d.textContent === '接続中…'),
           audio: !!(document.querySelector('audio') && document.querySelector('audio').srcObject),
           error: (Array.from(document.querySelectorAll('.text-destructive')).map(d => d.textContent).join(' | ') || '').slice(0, 200)};
@@ -282,9 +282,9 @@ async def main(base, scenario_path, out_dir, keep_room=False, log_path=None):
             page.on('response', lambda r: asyncio.ensure_future(on_response(r)))
 
             await page.goto(f"{base}/chat/{project['id']}", wait_until='domcontentloaded')
-            await page.get_by_role('button', name='音声').wait_for(timeout=60000)
+            await page.get_by_role('button', name='通話を始める', exact=True).wait_for(timeout=60000)
             await page.wait_for_timeout(1500)
-            await page.get_by_role('button', name='音声').click()
+            await page.get_by_role('button', name='通話を始める', exact=True).click()
             for _ in range(120):
                 st = await page.evaluate(SCREEN)
                 if st['audio'] and not st['connecting']: break
@@ -381,7 +381,7 @@ async def main(base, scenario_path, out_dir, keep_room=False, log_path=None):
                 # sent silence because the page stopped the shared microphone track).
                 run['harness_error'] = '本人役の声が通話に届いていない（文字起こしが1つも無い）'
             audio_b64 = await page.evaluate(STOP_RECORDER)
-            close = page.get_by_role('button', name='音声モードを閉じる')
+            close = page.get_by_role('button', name='通話を終了')
             if await close.count(): await close.click()
             await page.wait_for_timeout(2000)
             await context.close()

@@ -4435,23 +4435,6 @@ function AppMain() {
               />
             ) : null}
             <Pressable
-              onPress={() => { if (currentProject?.room_id && token) voice.start({roomId:currentProject.room_id,chatTitle:currentProject.title,apiBase:API_BASE_URL,token}); }}
-              onLongPress={() => {
-                if (!currentProject?.room_id || !token) return;
-                const call = {roomId:currentProject.room_id,chatTitle:currentProject.title,apiBase:API_BASE_URL,token};
-                Alert.alert(ui("Audio device","音声機器を選ぶ"), ui("Start a voice conversation in this room.","この部屋で会話を始めます。"), [
-                  {text:ui("Phone / headphones","スマホ・イヤホン"),onPress:()=>voice.start(call)},
-                  {text:ui("Pin","ピン"),onPress:()=>voice.start({...call,audioEndpoint:'pin'})},
-                ], {cancelable: true});
-              }}
-              accessibilityLabel={ui("Start voice conversation","音声で話す")} accessibilityRole="button"
-              accessibilityHint={ui("Hold to choose an audio device","長押しすると音声機器を選べます")}
-              hitSlop={10}
-              style={({ pressed }) => [styles.appBarIconButton, styles.chatAppBarIcon, pressed && styles.buttonPressed]}
-            >
-              <Ionicons name="mic-outline" size={22} color="#162e27" />
-            </Pressable>
-            <Pressable
               onPress={() => setSearchOpen(true)}
               accessibilityRole="button"
               accessibilityLabel={ui("Search this chat","この会話を検索")}
@@ -4736,6 +4719,23 @@ function AppMain() {
 
         {/* 入力欄は1段: ［＋］［入力欄］［送信/停止］。制作物の追加は＋のシートの中。 */}
         <View style={[styles.composer, styles.composerRow, { paddingBottom: 6 + insets.bottom }]}>
+          <Pressable
+            onPress={() => { if (currentProject?.room_id && token) voice.start({roomId:currentProject.room_id,chatTitle:currentProject.title,apiBase:API_BASE_URL,token}); }}
+            onLongPress={() => {
+              if (!currentProject?.room_id || !token) return;
+              const call = {roomId:currentProject.room_id,chatTitle:currentProject.title,apiBase:API_BASE_URL,token};
+              Alert.alert(ui("Audio device","音声機器を選ぶ"), ui("Start a voice conversation in this room.","この部屋で会話を始めます。"), [
+                {text:ui("Phone / headphones","スマホ・イヤホン"),onPress:()=>voice.start(call)},
+                {text:ui("Pin","ピン"),onPress:()=>voice.start({...call,audioEndpoint:'pin'})},
+              ], {cancelable: true});
+            }}
+            accessibilityLabel={voice.roomId ? ui("Open call","通話画面を開く") : ui("Start call","通話を始める")} accessibilityRole="button"
+            accessibilityHint={ui("Hold to choose an audio device","長押しすると音声機器を選べます")}
+            hitSlop={2}
+            style={({ pressed }) => [styles.attachButton, styles.composerRowButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons name="call-outline" size={22} color="#162e27" />
+          </Pressable>
           <Pressable
             onPress={() => setAttachSheetOpen(true)}
             accessibilityRole="button"
