@@ -240,6 +240,7 @@ def take_docs_comment_notice(detected_message: Dict[str, Any], room_id: Optional
 
 
 _BOT_SENDER = re.compile(r"\[bot\]", re.I)
+_ACTIONS_RUN = re.compile(r"^\s*\[[^\]]+\]\s*(?:PR )?run (?:failed|cancelled|succeeded)", re.I)
 
 
 def automated_notice(detected_message: Dict[str, Any]) -> bool:
@@ -248,7 +249,11 @@ def automated_notice(detected_message: Dict[str, Any]) -> bool:
     「俺がやることねえなら報告すんなや。余計な報告何回もしてくんな」）。"""
     si = detected_message.get("sender_info") or {}
     sender = f"{si.get('from') or ''} {si.get('email') or ''} {si.get('name') or ''}"
-    return "notifications@github.com" in sender.lower() and bool(_BOT_SENDER.search(sender))
+    if "notifications@github.com" not in sender.lower():
+        return False
+    # GitHub Actions の実行結果（「PR run failed: scope-check」など）は、差出人がリポジトリの持ち主の名前で届き
+    # [bot] が付かない。ダンが出した PR の点検の知らせで、本人がすることは無い（11/24 PR1102 の scope-check で起きた）。
+    return bool(_BOT_SENDER.search(sender) or _ACTIONS_RUN.search(detected_message.get("subject") or ""))
 
 
 def schedule_room_wakeup(detected_message: Dict[str, Any], room_id: str, *, reason: str) -> bool:
