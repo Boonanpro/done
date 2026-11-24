@@ -18,8 +18,8 @@ watches:
   - frontend/src/components/production/production-workspace.tsx
   - frontend/src/components/production/editor-dan-chat.tsx
   - frontend/src/app/production-workspace/page.tsx
-fingerprint: 071d24dbb73da170
-described: 9cf9f3a5011230d2
+fingerprint: 22ffac45b508027f
+described: 93b0dbc097ddb1bb
 ---
 # エディターの中の「ダンと制作」
 
@@ -56,5 +56,5 @@ described: 9cf9f3a5011230d2
 - ラベル: 「ダンと制作」、「欄の幅を変える」、「作品と素材」、「作品」、「素材のフォルダ」、「作品の一覧」
 - 試験の印: 「content-cover」
 
-<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "bea301b706", "frontend/src/components/production/editor-dan-chat.tsx": "2276af678a", "frontend/src/components/production/production-workspace.tsx": "2867f3b22f"} -->
+<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "bea301b706", "frontend/src/components/production/editor-dan-chat.tsx": "2276af678a", "frontend/src/components/production/production-workspace.tsx": "553d433af5"} -->
 <!-- place_map:auto:end -->
