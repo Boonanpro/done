@@ -247,6 +247,7 @@ class Prefetch:
             # The same choice of where the request goes that the delegation makes (voice_router.ROUTES), in the same call:
             # when the owner's finished words are these, the delegation takes this answer instead of asking again.
             asked['route'] = {'type': 'choice', 'criteria': dict(voice_router.ROUTES), 'instructions': voice_router.ASK}
+            asked['look'] = voice_router.look_question()   # does it need his screen (voice_router.looks)
         state = {'utterance_so_far': text}
         editor = getattr(self.dialogue, 'editor', None) if self.dialogue is not None else None
         if editor is not None:   # the same place the delegation's route is chosen with (voice_router.route)

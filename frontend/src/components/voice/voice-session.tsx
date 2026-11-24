@@ -3,6 +3,7 @@
 /** Live 1 owns conversation; the server answers delegations and speaks job results into the call. */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CallSketch } from './call-sketch';
+import { CallOwnerScreen } from './call-owner-screen';
 import { X } from 'lucide-react';
 
 import { VoiceEdgeGlow } from './voice-edge-glow';
@@ -32,6 +33,7 @@ export function VoiceSession({ roomId, focusRoomId, onClose, stageWidthClass = '
   const [error, setError] = useState<string | null>(null);
   const [stageShown, setStageShown] = useState(false);   // a scene is on the stage: its card shows bottom-right
   const liveSessionIdRef = useRef('');
+  const [callSession, setCallSession] = useState('');   // the connected call, for the parts drawn with it
   const workingJobsRef = useRef(false);
   const waitingAudioRef = useRef<WaitingAudio | null>(null);
   const flushTranscriptsRef = useRef<(() => void) | null>(null);
@@ -376,6 +378,7 @@ export function VoiceSession({ roomId, focusRoomId, onClose, stageWidthClass = '
       try { await Promise.race([opened, new Promise<void>((_, reject) => { timeout = setTimeout(() => reject(new Error('Live 1の開始がタイムアウトしました')), 30000); })]); }
       finally { clearTimeout(timeout); }
       if (!live()) { cleanupLocal(); return; }
+      setCallSession(sessionId);
       setStatus('connected');
       // The call can be spoken into from here: say so with a tone (the owner could not tell when, 11/22).
       openCallRef.current = true; playCallStartTone();
@@ -429,8 +432,9 @@ export function VoiceSession({ roomId, focusRoomId, onClose, stageWidthClass = '
     <>
       <VoiceEdgeGlow getUserLevel={getUserLevel} getAiLevel={getAiLevel} active={status === 'connected'} />
 
-      {status === 'connected' && <div className="fixed left-1/2 top-3 z-[61] -translate-x-1/2">
+      {status === 'connected' && <div className="fixed left-1/2 top-3 z-[61] flex -translate-x-1/2 items-center gap-2">
         <CallSketch key={liveSessionIdRef.current} room={roomId} session={liveSessionIdRef.current} />
+        <CallOwnerScreen key={`screen-${callSession}`} room={roomId} session={callSession} />
       </div>}
 
       {(status === 'connecting' || status === 'error') && (
