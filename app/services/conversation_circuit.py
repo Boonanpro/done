@@ -363,7 +363,7 @@ def snapshot(db, room, user, selected=''):
                     events.append(step(row['created_at'], 'owner', '聞き取った言葉' if human else 'ダンが話した言葉', text))
                     if human and (row.get('ai_context') or {}).get('audio_endpoint') == 'pin':
                         events.append(step(row['created_at'], 'pin', 'ピンから音声を入力'))
-                        events.append(step(row['created_at'], 'audio', 'スマホの音声モードに届きました'))
+                        events.append(step(row['created_at'], 'audio', 'スマホのアプリの通話に届きました'))
     if key.startswith('job/'):
         events = next((job_steps(j) for j in jobs if j['id']==key[4:]), [])
     events.sort(key=event_time)

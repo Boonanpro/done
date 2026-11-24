@@ -3,6 +3,14 @@
     "frontend/src/components/layout/project-chat-panel.tsx",
     "mobile/App.tsx"
   ],
+  "pc": [
+    "frontend/src/components/layout/project-chat-panel.tsx",
+    "frontend/src/components/voice/voice-session.tsx"
+  ],
+  "phone": [
+    "mobile/App.tsx",
+    "mobile/voice.tsx"
+  ],
   "pin": [
     "mobile/App.tsx"
   ],

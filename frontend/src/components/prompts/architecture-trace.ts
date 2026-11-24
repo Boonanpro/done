@@ -19,7 +19,7 @@ const entryPaths: Record<string, string[]> = {
   chat: ['owner', 'devices', 'next', 'gateway', 'core', 'chat'],
   voice: ['owner', 'audio', 'voice'],
   router: ['owner', 'audio', 'voice', 'router'],
-  editor: ['owner', 'editor-ui', 'next', 'gateway', 'core', 'editor'],
+  editor: ['owner', 'editor-ui', 'devices', 'next', 'gateway', 'core', 'editor'],
 };
 
 export function stepNode(step?: CircuitStep) {
