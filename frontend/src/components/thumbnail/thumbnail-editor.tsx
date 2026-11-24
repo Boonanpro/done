@@ -965,7 +965,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
             <button type="button" title={p.hidden ? '出す' : '隠す'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { hidden: !p.hidden })}>
               {p.hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
             </button>
-            <button type="button" title={p.locked ? '引きずって動かせるようにする' : '引きずっても動かないようにする（選ぶ・角で大きさを変えるのはできる）'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { locked: !p.locked })}>
+            <button type="button" title={p.locked ? '引きずって動かせるようにする' : '引きずっても動かないようにする（角で大きさは変えられる）'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { locked: !p.locked })}>
               {p.locked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5 opacity-40" />}
             </button>
           </li>
