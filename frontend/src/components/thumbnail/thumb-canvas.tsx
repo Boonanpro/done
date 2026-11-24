@@ -153,6 +153,7 @@ type Props = {
   onPointerMove?: React.PointerEventHandler<SVGSVGElement>;
   onPointerUp?: React.PointerEventHandler<SVGSVGElement>;
   onPointerCancel?: React.PointerEventHandler<SVGSVGElement>;
+  onContextMenu?: React.MouseEventHandler<SVGSVGElement>;
 };
 
 export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas(
