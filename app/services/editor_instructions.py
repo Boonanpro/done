@@ -1,4 +1,4 @@
-"""エディターのタイムラインに直接書いた指示（ピン・ペン・枠・素材の枠）を、送った時からダンに動かせる。
+"""エディターのタイムラインに直接書いた指示（クリップへのコメント・ペン・枠・素材の枠。古いピンも読む）を、送った時からダンに動かせる。
 
 2026-11-14 本人「チャットで言うほどでもない細かい部分をタイムラインに直接書き込みたい。いちいちチャットに送らなくても、
 送信されたタイミングから実行が順次始まっていく。別々に始まるけど、エディターの中のダンは全体の履歴や今何をやって
@@ -31,6 +31,7 @@ KIND_LABEL = {
     'freehand': 'ペンで描いた線',
     'rect': '枠で囲んだ範囲',
     'note': '素材の枠（タイムラインの区間）',
+    'clip': '選んだクリップへのコメント',
 }
 
 
@@ -86,7 +87,7 @@ def _draw_marks(src: Path, dest: Path, ann: dict[str, Any]) -> bool:
         pts = [(float(p.get('x', 0)) * w, float(p.get('y', 0)) * h) for p in data['points'] if isinstance(p, dict)]
         if len(pts) > 1:
             d.line(pts, fill=red, width=lw, joint='curve')
-    else:
+    elif kind != 'clip':   # クリップへのコメントは、その時刻の完成画面をそのまま渡す
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
     img.save(dest)
@@ -94,8 +95,8 @@ def _draw_marks(src: Path, dest: Path, ann: dict[str, Any]) -> bool:
 
 
 def frame_path(room_id: str, ann: dict[str, Any]) -> Path | None:
-    """印を描いた絵を置く場所（ピン・ペン・枠だけ）。"""
-    if str(ann.get('kind') or '') not in ('marker', 'rect', 'freehand'):
+    """印を描いた絵を置く場所（ピン・ペン・枠と、クリップへのコメントの時刻の絵）。"""
+    if str(ann.get('kind') or '') not in ('marker', 'rect', 'freehand', 'clip'):
         return None
     from app.api import production_asset_routes as par
     safe = ''.join(ch for ch in str(ann.get('id') or uuid.uuid4().hex[:8]) if ch.isalnum() or ch in '-_')[:60]
@@ -115,6 +116,9 @@ def frame_with_marks(room_id: str, content_id: str, ann: dict[str, Any]) -> str 
     from app.services import sequence_window
     out_dir = par._room_dir(room_id) / 'instructions'
     t = float(ann.get('start') or 0)
+    data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
+    if str(ann.get('kind') or '') == 'clip' and data.get('at') is not None:
+        t = float(data.get('at') or t)
     try:
         res = sequence_window.render_frames(room_id, seq, [t], out_dir)
         if not res.get('ok'):
@@ -129,7 +133,64 @@ def frame_with_marks(room_id: str, content_id: str, ann: dict[str, Any]) -> str 
         return None
 
 
-def build_task(ann: dict[str, Any], content_title: str, image: str | None, previous: dict[str, Any] | None = None) -> str:
+def clip_lines(room_id: str, content: dict[str, Any] | None, ann: dict[str, Any]) -> list[str]:
+    """クリップへのコメントで選ばれていたクリップの中身（id・段・種類・名前・区間・素材）。"""
+    data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
+    ids = [str(i) for i in (data.get('clip_ids') or []) if i]
+    if not ids:
+        return []
+    seq = ((content or {}).get('timeline') or {}).get('sequence') or {}
+    found: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for tr in seq.get('tracks') or []:
+        for c in tr.get('clips') or []:
+            if str(c.get('id')) in ids:
+                found[str(c.get('id'))] = (tr, c)
+    names: dict[str, str] = {}
+    try:
+        from app.api import production_asset_routes as par
+        names = {str(a.get('id')): str(a.get('filename') or a.get('label') or '') for a in par._read_assets(room_id)}
+    except Exception:  # noqa: BLE001
+        pass
+    out = []
+    for cid in ids:
+        if cid not in found:
+            out.append(f"  - {cid}（今のタイムラインに見当たらない。消されたか、ほかの作業が作り直した）")
+            continue
+        tr, c = found[cid]
+        bits = [f"id={cid}", f"段={tr.get('type') or c.get('track') or '?'}"
+                + (f"（{c.get('visual_lane') if c.get('visual_lane') is not None else c.get('layer')}）" if (c.get('visual_lane') is not None or c.get('layer') is not None) else '')]
+        bits.append(f"{_fmt(float(c.get('timeline_start') or 0))}〜{_fmt(float(c.get('timeline_end') or 0))}")
+        if c.get('text'):
+            bits.append(f"文字「{str(c.get('text'))[:80]}」")
+        if c.get('label'):
+            bits.append(f"名前「{str(c.get('label'))[:60]}」")
+        if c.get('asset_id'):
+            nm = names.get(str(c.get('asset_id')), '')
+            bits.append(f"素材 {c.get('asset_id')}{f'（{nm}）' if nm else ''} の {float(c.get('source_start') or 0):.2f}〜{float(c.get('source_end') or 0):.2f}秒")
+        out.append('  - ' + ' / '.join(bits))
+    return out
+
+
+def earlier_clip_comments(content: dict[str, Any] | None, ann: dict[str, Any], user_id: str) -> list[str]:
+    """同じクリップに前に送ったコメントとその結果（足りなかった分を直すため）。"""
+    data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
+    ids = {str(i) for i in (data.get('clip_ids') or [])}
+    anns = ((content or {}).get('timeline') or {}).get('annotations') or []
+    out = []
+    for a in anns:
+        if not isinstance(a, dict) or a.get('kind') != 'clip' or a.get('id') == ann.get('id'):
+            continue
+        ad = a.get('data') if isinstance(a.get('data'), dict) else {}
+        if not ids & {str(i) for i in (ad.get('clip_ids') or [])}:
+            continue
+        prev = _previous(user_id, a) if ad.get('job_id') else None
+        res = (prev or {}).get('result') or '（結果の記録なし）'
+        out.append(f"  - 「{str(a.get('note') or '').strip()[:200]}」→ {str(res)[:400]}")
+    return out[-5:]
+
+
+def build_task(ann: dict[str, Any], content_title: str, image: str | None, previous: dict[str, Any] | None = None,
+               clips: list[str] | None = None, earlier: list[str] | None = None) -> str:
     kind = str(ann.get('kind') or '')
     data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
     start = float(ann.get('start') or 0)
@@ -144,13 +205,25 @@ def build_task(ann: dict[str, Any], content_title: str, image: str | None, previ
     shape = _shape_text(ann)
     if shape:
         lines.append(f"- 画面の場所: {shape}")
+    if kind == 'clip':
+        lines.append("- 本人がタイムラインで選んでコメントしたクリップ（「これ」「このクリップ」「この文字」はこのクリップ。"
+                     "直すのはまずこのクリップで、ほかのクリップは指示がそれを求める時だけ触る）:")
+        lines += clips or ['  - （クリップの記録なし）']
+        if earlier:
+            lines.append("- 同じクリップに前に送ったコメントと、その時の結果（今回はその続き。前の直しを消さずに足りない所を直す）:")
+            lines += earlier
     if kind == 'note' and data.get('mode') == 'find':
         lines.append(f"- 本人の頼み: この区間（{end - start:.1f}秒）に置く映像を、言葉に合う実物の素材から探して取り込み、"
                      "この区間にぴったり置く（Envato などの素材集・本人の素材フォルダ。AIで作らない）。")
     lines.append(f"- 指示の言葉: 「{note}」" if note else "- 指示の言葉: （無し。印と場所から読み取る）")
     if image:
-        lines.append(f"- 印を描いた完成画面の絵: {image}（Read で開ける。赤い印が本人の印。裏で描いているので、"
-                     "まだ無ければ少し待つ。描けなかった時は render_frame でその時刻を見て、上の画面の場所を当てる）")
+        if kind == 'clip':
+            at = float(data.get('at') if data.get('at') is not None else start)
+            lines.append(f"- コメントした時の完成画面の絵（{_fmt(at)}）: {image}（Read で開ける。裏で描いているので、まだ無ければ少し待つ。"
+                         "描けなかった時は render_frame でその時刻を見る）")
+        else:
+            lines.append(f"- 印を描いた完成画面の絵: {image}（Read で開ける。赤い印が本人の印。裏で描いているので、"
+                         "まだ無ければ少し待つ。描けなかった時は render_frame でその時刻を見て、上の画面の場所を当てる）")
     lines += [
         "",
         "同じ作品では、本人が送ったほかの指示もそれぞれ並行で動いている（parallel_work の list で見られる）。"
@@ -170,7 +243,7 @@ def build_task(ann: dict[str, Any], content_title: str, image: str | None, previ
 
 def _title(ann: dict[str, Any]) -> str:
     note = str(ann.get('note') or '').strip().replace('\n', ' ')
-    head = {'marker': 'ピン', 'freehand': 'ペン', 'rect': '枠', 'note': '素材の枠'}.get(str(ann.get('kind') or ''), '指示')
+    head = {'marker': 'ピン', 'freehand': 'ペン', 'rect': '枠', 'note': '素材の枠', 'clip': 'コメント'}.get(str(ann.get('kind') or ''), '指示')
     return f"{head} {_fmt(float(ann.get('start') or 0))} {note}"[:40]
 
 
@@ -209,7 +282,10 @@ async def send(user_id: str, asset_room_id: str, content_id: str, ann: dict[str,
     if dest is not None:
         dest.unlink(missing_ok=True)
         asyncio.get_running_loop().run_in_executor(None, frame_with_marks, asset_room_id, content_id, dict(ann))
-    task = build_task(ann, str(content.get('title') or content_id), str(dest) if dest else None, _previous(user_id, ann))
+    clips = clip_lines(asset_room_id, content, ann) if ann.get('kind') == 'clip' else None
+    earlier = earlier_clip_comments(content, ann, user_id) if ann.get('kind') == 'clip' else None
+    task = build_task(ann, str(content.get('title') or content_id), str(dest) if dest else None, _previous(user_id, ann),
+                      clips=clips, earlier=earlier)
     job = await parallel_job_runner.start(room['room_id'], user_id, task, title=_title(ann), quiet=True)
     return {'job_id': job['id'], 'room_id': room['room_id'], 'state': job.get('state'), 'image': str(dest) if dest else None}
 
