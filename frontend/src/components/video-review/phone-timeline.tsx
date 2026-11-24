@@ -10,7 +10,8 @@
 import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
 
 /** img: 絵（frame があれば 30コマの絵の帯のそのコマ。PC のタイムラインと同じ絵） */
-export type PhoneLaneItem = { s: number; e: number; color: string; img?: string; frame?: number };
+/** strip: 動画の絵の帯の元（素材の住所と、使っている素材の始まり・終わりの秒）。クリップを端から端までその所のコマで埋める */
+export type PhoneLaneItem = { s: number; e: number; color: string; img?: string; frame?: number; strip?: { base: string; ss: number; se: number } };
 
 // 帯に描く絵。読み終わるたびに imgRev を進めて、次のコマで描き直す。
 const STRIP_FRAMES = 30;
@@ -362,21 +363,36 @@ export function PhoneTimeline({
           const cw = Math.max(1, x2 - x - (x2 - x > 3 ? 1 : 0));
           g.fillStyle = it.color;
           g.fillRect(x, y, cw, lh);
-          // 絵は段が 10px 以上・クリップが 14px 以上ある時だけ、クリップの頭に置く（はみ出す分は切る）
+          // 絵は段が 10px 以上・クリップが 14px 以上ある時だけ。クリップを端から端までコマで埋める（はみ出す分は切る）
+          // 2026-11-24 本人「クリップも全部テキストで説明するんじゃなくてサムネを入れろ」
           if (it.img && lh >= 10 && cw >= 14) {
             const im = phoneImg(it.img);
             if (im) {
-              const strip = it.frame != null;
-              const fw = strip ? im.naturalWidth / STRIP_FRAMES : im.naturalWidth;
+              const isStrip = it.frame != null;
+              const fw = isStrip ? im.naturalWidth / STRIP_FRAMES : im.naturalWidth;
               const fh = im.naturalHeight;
-              const sx = strip ? Math.max(0, Math.min(STRIP_FRAMES - 1, it.frame || 0)) * fw : 0;
               const dh = lh - 2;
-              const dw = Math.min(cw - 2, dh * (fw / Math.max(1, fh)));
-              if (dw > 4) {
-                // 縦横比を保ったまま、置ける幅に合わせて左右を切る
-                const sw = Math.min(fw, fw * (dw / (dh * (fw / Math.max(1, fh)))));
-                g.drawImage(im, sx, 0, sw, fh, x + 1, y + 1, dw, dh);
+              const tw = Math.max(8, dh * (fw / Math.max(1, fh)));
+              const left = Math.max(x + 1, -tw);
+              const right = Math.min(x + cw - 1, w + tw);
+              g.save();
+              g.beginPath(); g.rect(x + 1, y + 1, Math.max(0, cw - 2), dh); g.clip();
+              // 見える所だけ描く（画面の外のコマは描かない）
+              const startK = Math.max(0, Math.floor((left - (x + 1)) / tw));
+              for (let k = startK, tx = x + 1 + startK * tw; tx < right && k < 400; k += 1, tx += tw) {
+                let src = im;
+                let fi = it.frame || 0;
+                if (it.strip) {
+                  const frac = Math.min(1, (tx + tw / 2 - x) / Math.max(1, cw));
+                  const st = Math.max(0, Math.min(it.strip.ss + (it.strip.se - it.strip.ss) * frac, it.strip.se - 0.05));
+                  const one = phoneImg(`${it.strip.base}&m=${Math.floor(st / 60)}`);
+                  if (one) { src = one; fi = Math.floor((st % 60) / 2); }
+                }
+                const sw = isStrip ? src.naturalWidth / STRIP_FRAMES : src.naturalWidth;
+                const sx = isStrip ? Math.max(0, Math.min(STRIP_FRAMES - 1, fi)) * sw : 0;
+                g.drawImage(src, sx, 0, sw, src.naturalHeight, tx, y + 1, tw, dh);
               }
+              g.restore();
             }
           }
         }

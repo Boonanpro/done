@@ -9,7 +9,7 @@
  * 動画=灰＋その所の絵、画像=薄い赤＋絵、テロップ=紫、場面=水色、効果=琥珀、声=青、BGM=緑、効果音=黄。
  * 音のクリップには波形と音量の線を出し、線をつかんで上下に動かすと音量が変わる。
  */
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { useSceneInfoFor } from './scene-store';
 
@@ -148,6 +148,48 @@ function peakLevel(peaks: Uint8Array, level: number): Uint8Array {
 
 // --- 絵の帯: 帯ごとに1回だけ読み、1コマの縦横比を覚える --------------------------------------------
 const STRIP_FRAMES = 30;
+
+/** 動画のクリップの中を、端から端までその所のコマで埋める（編集ソフトのフィルムの帯と同じ）。
+ *  コマ1つ1つが、クリップのその位置で使っている素材の時刻の絵。名前の文字は出さない
+ *  （2026-11-24 本人「クリップも全部テキストで説明するんじゃなくてサムネを入れろ。実物で見せられるものは全部実物で」）。 */
+function FilmTiles({ strip, aspect, widthPx, sourceStart, sourceEnd }: {
+  strip: string; aspect: number; widthPx: number; sourceStart: number; sourceEnd: number;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [h, setH] = useState(0);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setH(el.clientHeight);
+    const ro = new ResizeObserver(() => setH(el.clientHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const base = strip.replace(/&m=\d+$/, '');
+  const tileW = Math.max(16, (h || 24) * aspect);
+  const n = Math.max(1, Math.min(24, Math.ceil(widthPx / tileW)));
+  const dur = Math.max(0, sourceEnd - sourceStart);
+  const tiles = Array.from({ length: n }, (_, i) => {
+    const frac = Math.min(1, ((i + 0.5) * tileW) / Math.max(1, widthPx));
+    const t = Math.max(0, Math.min(sourceStart + dur * frac, sourceEnd - 0.05));
+    const m = Math.floor(t / 60);
+    const k = Math.max(0, Math.min(STRIP_FRAMES - 1, Math.floor((t % 60) / 2)));
+    return { m, k };
+  });
+  return (
+    <div ref={ref} className="pointer-events-none absolute inset-0 flex overflow-hidden" data-film-tiles={n}>
+      {tiles.map(({ m, k }, i) => (
+        <div key={i} className="h-full shrink-0 bg-no-repeat"
+          style={{
+            width: tileW,
+            backgroundImage: `url(${base}&m=${m})`,
+            backgroundSize: `${STRIP_FRAMES * 100}% 100%`,
+            backgroundPosition: `${(k / (STRIP_FRAMES - 1)) * 100}% 0`,
+          }} />
+      ))}
+    </div>
+  );
+}
 const stripAspect = new Map<string, number | Promise<number>>();
 function useStripAspect(url: string | undefined): number | null {
   const known = url ? stripAspect.get(url) : undefined;
@@ -267,7 +309,7 @@ function VolumeLine({ clipId, volume, fns, onLive }: {
   );
 }
 
-function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip, stripIndex = 0, narrow, selected, linkedSelected, touch, appear, vanish, title, peaksUrl, sourceStart = 0, sourceEnd = 0, volume = 1, fns }: Props) {
+function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip, narrow, selected, linkedSelected, touch, appear, vanish, title, peaksUrl, sourceStart = 0, sourceEnd = 0, volume = 1, fns }: Props) {
   const look = CLIP_KIND_STYLE[kind];
   const isAudio = kind === 'voice' || kind === 'bgm' || kind === 'se';
   const [liveVol, setLiveVol] = useState<number | null>(null);
@@ -320,28 +362,17 @@ function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip,
         onDoubleClick={(event) => { event.stopPropagation(); fns.current.focusClip(clipId); }}
       >
         {strip && aspect && widthPx >= 40 ? (
-          <div
-            className="pointer-events-none h-full max-w-[60%] shrink-0 bg-no-repeat"
-            style={{
-              aspectRatio: String(aspect),
-              backgroundImage: `url(${strip})`,
-              backgroundSize: `${STRIP_FRAMES * 100}% 100%`,
-              backgroundPosition: `${(Math.max(0, Math.min(STRIP_FRAMES - 1, stripIndex)) / (STRIP_FRAMES - 1)) * 100}% 0`,
-            }}
-          />
+          <FilmTiles strip={strip} aspect={aspect} widthPx={widthPx} sourceStart={sourceStart} sourceEnd={sourceEnd > sourceStart ? sourceEnd : sourceStart + 2} />
         ) : showThumb ? (
-          <img
-            src={thumb}
-            alt=""
-            loading="lazy"
-            decoding="async"
-            draggable={false}
-            className="pointer-events-none h-full w-auto max-w-[60%] shrink-0 object-cover"
-            style={{ aspectRatio: '16 / 9' }}
-            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-          />
+          // 画像は、その画像を端から端まで並べる
+          <div className="pointer-events-none absolute inset-0 bg-repeat-x" data-image-tiles
+            style={{ backgroundImage: `url(${thumb})`, backgroundSize: 'auto 100%' }} />
         ) : null}
-        <span className={`truncate px-1 ${isAudio ? 'self-start pt-[1px] text-[9px] leading-tight drop-shadow-[0_1px_1px_rgba(0,0,0,0.6)]' : ''} ${look.dark && isAudio ? 'drop-shadow-none' : ''}`}>{label}</span>
+        {/* 絵が出ている時は名前の文字を出さない（名前はマウスを乗せた時の札に）。声は波形がその中身なので名前を出さない。
+            BGM・効果音は何の音かが絵で分からないので名前を残す */}
+        {(strip && aspect && widthPx >= 40) || showThumb || (kind === 'voice' && peaksUrl) ? null : (
+          <span className={`truncate px-1 ${isAudio ? 'self-start pt-[1px] text-[9px] leading-tight drop-shadow-[0_1px_1px_rgba(0,0,0,0.6)]' : ''} ${look.dark && isAudio ? 'drop-shadow-none' : ''}`}>{label}</span>
+        )}
       </div>
       {kind === 'scene' ? <SceneRows clipId={clipId} fns={fns} /> : null}
       {isAudio ? <VolumeLine clipId={clipId} volume={vol} fns={fns} onLive={setLiveVol} /> : null}

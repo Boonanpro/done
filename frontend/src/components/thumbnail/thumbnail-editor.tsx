@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { ThumbCanvas, partCenter, type PartBox } from './thumb-canvas';
+import { PartPreview, ThumbCanvas, partCenter, type PartBox } from './thumb-canvas';
 import { ThumbPatterns, type ThumbPatternLink } from './thumb-patterns';
 import { useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
 import {
@@ -307,7 +307,11 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
 
   const boxOf = useCallback((p: ThumbPart): PartBox => {
     if (p.type === 'image') return { x: p.x, y: p.y, w: p.w, h: p.h };
-    return boxes[p.id] || { x: p.x, y: p.y - p.size, w: p.size * Math.max(1, p.text.length), h: p.size * 1.2 };
+    if (boxes[p.id]) return boxes[p.id];
+    // 隠してあって測れない文字は、行の数と一番長い行から見積もる
+    const ls = String(p.text ?? '').split('\n');
+    const lh = p.line_height || p.size * 1.25;
+    return { x: p.x, y: p.y - p.size, w: p.size * Math.max(1, ...ls.map((l) => l.length)), h: p.size * 1.2 + lh * (ls.length - 1) };
   }, [boxes]);
 
   const toSvg = (ev: { clientX: number; clientY: number }): [number, number] => {
@@ -993,7 +997,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const props = sel ? (
     <div className="space-y-3" data-thumb-props>
       <div className="flex items-center gap-1">
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold">{partLabel(sel)}</span>
+        <span className="min-w-0 flex-1" title={partLabel(sel)}>
+          <PartPreview doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === sel.id) || sel} box={boxOf(sel)} className="h-12 w-full" />
+        </span>
         <button type="button" title="前へ" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'up')}><ArrowUp className="h-4 w-4" /></button>
         <button type="button" title="後ろへ" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'down')}><ArrowDown className="h-4 w-4" /></button>
         <button type="button" title="複製（Ctrl+D）" className="rounded p-1 hover:bg-muted" onClick={() => duplicate(sel)}><Copy className="h-4 w-4" /></button>
@@ -1085,11 +1091,12 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const layers = (
     <div data-thumb-layers>
       <div className="mb-1 text-[11px] font-semibold text-muted-foreground">部品（上が手前）</div>
-      <ul className="space-y-0.5">
-        {[...doc.parts].reverse().map((p) => (
-          <li key={p.id} className={`group flex items-center gap-1 rounded px-1.5 py-1 text-xs ${p.id === selected ? 'bg-sky-500/15' : 'hover:bg-muted'}`}>
-            <button type="button" className="min-w-0 flex-1 truncate text-left" onClick={() => { setSelected(p.id); setMode('select'); }}>
-              {p.type === 'text' ? <Type className="mr-1 inline h-3 w-3" /> : null}{partLabel(p)}
+      <ul className="space-y-1">
+        {[...(viewDoc || doc).parts].reverse().map((p) => (
+          <li key={p.id} data-thumb-layer={p.id} className={`group flex items-center gap-1 rounded p-0.5 text-xs ${p.id === selected ? 'bg-sky-500/15 ring-2 ring-sky-500' : 'hover:bg-muted'}`}>
+            {/* 名前の文字ではなく、その部品だけの絵で見せる（名前はマウスを乗せた時だけ） */}
+            <button type="button" title={partLabel(p)} className={`min-w-0 flex-1 ${p.hidden ? 'opacity-40' : ''}`} onClick={() => { setSelected(p.id); setMode('select'); }}>
+              <PartPreview doc={viewDoc || doc} part={p} box={boxOf(p)} className="h-14 w-full" />
             </button>
             <button type="button" title={p.hidden ? '出す' : '隠す'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { hidden: !p.hidden })}>
               {p.hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
@@ -1231,16 +1238,15 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         <>
           <div className="fixed inset-0 z-[55]" onPointerDown={() => setPickMenu(null)} onContextMenu={(e) => { e.preventDefault(); setPickMenu(null); }} />
           <div className="fixed z-[60] w-52 overflow-hidden rounded-md border border-border bg-popover py-1 text-xs shadow-lg"
-            style={{ left: Math.min(pickMenu.x, window.innerWidth - 216), top: Math.min(pickMenu.y, window.innerHeight - 24 - pickMenu.ids.length * 30) }} data-thumb-pick-menu>
+            style={{ left: Math.min(pickMenu.x, window.innerWidth - 216), top: Math.min(pickMenu.y, window.innerHeight - 24 - pickMenu.ids.length * 48) }} data-thumb-pick-menu>
             <div className="px-2.5 pb-1 pt-0.5 text-[10px] text-muted-foreground">ここにある部品（上が手前）</div>
             {pickMenu.ids.map((id) => {
               const p = doc.parts.find((q) => q.id === id);
               if (!p) return null;
               return (
-                <button key={id} type="button" className={`flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left hover:bg-muted ${id === selected ? 'font-semibold text-sky-600 dark:text-sky-300' : ''}`}
+                <button key={id} type="button" title={partLabel(p)} className={`flex w-full items-center gap-1.5 px-1.5 py-1 text-left hover:bg-muted ${id === selected ? 'bg-sky-500/15' : ''}`}
                   onClick={() => { setSelected(id); setMode('select'); setPickMenu(null); }}>
-                  {p.type === 'text' ? <Type className="h-3 w-3 shrink-0" /> : <ImagePlus className="h-3 w-3 shrink-0 opacity-60" />}
-                  <span className="min-w-0 flex-1 truncate">{partLabel(p)}</span>
+                  <PartPreview doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === id) || p} box={boxOf(p)} className={`h-10 min-w-0 flex-1 ${id === selected ? 'ring-2 ring-sky-500' : ''}`} />
                   {p.locked ? <Lock className="h-3 w-3 shrink-0 opacity-60" /> : null}
                 </button>
               );
