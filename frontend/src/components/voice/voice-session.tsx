@@ -19,13 +19,15 @@ type RtEvent = { type: string; [key: string]: unknown };
 
 interface VoiceSessionProps {
   roomId: string;
+  /** 本人が今見ている部屋（通話をかけた部屋と違えば、作業の頼みはそちらへ行く。call-provider.tsx） */
+  focusRoomId?: string;
   chatTitle?: string;
   onClose: () => void;
   /** ダンが画面に出す物の札の幅（エディターの会話は狭い） */
   stageWidthClass?: string;
 }
 
-export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }: VoiceSessionProps) {
+export function VoiceSession({ roomId, focusRoomId, onClose, stageWidthClass = 'w-[520px]' }: VoiceSessionProps) {
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
   const [stageShown, setStageShown] = useState(false);   // a scene is on the stage: its card shows bottom-right
@@ -398,6 +400,18 @@ export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }:
       setStatus('error');
     }
   }, [authHeaders, dcSend, disconnect, onClose, roomId, saveTranscript, pushLog]);
+
+  // 見ている部屋が変わったらサーバーへ（つながった直後にも1回。同じ部屋は送り直さない）
+  const sentFocusRef = useRef('');
+  useEffect(() => {
+    const room = focusRoomId || roomId;
+    const session = liveSessionIdRef.current;
+    if (status !== 'connected' || !session || sentFocusRef.current === `${session}:${room}`) return;
+    sentFocusRef.current = `${session}:${room}`;
+    void fetch('/api/v1/voicelog/live/backend/focus', {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify({ session_id: session, room_id: room }),
+    }).catch(() => { sentFocusRef.current = ''; });
+  }, [authHeaders, focusRoomId, roomId, status]);
 
   useEffect(() => {
     void connect();

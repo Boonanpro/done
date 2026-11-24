@@ -166,3 +166,57 @@ def test_the_speech_model_knows_the_call_is_from_the_editor(monkeypatch, room):
     monkeypatch.setattr(voice_editor, 'call_editor', lambda room_id: {'asset_room_id': 'assets', 'content_id': 'c1'} if room_id == 'work' else None)
     assert 'エディター' in voice_live.session_config(room_id='work', user_id='u')['instructions']
     assert 'エディター' not in voice_live.session_config(room_id='chat', user_id='u')['instructions'].split('通話を始めた日')[1]
+
+
+@pytest.mark.asyncio
+async def test_one_call_moves_between_timelines_and_each_request_goes_where_it_was_said(monkeypatch, room):
+    """11/24 本人: 1回の通話で、タイムラインを移りながらまとめて直しを頼みたい。頼みは言った時に見ていた作品の部屋へ行き、
+    報告は通話の部屋へ戻る（origin）。動画Aで言った位置は、動画Bの頼みに混ざらない。"""
+    started = []
+    async def execute(params, room_id, user_id, voice_handoff=False, internal_check=False):
+        started.append((params, room_id))
+        return {'accepted': True, 'receipt': {'id': f'job-{len(started)}'}}
+    monkeypatch.setattr('app.services.command_center.execute', execute)
+    monkeypatch.setattr('app.services.parallel_job_runner.room_model', lambda room: 'opus')
+    monkeypatch.setattr(voice_editor, 'draw_frame', lambda *a: None)
+    works = {'room-a': {'asset_room_id': 'assets', 'content_id': 'c1'}, 'room-b': {'asset_room_id': 'assets', 'content_id': 'c2'}}
+    monkeypatch.setattr(voice_editor, 'call_editor', lambda room_id: works.get(room_id))
+    d = Dialogue()
+    d.home_room = 'room-a'
+    assert d.set_focus('room-a')                     # the call is placed from work A
+    write_state(room)
+    d.add('user', 'このテロップ赤くして')
+    await voice_router.start_chat_dan('u', 'room-a', d, 'このテロップ赤くして')
+    d.add('assistant', 'うん、赤にするね')
+    assert d.set_focus('room-b') and d.editor.content_id == 'c2'   # he opens work B in the same window, the call goes on
+    write_state(room, content_id='c2', playhead=40.0, selected=[{'id': 'v1'}])
+    d.add('user', 'ここのBGM下げて')
+    await voice_router.start_chat_dan('u', 'room-a', d, 'ここのBGM下げて')
+    (first, origin1), (second, origin2) = started
+    assert 'target_room_id' not in first and origin1 == 'room-a'
+    assert second['target_room_id'] == 'room-b' and origin2 == 'room-a'
+    assert '作品: c2' in second['task'] and '0:40.0' in second['task'] and '0:12.3' not in second['task']
+    assert voice_router.work_room(d, 'room-a') == 'room-b'
+
+
+def test_a_chat_room_on_the_screen_is_the_place_and_the_target(monkeypatch):
+    monkeypatch.setattr(voice_editor, 'call_editor', lambda room_id: None)
+    monkeypatch.setattr('app.services.prompt_store.fill', lambda pid, **kw: f"{pid}:{kw.get('title')}")
+    d = Dialogue()
+    d.home_room = 'home'
+    d.set_focus('home')
+    assert d.place() == ''
+    d.set_focus('room-x', '中村さん')
+    d.add('user', 'この部屋の件、返信の下書き作って')
+    assert d.editor is None and d.place() == 'call/focus-room:中村さん'
+    assert voice_router.work_room(d, 'home') == 'room-x'
+
+
+def test_the_room_of_a_request_is_where_he_finished_saying_it():
+    d = Dialogue()
+    d.focus_room = 'a'
+    d.add('user', 'まず')
+    d.focus_room = 'b'
+    d.add('user', 'これ直して')
+    assert d.history[-1]['room'] == 'b'
+    assert voice_router.work_room([{'role': 'user', 'text': 'x'}], 'call') == 'call'

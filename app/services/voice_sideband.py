@@ -101,7 +101,12 @@ class Dialogue:
         self.routing_until = 0.0  # a delegation is being routed (voice_router): silent state waits, so it cancels no acknowledgement
         self.began_iso = ''
         self.summons = []         # the summonses said in this call (summon_feed): what the owner's short replies answer
-        self.editor = None        # voice_editor.Moments when the call is from one work's room in the editor
+        self.editor = None        # voice_editor.Moments when the room on the owner's screen is one work's room in the editor
+        # The room on the owner's screen (2026-11-24, the owner: one call while moving between timelines and chats). The
+        # call stays in the room it was placed from; the screens tell which room he looks at now (call-provider.tsx →
+        # /live/backend/focus), each of his turns keeps it ('room'), and work he asks for goes there (voice_router.work_room).
+        self.focus_room = ''
+        self.focus_title = ''
 
     def add(self, role, delta):
         if not delta: return
@@ -109,12 +114,35 @@ class Dialogue:
         self.history_chars += len(delta)
         if self.history and self.history[-1]['role'] == role: self.history[-1]['text'] += delta
         else: self.history.append({'role': role, 'text': delta})
+        if role == 'user' and self.focus_room:   # the room on his screen when he said it (the end of the turn)
+            self.history[-1]['room'] = self.focus_room
         if role == 'user' and self.editor is not None:   # where he was in the editor while saying it (voice_editor)
             try: self.editor.heard(self.history[-1])
             except Exception: pass
         if self.turns and self.turns[-1]['role'] == role: self.turns[-1]['text'] += delta
         else: self.turns.append({'role': role, 'text': delta})
         del self.turns[:-24]
+
+    def set_focus(self, room_id, title=''):
+        """The owner now looks at this room. A work's room in the editor brings that work's moments (voice_editor). True
+        when it changed."""
+        if not room_id or room_id == self.focus_room:
+            return False
+        from app.services import voice_editor
+        place = voice_editor.call_editor(room_id)
+        self.editor = voice_editor.Moments(place['asset_room_id'], place['content_id'], room_id=room_id) if place else None
+        self.focus_room, self.focus_title = room_id, title or ''
+        return True
+
+    def place(self):
+        """Where the owner is, for whoever decides where a request goes (voice_router): the work in the editor, or the
+        chat room on his screen when it is not the room the call was placed from."""
+        if self.editor is not None:
+            return self.editor.place()
+        if self.focus_title and self.focus_room and self.focus_room != getattr(self, 'home_room', ''):
+            from app.services import prompt_store
+            return prompt_store.fill('call/focus-room', title=self.focus_title)
+        return ''
 
     def recent(self):
         return [{'role': t['role'], 'text': t['text'].strip()[:1200]} for t in self.turns[-12:] if t['text'].strip()]
@@ -725,10 +753,9 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
     counts, dialogue, working, spoke, stage = {}, Dialogue(), set(), {}, None
     dialogue.began_iso = began.isoformat()
     stop_control = hangup = background = router = whisper = None
+    dialogue.home_room = room_id or ''
     if own and room_id:
-        from app.services import voice_editor
-        place = await asyncio.to_thread(voice_editor.call_editor, room_id)
-        if place: dialogue.editor = voice_editor.Moments(place['asset_room_id'], place['content_id'])
+        await asyncio.to_thread(dialogue.set_focus, room_id)
     try:
         transport = connection if connection is not None else websockets.connect(
             URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
@@ -744,6 +771,7 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
             state = voice_live.get_session(session_id, user_id)
             if own and state is not None:
                 dialogue.sketch = state['sketch'] = voice_sketch.Sketch(dialogue, send)
+                state['dialogue'] = dialogue   # the screens tell it which room the owner looks at (/live/backend/focus)
             pending = {}
             from app.services.voice_interruption import Interruption
             from app.services import voice_plain

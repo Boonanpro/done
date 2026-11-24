@@ -194,7 +194,10 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
                     "resolved": False,
                     "note": "部屋を一つに特定できません。候補を確認してください。作業が停止したという意味ではありません。"}
         params = {**params, "project_id": candidates[0]["id"]}
-    target = (await projects.get_project_by_room_id(room_id) if action == 'work'
+    # A call's work goes to the room on the owner's screen when he asked (voice_router.work_room), reporting to the call's
+    # room (origin). Only the call's own handoff names another room; a public tool's arguments cannot.
+    work_room = str(params.get('target_room_id') or '') if voice_handoff else ''
+    target = (await projects.get_project_by_room_id(work_room or room_id) if action == 'work'
               else await projects.get_project(str(params.get("project_id") or ""), user_id))
     if not target or not target.get("room_id"):
         raise ValueError("対象プロジェクトが見つからないか、アクセス権がありません")

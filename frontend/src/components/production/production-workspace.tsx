@@ -215,6 +215,23 @@ export function ProductionWorkspace({
     setUrlContentId(content.id);
   };
 
+  // チャットのタイムラインのリンクから、この窓のまま作品を切り替える（lib/open-editor-window.ts。読み直すと通話が切れる）
+  const openContentRef = useRef(openContent);
+  const contentsRef = useRef(contents);
+  useEffect(() => {
+    openContentRef.current = openContent;
+    contentsRef.current = contents;
+  });
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.data?.type !== 'dan-editor-open') return;
+      const target = contentsRef.current.find((c) => c.id === event.data.contentId);
+      if (target) openContentRef.current(target);
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
+
   // Job ids we've already reacted to as terminal (done/failed). Without this, loadJobs would
   // call loadAll on EVERY poll as long as any terminal job exists (a finished build is always
   // 'done'), and loadAll churns selectedContent's identity -> loadJobs re-fires -> loadAll ...

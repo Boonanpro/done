@@ -80,7 +80,7 @@ import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
 import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
 import { bareDanMedia, chatImageUrl, danFileMedia, earlierTurnMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo, type DanMedia } from '@/lib/chat-media';
-import { VoiceSession } from '@/components/voice/voice-session';
+import { useCall } from '@/components/voice/call-provider';
 import { editorWorkLink, openEditorWindow } from '@/lib/open-editor-window';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
@@ -2573,7 +2573,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
   const messagesContentRef = useRef<HTMLDivElement>(null);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
-  const [callRoom, setCallRoom] = useState<string | null>(null);
+  const call = useCall();   // 通話は画面全体で1つ（components/voice/call-provider.tsx）。この欄は電話マークで頼むだけ
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
@@ -3322,17 +3322,15 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
     return () => cancelAnimationFrame(frame);
   }, [visibleDisplayItems, highlightAndScroll]);
 
+  // 本人が今見ている部屋を通話へ知らせる（通話中に別の部屋・タイムラインへ移ると、頼みはそちらへ行く）
+  const focusRoomId = project?.room_id;
+  const setCallFocus = call.setFocus;
+  useEffect(() => {
+    if (focusRoomId) setCallFocus(focusRoomId);
+  }, [focusRoomId, setCallFocus]);
+
   return (
     <div data-media-gallery-scope className="relative flex h-full w-full overflow-hidden">
-    {callRoom && (
-      <VoiceSession
-        roomId={callRoom}
-        key={callRoom}
-        chatTitle={project?.title || undefined}
-        onClose={() => setCallRoom(null)}
-        stageWidthClass={editorChat ? 'w-[396px]' : 'w-[520px]'}
-      />
-    )}
     <div
       className={`flex h-full shrink-0 flex-col overflow-hidden bg-background ${
         isMobile && isPreviewOpenForProject ? 'hidden' : isPreviewOpenForProject ? '' : 'w-full'
@@ -3642,7 +3640,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
 
       {project?.room_id && workspaceMode === 'chat' ? (
         <ChatInput
-          voiceOpen={!!callRoom} onVoice={open => setCallRoom(open ? project.room_id : null)}
+          voiceOpen={!!call.room} onVoice={open => (open ? (project.room_id ? call.start(project.room_id, { chatTitle: project?.title || undefined, stageWidthClass: editorChat ? 'w-[396px]' : 'w-[520px]' }) : undefined) : call.end())}
           projectId={projectId}
           roomId={project.room_id}
           isSessionActive={isActiveExecution}
