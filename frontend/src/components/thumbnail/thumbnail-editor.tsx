@@ -14,7 +14,7 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignStartHorizontal, AlignStartVertical,
   AlignHorizontalSpaceAround, AlignVerticalSpaceAround,
   ArrowLeft, ArrowDown, ArrowUp, Check, Copy, Download, Eye, EyeOff, ImagePlus, LayoutGrid, Loader2, Lock, MessageSquare,
-  Frame, MousePointer2, PenLine, Redo2, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
+  Frame, GripVertical, MousePointer2, PenLine, Redo2, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -22,7 +22,7 @@ import { PartPreview, ThumbCanvas, partBounds, partCenter, type PartBox } from '
 import { ThumbPatterns, type ThumbPatternActions, type ThumbPatternLink } from './thumb-patterns';
 import { useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
 import {
-  THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, mergeThumbDocs, newPartId, removeFinish,
+  THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, mergeThumbDocs, newPartId, removeFinish, reorderParts, stepParts,
   type ThumbDoc, type ThumbFinishJob, type ThumbFontId, type ThumbInstruction, type ThumbMark, type ThumbPart, type ThumbTextPart,
 } from './thumb-doc';
 
@@ -57,10 +57,46 @@ const r0 = (v: number) => Math.round(v);
 type JobState = { job_id: string; state: string; label: string; active: boolean; progress?: string | null; result?: string | null };
 
 // つかんで動かす・大きさを変えるのは、選んでいる部品の全部（1つでも複数でも同じ形）。回すのは1つの時だけ
+// 元に戻す・やり直すの1手（本人の1手の前後）。この窓の間は sessionStorage に控え、読み直しても消さない
+type UndoStep = { before: ThumbDoc; after: ThumbDoc };
+const UNDO_MAX = 60;
+function readUndo(key: string): { undo: UndoStep[]; redo: UndoStep[] } {
+  try {
+    const raw = typeof window !== 'undefined' ? window.sessionStorage.getItem(key) : null;
+    const j = raw ? JSON.parse(raw) : null;
+    if (j && Array.isArray(j.undo) && Array.isArray(j.redo)) return { undo: j.undo, redo: j.redo };
+  } catch { /* 控えが壊れていれば空から */ }
+  return { undo: [], redo: [] };
+}
+function writeUndo(key: string, undo: UndoStep[], redo: UndoStep[]) {
+  // 入りきらなければ古い手から落とす
+  for (let n = undo.length; n >= 0; n = n > 10 ? Math.floor(n / 2) : n - 1) {
+    try { window.sessionStorage.setItem(key, JSON.stringify({ undo: undo.slice(undo.length - n), redo: redo.slice(-n) })); return; } catch { /* 次は少なく */ }
+  }
+}
+// 部品のコピー・貼り付け（Ctrl+C / X / V）。同じ動画のほかの案へも貼れるよう、この端末に控え、OS のクリップボードにも載せる
+const CLIP_MARK = 'dan-thumb-parts:';
+const CLIP_KEY = 'thumb-clipboard';
+function readClip(text?: string | null): ThumbPart[] | null {
+  try {
+    const raw = text && text.startsWith(CLIP_MARK) ? text.slice(CLIP_MARK.length) : (!text ? window.localStorage.getItem(CLIP_KEY) : null);
+    const j = raw ? JSON.parse(raw) : null;
+    return Array.isArray(j) && j.length ? (j as ThumbPart[]) : null;
+  } catch { return null; }
+}
+
+// 字を打つ欄（ここでは Ctrl+Z などをその欄に任せる）。つまみ・色・チェック・ボタンは字を打つ欄ではない
+const TEXT_INPUTS = new Set(['', 'text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+function isTextField(el: Element | null | undefined): boolean {
+  if (!el || !(el instanceof HTMLElement)) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
+  return el.tagName === 'INPUT' && TEXT_INPUTS.has(((el as HTMLInputElement).getAttribute('type') || '').toLowerCase());
+}
+
 type Drag =
-  | { kind: 'move'; ids: string[]; start: [number, number]; origs: Record<string, ThumbPart>; before: ThumbDoc }
+  | { kind: 'move'; ids: string[]; start: [number, number]; origs: Record<string, ThumbPart>; before: ThumbDoc; box0: PartBox | null; tx: number[]; ty: number[] }
   | { kind: 'scale'; ids: string[]; anchor: [number, number]; startDist: number; origs: Record<string, ThumbPart>; before: ThumbDoc }
-  | { kind: 'rotate'; ids: string[]; center: [number, number]; startAngle: number; origs: Record<string, ThumbPart>; before: ThumbDoc }
+  | { kind: 'rotate'; ids: string[]; center: [number, number]; startAngle: number; origs: Record<string, ThumbPart>; before: ThumbDoc; group?: Record<string, [number, number]> }
   | { kind: 'marquee'; start: [number, number]; base: string[]; moved: boolean; clickPick: string | null }
   | { kind: 'pen' };
 
@@ -154,11 +190,21 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const setSelected = useCallback((id: string | null) => setSelection(id ? [id] : []), []);
   const listAnchor = useRef<string | null>(null);
   const [marquee, setMarquee] = useState<PartBox | null>(null);
+  // 動かしている間、揃った線（ほかの部品・サムネの端や真ん中）
+  const [guides, setGuides] = useState<Array<{ x?: number; y?: number }>>([]);
   const [mode, setMode] = useState<'select' | 'pen'>('select');
   const [boxes, setBoxes] = useState<Record<string, PartBox>>({});
   // 元に戻す・やり直すは「本人の1手の前後」。今の形にその1手だけを当てる（あとから入ったダンの直しは巻き戻さない）
-  const undoStack = useRef<Array<{ before: ThumbDoc; after: ThumbDoc }>>([]);
-  const redoStack = useRef<Array<{ before: ThumbDoc; after: ThumbDoc }>>([]);
+  // 読み直しても・案を行き来しても消えないよう、この窓の間は sessionStorage に控える（2026-11-24 本人「control＋zで操作取り消せるようにして」）
+  const undoKey = `thumb-undo:${contentId}`;
+  const [savedUndo] = useState(() => readUndo(undoKey));
+  const undoStack = useRef<UndoStep[]>(savedUndo.undo);
+  const redoStack = useRef<UndoStep[]>(savedUndo.redo);
+  const keepUndoTimer = useRef<number | null>(null);
+  const keepUndo = useCallback(() => {
+    if (keepUndoTimer.current) window.clearTimeout(keepUndoTimer.current);
+    keepUndoTimer.current = window.setTimeout(() => writeUndo(undoKey, undoStack.current, redoStack.current), 300);
+  }, [undoKey]);
   const [, bump] = useState(0);
   const drag = useRef<Drag | null>(null);
   const press = useRef<{ at: [number, number]; pick: string | null } | null>(null);
@@ -192,6 +238,10 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const setPatternActions = useCallback((a: ThumbPatternActions | null) => { patternActions.current = a; }, []);
   // つかんでいる・描いている間（その間は作業台の広さを止め、コメントのボタンを隠す）
   const [gesture, setGesture] = useState<{ kind: 'pen' | 'part'; board: PartBox | null } | null>(null);
+  // 部品の一覧で引っぱって前後を入れ替えている間（下の onLayerPointer*）
+  const layerPress = useRef<{ id: string; x: number; y: number; grip: boolean; started: boolean } | null>(null);
+  const layerClickBlock = useRef(false);
+  const [layerDrag, setLayerDrag] = useState<{ ids: string[]; slot: number } | null>(null);
 
   // ── ダンの手を見せる（2026-11-24 本人「ダンが何かやる時は必ずその操作を見える化しなさい。動画タイムラインや台本ページと
   //    同じように」）。保存された形が前と違えば、変わった部品を前の形から今の形へ動かし、光と「ダン」の印を出す。
@@ -321,14 +371,15 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const prev = before || docRef.current;
     if (prev) {
       undoStack.current.push({ before: clone(prev), after: clone(next) });
-      if (undoStack.current.length > 100) undoStack.current.shift();
+      if (undoStack.current.length > UNDO_MAX) undoStack.current.shift();
       redoStack.current = [];
+      keepUndo();
     }
     setDoc(next);
     docRef.current = next;
     scheduleSave();
     bump((n) => n + 1);
-  }, [scheduleSave]);
+  }, [scheduleSave, keepUndo]);
 
   const updatePart = useCallback((id: string, patch: Partial<ThumbPart> | ((p: ThumbPart) => ThumbPart)) => {
     const d = docRef.current;
@@ -341,15 +392,15 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     if (!step || !docRef.current) return;
     redoStack.current.push(step);
     const next = mergeThumbDocs(step.after, step.before, docRef.current);
-    setDoc(next); docRef.current = next; scheduleSave(); bump((n) => n + 1);
-  }, [scheduleSave]);
+    setDoc(next); docRef.current = next; scheduleSave(); keepUndo(); bump((n) => n + 1);
+  }, [scheduleSave, keepUndo]);
   const redo = useCallback(() => {
     const step = redoStack.current.pop();
     if (!step || !docRef.current) return;
     undoStack.current.push(step);
     const next = mergeThumbDocs(step.before, step.after, docRef.current);
-    setDoc(next); docRef.current = next; scheduleSave(); bump((n) => n + 1);
-  }, [scheduleSave]);
+    setDoc(next); docRef.current = next; scheduleSave(); keepUndo(); bump((n) => n + 1);
+  }, [scheduleSave, keepUndo]);
 
   // ── 画面の大きさ ──
   const stageWrap = useRef<HTMLDivElement | null>(null);
@@ -604,6 +655,19 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const group = selection.map((id) => doc.parts.find((p) => p.id === id)).filter((p): p is ThumbPart => !!p && !p.hidden);
     const origsOf = (ps: ThumbPart[]) => Object.fromEntries(ps.map((p) => [p.id, clone(p)]));
     const additive = ev.shiftKey || ev.metaKey || ev.ctrlKey;
+    if (handle === 'g-rotate' && group.length > 1) {
+      // 複数をまとめて回す: 全部を囲む枠の真ん中を中心に、それぞれの位置と向きを一緒に回す
+      ev.preventDefault();
+      (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
+      const u = unionBox(group.map((p) => partBounds(p, boxOf(p), boxes[p.id])))!;
+      const center: [number, number] = [u.x + u.w / 2, u.y + u.h / 2];
+      setGesture({ kind: 'part', board: liveBoard });
+      drag.current = {
+        kind: 'rotate', ids: group.map((p) => p.id), center, startAngle: Math.atan2(pt[1] - center[1], pt[0] - center[0]),
+        origs: origsOf(group), before: clone(doc), group: Object.fromEntries(group.map((p) => [p.id, partCenter(p, boxes[p.id])])),
+      };
+      return;
+    }
     if (handle && handle.startsWith('g-') && group.length > 1) {
       // 複数の部品を囲む枠の角: 向かいの角を止めて、全部をまとめて大きさを変える
       ev.preventDefault();
@@ -639,7 +703,13 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const startMove = (ps: ThumbPart[]) => {
       const movable = ps.filter((p) => !p.locked);
       if (!movable.length) return;
-      drag.current = { kind: 'move', ids: movable.map((p) => p.id), start: pt, origs: origsOf(movable), before: clone(doc) };
+      // ぴたっと揃える先: サムネの左右上下の端と真ん中、ほかの部品の端と真ん中
+      const ids = new Set(movable.map((p) => p.id));
+      const others = doc.parts.filter((p) => !p.hidden && !ids.has(p.id) && !coversCanvas(p)).map((p) => partBounds(p, boxOf(p), boxes[p.id]));
+      const tx = [0, doc.width / 2, doc.width, ...others.flatMap((b) => [b.x, b.x + b.w / 2, b.x + b.w])];
+      const ty = [0, doc.height / 2, doc.height, ...others.flatMap((b) => [b.y, b.y + b.h / 2, b.y + b.h])];
+      const box0 = unionBox(movable.map((p) => partBounds(p, boxOf(p), boxes[p.id])));
+      drag.current = { kind: 'move', ids: movable.map((p) => p.id), start: pt, origs: origsOf(movable), before: clone(doc), box0, tx, ty };
       setGesture({ kind: 'part', board: liveBoard });
     };
     const startMarquee = (base: string[], clickPick: string | null) => {
@@ -723,8 +793,18 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     if (lastPointerType.current !== 'mouse') return;   // 指の長押しでは出さない
     const pt = toSvg(ev);
     const stack = partsAt(pt, false);
-    if (!stack.length) return;
+    const top = hitPart(pt);
+    if (top && !selection.includes(top.id) && !coversCanvas(top)) setSelected(top.id);
     setPickMenu({ x: ev.clientX, y: ev.clientY, ids: stack.map((p) => p.id) });
+  };
+
+  // 文字を2回押したら、右の欄の文字を打ち直せるようにする
+  const onDoubleClick = (ev: React.MouseEvent<SVGSVGElement>) => {
+    if (!doc || mode !== 'select') return;
+    const part = hitPart(toSvg(ev));
+    if (!part || part.type !== 'text') return;
+    setSelected(part.id);
+    window.setTimeout(() => { textRef.current?.focus(); textRef.current?.select(); }, 60);
   };
 
   // サムネの外（まわりの余白）を押したら選択を外す
@@ -764,12 +844,42 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       return;
     }
     const changed: Record<string, ThumbPart> = {};
+    // 動かす量: Shift で横か縦だけ。ほかの部品・サムネの端や真ん中に近づくと揃えて止める（⌘/Ctrl を押している間は揃えない）
+    let mdx = 0, mdy = 0;
+    if (dr.kind === 'move') {
+      mdx = pt[0] - dr.start[0]; mdy = pt[1] - dr.start[1];
+      if (ev.shiftKey) { if (Math.abs(mdx) > Math.abs(mdy)) mdy = 0; else mdx = 0; }
+      const lines: Array<{ x?: number; y?: number }> = [];
+      if (dr.box0 && !(ev.metaKey || ev.ctrlKey)) {
+        const thr = 6 / scale;
+        const b = dr.box0;
+        const fit = (edges: number[], targets: number[]) => {
+          let best: { d: number; at: number } | null = null;
+          for (const e of edges) for (const t of targets) { const d = t - e; if (Math.abs(d) < thr && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, at: t }; }
+          return best;
+        };
+        const fx = !(ev.shiftKey && mdx === 0) ? fit([b.x + mdx, b.x + b.w / 2 + mdx, b.x + b.w + mdx], dr.tx) : null;
+        const fy = !(ev.shiftKey && mdy === 0) ? fit([b.y + mdy, b.y + b.h / 2 + mdy, b.y + b.h + mdy], dr.ty) : null;
+        if (fx) { mdx += fx.d; lines.push({ x: fx.at }); }
+        if (fy) { mdy += fy.d; lines.push({ y: fy.at }); }
+      }
+      setGuides(lines);
+    }
     for (const id of dr.ids) {
       const o = dr.origs[id];
       if (!o) continue;
       if (dr.kind === 'move') {
-        const dx = pt[0] - dr.start[0], dy = pt[1] - dr.start[1];
-        changed[id] = { ...o, x: o.x + dx, y: o.y + dy } as ThumbPart;
+        changed[id] = { ...o, x: o.x + mdx, y: o.y + mdy } as ThumbPart;
+      } else if (dr.kind === 'rotate' && dr.group) {
+        const a = Math.atan2(pt[1] - dr.center[1], pt[0] - dr.center[0]);
+        let delta = ((a - dr.startAngle) * 180) / Math.PI;
+        if (!ev.shiftKey) for (const snap of [-180, -90, 0, 90, 180]) if (Math.abs(delta - snap) < 3) delta = snap;
+        delta = Math.round(delta * 10) / 10;
+        const c0 = dr.group[id];
+        const c1 = rotatePoint(c0, dr.center, delta);
+        let deg = (o.rotation || 0) + delta;
+        deg = ((deg + 540) % 360) - 180;
+        changed[id] = { ...o, x: o.x + c1[0] - c0[0], y: o.y + c1[1] - c0[1], rotation: Math.round(deg * 10) / 10 } as ThumbPart;
       } else if (dr.kind === 'scale') {
         const k = Math.max(0.05, Math.hypot(pt[0] - dr.anchor[0], pt[1] - dr.anchor[1]) / dr.startDist);
         changed[id] = scalePart(o, dr.anchor, k);
@@ -790,6 +900,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const dr = drag.current;
     drag.current = null;
     setGesture(null);
+    setGuides([]);
     const pr = press.current;
     press.current = null;
     if (dr && dr.kind === 'marquee') {
@@ -815,8 +926,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   // ── キー ──
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
+      // 字を打つ欄の中だけは、その欄の操作に任せる（つまみ・色・ボタンの上では効かせる）
       const el = ev.target as HTMLElement | null;
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return;
+      if (isTextField(el)) return;
       const mod = ev.ctrlKey || ev.metaKey;
       if (mod && ev.key.toLowerCase() === 'z') { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); return; }
       if (mod && ev.key.toLowerCase() === 'y') { ev.preventDefault(); redo(); return; }
@@ -836,6 +948,13 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       }
       if (!sels.length || !d) return;
       if (mod && ev.key.toLowerCase() === 'd') { ev.preventDefault(); duplicate(sels); return; }
+      // 前へ・後ろへ（Figma・Canva と同じ。Shift で一番前・一番後ろ）
+      if (mod && (ev.key === ']' || ev.key === '}' || ev.key === '[' || ev.key === '{')) {
+        ev.preventDefault();
+        const fwd = ev.key === ']' || ev.key === '}';
+        move(sels.map((p) => p.id), ev.shiftKey ? (fwd ? 'front' : 'back') : (fwd ? 'up' : 'down'));
+        return;
+      }
       if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); remove(sels.map((p) => p.id)); return; }
       if (ev.key === 'Escape') { setSelection([]); return; }
       const step = ev.shiftKey ? 10 : 1;
@@ -873,6 +992,25 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     commit({ ...d, parts });
     setSelection(made);
   };
+  // コピー・貼り付け（ほかの案に貼ると同じ位置、同じ案に貼ると少しずらす）
+  const pasteCount = useRef(0);
+  const copyParts = (ps: ThumbPart[], dt?: DataTransfer | null) => {
+    const raw = JSON.stringify(ps.map((p) => clone(p)));
+    try { window.localStorage.setItem(CLIP_KEY, raw); } catch { /* 入らなくても OS 側には載る */ }
+    if (dt) dt.setData('text/plain', CLIP_MARK + raw);
+    else void navigator.clipboard?.writeText(CLIP_MARK + raw).catch(() => undefined);
+    pasteCount.current = 0;
+  };
+  const pasteParts = (ps: ThumbPart[] | null) => {
+    const d = docRef.current;
+    if (!d || !ps || !ps.length) return;
+    const here = ps.some((p) => d.parts.some((q) => q.id === p.id));
+    const off = here ? 30 * ++pasteCount.current : 0;
+    const made = ps.map((p) => ({ ...clone(p), id: newPartId(p.type === 'text' ? 't' : 'i'), x: p.x + off, y: p.y + off, finish: undefined } as ThumbPart));
+    commit({ ...d, parts: [...d.parts, ...made] });
+    setSelection(made.map((p) => p.id));
+    setMode('select');
+  };
   // 揃える・等間隔に並べる（複数を選んだ時）。見えている範囲（回してあれば回した範囲）で揃える
   const arrange = (how: 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom' | 'hspace' | 'vspace') => {
     const d = docRef.current;
@@ -909,15 +1047,19 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const set = new Set(ids);
     commit({ ...d, parts: d.parts.map((p) => (set.has(p.id) ? ({ ...p, ...patch } as ThumbPart) : p)) });
   };
-  const move = (id: string, dir: 'up' | 'down' | 'front' | 'back') => {
+  const move = (ids: string | string[], dir: 'up' | 'down' | 'front' | 'back') => {
     const d = docRef.current;
     if (!d) return;
-    const parts = [...d.parts];
-    const i = parts.findIndex((p) => p.id === id);
-    if (i < 0) return;
-    const [p] = parts.splice(i, 1);
-    const j = dir === 'front' ? parts.length : dir === 'back' ? 0 : dir === 'up' ? Math.min(parts.length, i + 1) : Math.max(0, i - 1);
-    parts.splice(j, 0, p);
+    const parts = stepParts(d.parts, Array.isArray(ids) ? ids : [ids], dir);
+    if (parts.every((p, i) => p === d.parts[i])) return;
+    commit({ ...d, parts });
+  };
+  // 部品の一覧で引っぱって並べ替える（slot は一覧の何番目の前か）
+  const reorderTo = (ids: string[], slot: number) => {
+    const d = docRef.current;
+    if (!d) return;
+    const parts = reorderParts(d.parts, ids, slot);
+    if (parts.every((p, i) => p === d.parts[i])) return;
     commit({ ...d, parts });
   };
   const addText = () => {
@@ -970,14 +1112,29 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   useEffect(() => {
     const onPaste = (ev: ClipboardEvent) => {
       const el = ev.target as HTMLElement | null;
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      if (isTextField(el)) return;
+      const clip = readClip(ev.clipboardData?.getData('text/plain') || '');
+      if (clip) { ev.preventDefault(); pasteParts(clip); return; }
       const files = Array.from(ev.clipboardData?.files || []).filter((f) => f.type.startsWith('image/'));
       if (!files.length) return;
       ev.preventDefault();
       void addImageFiles(files);
     };
+    // コピー・切り取り: 選んでいる部品を（字を打つ欄の外で）
+    const onCopy = (ev: ClipboardEvent, cut: boolean) => {
+      if (isTextField(ev.target as HTMLElement | null) || mode !== 'select') return;
+      const d = docRef.current;
+      const ps = d ? d.parts.filter((p) => selection.includes(p.id)) : [];
+      if (!ps.length) return;
+      ev.preventDefault();
+      copyParts(ps, ev.clipboardData);
+      if (cut) remove(ps.map((p) => p.id));
+    };
+    const c1 = (e: ClipboardEvent) => onCopy(e, false), c2 = (e: ClipboardEvent) => onCopy(e, true);
     window.addEventListener('paste', onPaste);
-    return () => window.removeEventListener('paste', onPaste);
+    window.addEventListener('copy', c1);
+    window.addEventListener('cut', c2);
+    return () => { window.removeEventListener('paste', onPaste); window.removeEventListener('copy', c1); window.removeEventListener('cut', c2); };
   });
   const onStageDrop = (ev: React.DragEvent) => {
     const files = Array.from(ev.dataTransfer?.files || []);
@@ -1231,6 +1388,16 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         {u ? (
           <>
             <rect x={u.x} y={u.y} width={u.w} height={u.h} fill="none" stroke="#38bdf8" strokeWidth={sw * 1.5} pointerEvents="none" />
+            {(() => {
+              const roomAbove = (u.y - (board?.y ?? 0)) * scale + STAGE_MARGIN;
+              const ry = roomAbove >= 28 + handleR * scale ? u.y - 28 / scale : u.y + 28 / scale;
+              return (
+                <>
+                  <line x1={u.x + u.w / 2} y1={u.y} x2={u.x + u.w / 2} y2={ry} stroke="#38bdf8" strokeWidth={sw} pointerEvents="none" />
+                  <circle data-handle="g-rotate" cx={u.x + u.w / 2} cy={ry} r={handleR} fill="#fff" stroke="#38bdf8" strokeWidth={sw} style={{ cursor: 'grab' }} />
+                </>
+              );
+            })()}
             {([['g-nw', u.x, u.y], ['g-ne', u.x + u.w, u.y], ['g-sw', u.x, u.y + u.h], ['g-se', u.x + u.w, u.y + u.h]] as const).map(([k, x, y]) => (
               <rect key={k} data-handle={k} x={x - handleR} y={y - handleR} width={handleR * 2} height={handleR * 2} fill="#fff" stroke="#38bdf8" strokeWidth={sw}
                 style={{ cursor: k === 'g-nw' || k === 'g-se' ? 'nwse-resize' : 'nesw-resize' }} />
@@ -1240,6 +1407,13 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       </g>
     );
   })() : null;
+  const guideEl = guides.length && doc ? (
+    <g pointerEvents="none" data-thumb-guides>
+      {guides.map((g, i) => (g.x != null
+        ? <line key={i} x1={g.x} x2={g.x} y1={(board?.y ?? 0)} y2={(board ? board.y + board.h : doc.height)} stroke="#f43f5e" strokeWidth={1 / scale} />
+        : <line key={i} y1={g.y} y2={g.y} x1={(board?.x ?? 0)} x2={(board ? board.x + board.w : doc.width)} stroke="#f43f5e" strokeWidth={1 / scale} />))}
+    </g>
+  ) : null;
   // 囲んで選んでいる間の四角
   const marqueeEl = marquee ? (
     <rect x={marquee.x} y={marquee.y} width={marquee.w} height={marquee.h} fill="rgba(56,189,248,0.12)" stroke="#38bdf8"
@@ -1446,8 +1620,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
             <MessageSquare className="h-4 w-4" />
           </button>
         ) : null}
-        <button type="button" title="前へ" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'up')}><ArrowUp className="h-4 w-4" /></button>
-        <button type="button" title="後ろへ" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'down')}><ArrowDown className="h-4 w-4" /></button>
+        <button type="button" title="1つ前へ（⌘/Ctrl＋]、Shift も押すと一番前へ）" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'up')} data-thumb-forward><ArrowUp className="h-4 w-4" /></button>
+        <button type="button" title="1つ後ろへ（⌘/Ctrl＋[、Shift も押すと一番後ろへ）" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'down')} data-thumb-backward><ArrowDown className="h-4 w-4" /></button>
         <button type="button" title="複製（Ctrl+D）" className="rounded p-1 hover:bg-muted" onClick={() => duplicate(sel)}><Copy className="h-4 w-4" /></button>
         <button type="button" title="消す（Delete）" className="rounded p-1 hover:bg-muted hover:text-destructive" onClick={() => remove(sel.id)}><Trash2 className="h-4 w-4" /></button>
       </div>
@@ -1471,6 +1645,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
                   setDoc(next); docRef.current = next; scheduleSave();
                   const top = undoStack.current[undoStack.current.length - 1];
                   if (top) top.after = clone(next);
+                  keepUndo();
                 }
               }}
               onBlur={() => { if (textRef.current) (textRef.current as unknown as { __editing?: boolean }).__editing = false; }}
@@ -1550,6 +1725,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
               <MessageSquare className="h-4 w-4" />
             </button>
           ) : null}
+          <button type="button" title="まとめて1つ前へ（⌘/Ctrl＋]）" className="rounded p-1 hover:bg-muted" onClick={() => move(ids, 'up')} data-thumb-forward><ArrowUp className="h-4 w-4" /></button>
+          <button type="button" title="まとめて1つ後ろへ（⌘/Ctrl＋[）" className="rounded p-1 hover:bg-muted" onClick={() => move(ids, 'down')} data-thumb-backward><ArrowDown className="h-4 w-4" /></button>
           <button type="button" title="まとめて複製（Ctrl+D）" className="rounded p-1 hover:bg-muted" onClick={() => duplicate(multi)}><Copy className="h-4 w-4" /></button>
           <button type="button" title="まとめて消す（Delete）" className="rounded p-1 hover:bg-muted hover:text-destructive" onClick={() => remove(ids)}><Trash2 className="h-4 w-4" /></button>
         </div>
@@ -1600,8 +1777,91 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     );
   })() : null;
 
+  // サムネや部品を押したら、字を打っていた欄（右の会話・文字の欄）から抜ける。サムネの上は押した時に既定の動きを
+  // 止めているので、そのままだと欄に入ったままになり、Ctrl+Z などがサムネに届かなかった（2026-11-24）
+  const releaseTextFocus = (ev: React.PointerEvent) => {
+    const a = document.activeElement as HTMLElement | null;
+    if (!a || !isTextField(a)) return;
+    const t = ev.target as HTMLElement | null;
+    if (t && (isTextField(t) || t.closest('label, [contenteditable="true"]'))) return;
+    a.blur();
+  };
+
+  // つまみ・選ぶ欄・数の欄は、使い終わったら抜ける（2026-11-24 本人「不透明度とかに左右上下ボタンを取られてパーツ移動が
+  // できない。数値やパラメーターにカーソルを残さない」）。矢印キーはいつも部品を動かす
+  const releaseControlFocus = () => {
+    window.setTimeout(() => {
+      const a = document.activeElement as HTMLElement | null;
+      if (a && a.tagName === 'INPUT' && !isTextField(a) && (a as HTMLInputElement).type !== 'color') a.blur();
+      else if (a && a.tagName === 'BUTTON') a.blur();
+    }, 0);
+  };
+  const releaseSelectFocus = (e: React.FormEvent) => {
+    const t = e.target as HTMLElement;
+    if (t.tagName === 'SELECT' || (t.tagName === 'INPUT' && (t as HTMLInputElement).type === 'color')) window.setTimeout(() => t.blur(), 0);
+  };
+  const releaseNumberOnEnter = (e: React.KeyboardEvent) => {
+    const t = e.target as HTMLElement;
+    if (t.tagName === 'INPUT' && (t as HTMLInputElement).type === 'number' && (e.key === 'Enter' || e.key === 'Escape')) t.blur();
+  };
+
+  // 部品の一覧で引っぱって前後を入れ替える（2026-11-24 本人「パーツ一覧で上下（前後）配置変えれるようにしろよ」）。
+  // マウスは行をそのまま引っぱる。指は左のつまみ（⋮⋮）から引っぱる（行の上は一覧を送るのに使う）
+  const layerSlotAt = (clientX: number, clientY: number, order: string[]): number => {
+    const row = (document.elementFromPoint(clientX, clientY) as HTMLElement | null)?.closest('[data-thumb-layer]') as HTMLElement | null;
+    const id = row?.getAttribute('data-thumb-layer');
+    if (row && id && order.includes(id)) {
+      const r = row.getBoundingClientRect();
+      return order.indexOf(id) + (clientY > r.top + r.height / 2 ? 1 : 0);
+    }
+    const rows = Array.from(document.querySelectorAll('[data-thumb-layer]')) as HTMLElement[];
+    if (!rows.length) return 0;
+    return clientY < rows[0].getBoundingClientRect().top ? 0 : order.length;
+  };
+  const onLayerPointerDown = (e: React.PointerEvent<HTMLLIElement>, id: string) => {
+    if (e.button !== 0) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-layer-toggle]')) return;
+    const grip = !!t.closest('[data-layer-grip]');
+    if (e.pointerType !== 'mouse' && !grip) return;
+    layerPress.current = { id, x: e.clientX, y: e.clientY, grip, started: false };
+    // 押しただけの時に捕まえると、ボタンの「押した」が届かなくなる。つまみだけはすぐ捕まえる
+    if (grip) { e.preventDefault(); try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 取れなくても動く */ } }
+  };
+  const onLayerPointerMove = (e: React.PointerEvent<HTMLLIElement>) => {
+    const pr = layerPress.current;
+    if (!pr || !doc) return;
+    if (!pr.started) {
+      if (Math.hypot(e.clientX - pr.x, e.clientY - pr.y) < 5) return;
+      pr.started = true;
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 取れなくても動く */ }
+    }
+    const order = [...doc.parts].reverse().map((q) => q.id);
+    const ids = selection.includes(pr.id) ? order.filter((x) => selection.includes(x)) : [pr.id];
+    // 一覧の上下の端に来たら送る
+    const scroller = e.currentTarget.closest('[data-thumb-layers-scroll]') as HTMLElement | null;
+    if (scroller) {
+      const r = scroller.getBoundingClientRect();
+      if (e.clientY < r.top + 32) scroller.scrollTop -= 12;
+      else if (e.clientY > r.bottom - 32) scroller.scrollTop += 12;
+    }
+    setLayerDrag({ ids, slot: layerSlotAt(e.clientX, e.clientY, order) });
+  };
+  const onLayerPointerUp = () => {
+    const pr = layerPress.current;
+    layerPress.current = null;
+    const ld = layerDrag;
+    setLayerDrag(null);
+    if (!pr?.started || !ld) return;
+    layerClickBlock.current = true;
+    window.setTimeout(() => { layerClickBlock.current = false; }, 0);
+    reorderTo(ld.ids, ld.slot);
+    if (!selection.includes(pr.id)) setSelected(pr.id);
+  };
+
   // 部品の一覧での選び方（エクスプローラーや Figma と同じ）
   const onLayerClick = (e: React.MouseEvent, id: string) => {
+    if (layerClickBlock.current) return;
     setMode('select');
     const order = [...doc.parts].reverse().map((q) => q.id);
     if (e.shiftKey && listAnchor.current && order.includes(listAnchor.current)) {
@@ -1618,25 +1878,38 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     setSelected(id);
   };
 
+  const layerOrder = [...(viewDoc || doc).parts].reverse();
   const layers = (
     <div data-thumb-layers>
-      <div className="mb-1 text-[11px] font-semibold text-muted-foreground">部品（上が手前）</div>
+      <div className="mb-1 text-[11px] font-semibold text-muted-foreground">部品（上が手前・引っぱって前後を入れ替え）</div>
       <ul className="space-y-1">
-        {[...(viewDoc || doc).parts].reverse().map((p) => (
-          <li key={p.id} data-thumb-layer={p.id} data-selected={selection.includes(p.id) ? 'true' : undefined} className={`group flex items-center gap-1 rounded p-0.5 text-xs ${selection.includes(p.id) ? 'bg-sky-500/15 ring-2 ring-sky-500' : 'hover:bg-muted'}`}>
-            {/* 名前の文字ではなく、その部品だけの絵で見せる（名前はマウスを乗せた時だけ）。
-                ⌘/Ctrl で1つずつ足す・外す、Shift で前に押した所からここまでをまとめて選ぶ */}
-            <button type="button" title={`${partLabel(p)}（Shift・⌘/Ctrl で複数選べます）`} className={`min-w-0 flex-1 ${p.hidden ? 'opacity-40' : ''}`} onClick={(e) => onLayerClick(e, p.id)}>
-              <PartPreview doc={viewDoc || doc} part={p} box={boxOf(p)} className="h-14 w-full" />
-            </button>
-            <button type="button" title={p.hidden ? '出す' : '隠す'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { hidden: !p.hidden })}>
-              {p.hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-            </button>
-            <button type="button" title={p.locked ? '引きずって動かせるようにする' : '引きずっても動かないようにする（角で大きさは変えられる）'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { locked: !p.locked })}>
-              {p.locked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5 opacity-40" />}
-            </button>
-          </li>
-        ))}
+        {layerOrder.map((p, i) => {
+          const dragging = !!layerDrag && layerDrag.ids.includes(p.id);
+          const lineBefore = !!layerDrag && layerDrag.slot === i;
+          const lineAfter = !!layerDrag && i === layerOrder.length - 1 && layerDrag.slot === layerOrder.length;
+          return (
+            <li key={p.id} data-thumb-layer={p.id} data-selected={selection.includes(p.id) ? 'true' : undefined}
+              onPointerDown={(e) => onLayerPointerDown(e, p.id)} onPointerMove={onLayerPointerMove} onPointerUp={onLayerPointerUp} onPointerCancel={onLayerPointerUp}
+              className={`group relative flex select-none items-center gap-1 rounded p-0.5 text-xs ${selection.includes(p.id) ? 'bg-sky-500/15 ring-2 ring-sky-500' : 'hover:bg-muted'} ${dragging ? 'opacity-50' : ''} ${layerDrag ? 'cursor-grabbing' : ''}`}>
+              {lineBefore ? <span className="pointer-events-none absolute -top-[3px] left-0 right-0 h-[3px] rounded bg-sky-500" data-thumb-layer-drop /> : null}
+              {lineAfter ? <span className="pointer-events-none absolute -bottom-[3px] left-0 right-0 h-[3px] rounded bg-sky-500" data-thumb-layer-drop /> : null}
+              <span data-layer-grip title="引っぱって前後を入れ替える" className="flex h-14 w-4 shrink-0 cursor-grab items-center justify-center text-muted-foreground/60 hover:text-foreground" style={{ touchAction: 'none' }}>
+                <GripVertical className="h-3.5 w-3.5" />
+              </span>
+              {/* 名前の文字ではなく、その部品だけの絵で見せる（名前はマウスを乗せた時だけ）。
+                  ⌘/Ctrl で1つずつ足す・外す、Shift で前に押した所からここまでをまとめて選ぶ */}
+              <button type="button" title={`${partLabel(p)}（Shift・⌘/Ctrl で複数選べます。引っぱると前後を入れ替えます）`} className={`min-w-0 flex-1 ${p.hidden ? 'opacity-40' : ''}`} onClick={(e) => onLayerClick(e, p.id)}>
+                <PartPreview doc={viewDoc || doc} part={p} box={boxOf(p)} className="pointer-events-none h-14 w-full" />
+              </button>
+              <button type="button" data-layer-toggle title={p.hidden ? '出す' : '隠す'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { hidden: !p.hidden })}>
+                {p.hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+              </button>
+              <button type="button" data-layer-toggle title={p.locked ? '引きずって動かせるようにする' : '引きずっても動かないようにする（角で大きさは変えられる）'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { locked: !p.locked })}>
+                {p.locked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5 opacity-40" />}
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -1833,13 +2106,14 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           marks={shownMarks}
           onMeasure={(id, box) => setBoxes((b) => (b[id] && Math.abs(b[id].x - box.x) < 0.5 && Math.abs(b[id].y - box.y) < 0.5 && Math.abs(b[id].w - box.w) < 0.5 && Math.abs(b[id].h - box.h) < 0.5 ? b : { ...b, [id]: box }))}
           partProps={partProps}
-          overlay={<>{danMarks}{overlay}{marqueeEl}{pins}</>}
+          overlay={<>{danMarks}{overlay}{guideEl}{marqueeEl}{pins}</>}
           style={{ touchAction: 'none', cursor: mode === 'pen' ? 'crosshair' : undefined }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={() => onPointerUp()}
           onContextMenu={onContextMenu}
+          onDoubleClick={onDoubleClick}
         />
         {floating}
       </div>
@@ -1855,8 +2129,37 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         <>
           <div className="fixed inset-0 z-[55]" onPointerDown={() => setPickMenu(null)} onContextMenu={(e) => { e.preventDefault(); setPickMenu(null); }} />
           <div className="fixed z-[60] w-52 overflow-hidden rounded-md border border-border bg-popover py-1 text-xs shadow-lg"
-            style={{ left: Math.min(pickMenu.x, window.innerWidth - 216), top: Math.min(pickMenu.y, window.innerHeight - 24 - pickMenu.ids.length * 48) }} data-thumb-pick-menu>
-            <div className="px-2.5 pb-1 pt-0.5 text-[10px] text-muted-foreground">ここにある部品（上が手前）</div>
+            style={{ left: Math.min(pickMenu.x, window.innerWidth - 216), top: Math.max(4, Math.min(pickMenu.y, window.innerHeight - 24 - 9 * 26 - pickMenu.ids.length * 48)) }} data-thumb-pick-menu>
+            {(() => {
+              // 選んでいる部品への操作（Canva・Figma の右クリックと同じ）
+              const d = docRef.current;
+              const ps = d ? d.parts.filter((p) => selection.includes(p.id)) : [];
+              const ids = ps.map((p) => p.id);
+              const clip = typeof window !== 'undefined' ? readClip() : null;
+              const items: Array<[string, string, boolean, () => void]> = [
+                ['コピー', '⌘C', !!ps.length, () => copyParts(ps)],
+                ['切り取り', '⌘X', !!ps.length, () => { copyParts(ps); remove(ids); }],
+                ['貼り付け', '⌘V', !!clip, () => pasteParts(readClip())],
+                ['複製', '⌘D', !!ps.length, () => duplicate(ps)],
+                ['一番前へ', '⇧⌘]', !!ps.length, () => move(ids, 'front')],
+                ['1つ前へ', '⌘]', !!ps.length, () => move(ids, 'up')],
+                ['1つ後ろへ', '⌘[', !!ps.length, () => move(ids, 'down')],
+                ['一番後ろへ', '⇧⌘[', !!ps.length, () => move(ids, 'back')],
+                ['消す', 'Delete', !!ps.length, () => remove(ids)],
+              ];
+              return (
+                <div className="border-b border-border pb-1" data-thumb-ctx-actions>
+                  {items.map(([name, key, on, act]) => (
+                    <button key={name} type="button" disabled={!on} data-thumb-ctx={name}
+                      className="flex w-full items-center justify-between px-2.5 py-1 text-left hover:bg-muted disabled:opacity-40"
+                      onClick={() => { act(); setPickMenu(null); }}>
+                      <span>{name}</span><span className="text-[10px] text-muted-foreground">{key}</span>
+                    </button>
+                  ))}
+                </div>
+              );
+            })()}
+            <div className="px-2.5 pb-1 pt-1 text-[10px] text-muted-foreground">ここにある部品（上が手前）</div>
             {pickMenu.ids.map((id) => {
               const p = doc.parts.find((q) => q.id === id);
               if (!p) return null;
@@ -1885,7 +2188,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
 
   if (compact) {
     return (
-      <div className="relative flex h-full min-h-0 flex-col bg-background" data-thumb-editor="phone">
+      <div className="relative flex h-full min-h-0 flex-col bg-background" data-thumb-editor="phone" onPointerDownCapture={releaseTextFocus} onPointerUpCapture={releaseControlFocus} onChangeCapture={releaseSelectFocus} onKeyDownCapture={releaseNumberOnEnter}>
         <div className="flex shrink-0 items-center gap-2 px-2 py-1.5">
           <button type="button" onClick={onBack} className="rounded p-1.5 hover:bg-muted" title={backLabel || '戻る'} aria-label={backLabel || '戻る'} data-thumb-back><ArrowLeft className="h-5 w-5" /></button>
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</span>
@@ -1898,7 +2201,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
             {phoneChat(<button type="button" onClick={() => setPhoneChatOpen(false)} className="rounded p-1 hover:bg-muted" title="サムネの道具に戻る"><X className="h-4 w-4" /></button>)}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden p-3">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden p-3" data-thumb-layers-scroll>
             {tools}
             {finishCard}
             {penBar}
@@ -1923,7 +2226,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background" data-thumb-editor="pc">
+    <div className="flex h-full min-h-0 flex-col bg-background" data-thumb-editor="pc" onPointerDownCapture={releaseTextFocus} onPointerUpCapture={releaseControlFocus} onChangeCapture={releaseSelectFocus} onKeyDownCapture={releaseNumberOnEnter}>
       <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
         <button type="button" onClick={onBack} className="flex items-center gap-1 rounded p-1.5 text-xs hover:bg-muted" title={backLabel || 'ライブラリへ戻る'} aria-label={backLabel || 'ライブラリへ戻る'} data-thumb-back><ArrowLeft className="h-4 w-4" />{backLabel ? <span>{backLabel}</span> : null}</button>
         <h1 className="min-w-0 max-w-[30%] truncate text-sm font-semibold">{title}</h1>
@@ -1935,7 +2238,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           <div className="min-h-0 flex-1 p-6 pb-3">{stage}</div>
           {strip ? <div className="shrink-0 border-t border-border bg-background/70">{strip}</div> : null}
         </div>
-        <aside className="w-72 shrink-0 space-y-4 overflow-y-auto border-l border-border p-3">
+        <aside className="w-72 shrink-0 space-y-4 overflow-y-auto border-l border-border p-3" data-thumb-layers-scroll>
           {finishCard}
           {penBar}
           {mode === 'select' ? props : null}

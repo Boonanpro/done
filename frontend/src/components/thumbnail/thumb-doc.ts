@@ -230,3 +230,38 @@ export function mergeThumbDocs(base: ThumbDoc, ours: ThumbDoc, theirs: ThumbDoc)
   out.instructions = mergeList(base.instructions || [], ours.instructions || [], theirs.instructions || []);
   return out as unknown as ThumbDoc;
 }
+
+// ── 前後の並び（2026-11-24 本人「パーツ一覧で上下（前後）配置変えれるようにしろよ」）。parts は奥→手前、
+//    部品の一覧は手前→奥（上が手前）に並べて見せる。選んだ部品が複数でも、互いの前後は変えずにまとめて動かす。
+type HasId = { id: string };
+
+// 一覧の slot 番目（0＝一番上の前、n＝一番下の後ろ）へ、ids の部品をまとめて差し込む
+export function reorderParts<T extends HasId>(parts: T[], ids: string[], slot: number): T[] {
+  const moving = new Set(ids);
+  const display = [...parts].reverse();
+  const picked = display.filter((p) => moving.has(p.id));
+  if (!picked.length) return parts;
+  const at = display.slice(0, Math.max(0, Math.min(display.length, slot))).filter((p) => !moving.has(p.id)).length;
+  const rest = display.filter((p) => !moving.has(p.id));
+  rest.splice(at, 0, ...picked);
+  return rest.reverse();
+}
+
+// 1つ前へ・1つ後ろへ・一番前へ・一番後ろへ（選んでいない部品を1つずつ飛び越す）
+export function stepParts<T extends HasId>(parts: T[], ids: string[], dir: 'up' | 'down' | 'front' | 'back'): T[] {
+  const moving = new Set(ids);
+  if (!parts.some((p) => moving.has(p.id))) return parts;
+  if (dir === 'front') return [...parts.filter((p) => !moving.has(p.id)), ...parts.filter((p) => moving.has(p.id))];
+  if (dir === 'back') return [...parts.filter((p) => moving.has(p.id)), ...parts.filter((p) => !moving.has(p.id))];
+  const out = [...parts];
+  if (dir === 'up') {
+    for (let i = out.length - 2; i >= 0; i--) {
+      if (moving.has(out[i].id) && !moving.has(out[i + 1].id)) [out[i], out[i + 1]] = [out[i + 1], out[i]];
+    }
+  } else {
+    for (let i = 1; i < out.length; i++) {
+      if (moving.has(out[i].id) && !moving.has(out[i - 1].id)) [out[i], out[i - 1]] = [out[i - 1], out[i]];
+    }
+  }
+  return out;
+}
