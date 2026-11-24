@@ -147,6 +147,6 @@ def test_stray_reaction_only_when_last_message_is_not_owner():
     from app.agent.reply_text import is_stray_reaction
     assert is_stray_reaction("👍", "ai")
     assert is_stray_reaction(" 👍\n", "system")
-    assert is_stray_reaction("👍", None)
-    assert not is_stray_reaction("👍", "user")
+    assert not is_stray_reaction("👍", None)
+    assert not is_stray_reaction("👍", "human")
     assert not is_stray_reaction("了解です👍", "ai")

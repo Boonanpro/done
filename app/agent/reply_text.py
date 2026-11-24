@@ -130,8 +130,8 @@ def is_reaction(text: Optional[str]) -> bool:
 
 
 def is_stray_reaction(text: Optional[str], last_sender_type: Optional[str]) -> bool:
-    """👍だけの返事で、部屋の最後の発言が本人のものではない（押す先が無い）か。"""
-    return is_reaction(text) and (last_sender_type or "") != "user"
+    """👍だけの返事で、部屋の最後の発言が本人のもの（human）ではない（押す先が無い）か。送り手が読めない時は判断しない。"""
+    return is_reaction(text) and bool(last_sender_type) and last_sender_type not in ("human", "user")
 
 
 # 「前に書いた返事のままでよい」の印（2026-11-09）。終わり際の関所（scripts/hook_*.py の Stop hook）に止められた後に

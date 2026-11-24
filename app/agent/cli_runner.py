@@ -1512,7 +1512,7 @@ def note_withdrawn(room_id: str, texts) -> None:
 
 
 def _last_message_sender(room_id: str) -> Optional[str]:
-    """部屋の最後の発言の送り手（user / ai / system）。読めなければ None（その時は👍も保存しない側に倒れる）。"""
+    """部屋の最後の発言の送り手（human / ai / system）。読めなければ None（その時は👍をそのまま保存する）。"""
     try:
         from app.services.supabase_client import get_supabase_client
         rows = (get_supabase_client().client.table("chat_messages").select("sender_type")

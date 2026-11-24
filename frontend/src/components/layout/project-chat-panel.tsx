@@ -3602,7 +3602,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
                 }
 
                 const sender = item.msg.sender_type;
-                const strayReaction = sender === 'ai' && (item.msg.content || '').trim() === '👍' && prevSender !== 'user';
+                const strayReaction = sender === 'ai' && (item.msg.content || '').trim() === '👍' && prevSender !== 'human';
                 prevSender = sender;
                 if (strayReaction) return;
 
