@@ -655,9 +655,9 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           </View>
           <View style={vstyles.centerArea}>
             {status === 'connected' && !!token && (
-              <View style={stageShown ? {width:'100%',flex:1,marginBottom:4,borderRadius:12,overflow:'hidden'} : {width:'100%',height:1,opacity:0}} accessibilityElementsHidden={!stageShown}>
+              <View style={stageShown ? {width:'100%',flex:1,marginBottom:4,borderRadius:12,overflow:'hidden'} : {width:'100%',height:56}}>
                 <WebView
-                  source={{uri:`${apiBase}/voice-stage?room=${encodeURIComponent(roomId)}`}}
+                  source={{uri:`${apiBase}/voice-stage?room=${encodeURIComponent(roomId)}&sketchSession=${encodeURIComponent(sessionRef.current)}`}}
                   injectedJavaScriptBeforeContentLoaded={`try{localStorage.setItem('done-token',${JSON.stringify(token)});}catch(e){} true;`}
                   onMessage={event => { try { const m = JSON.parse(event.nativeEvent.data); if (m?.type === 'stage') setStageShown(!!m.shown); } catch {} }}
                   style={{flex:1,backgroundColor:'transparent'}} containerStyle={{backgroundColor:'transparent'}}

@@ -7,20 +7,30 @@
  * host can give it room only then, and whether the scene is a page (an artifact's own screen), which the phone gives
  * the whole screen.
  */
-import { Suspense, useCallback } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 
+import { CallSketch } from '@/components/voice/call-sketch';
 import { VoiceStage } from '@/components/voice/voice-stage';
 
 function Stage() {
   const params = useSearchParams();
   const room = params.get('room') || '';
-  const onShown = useCallback((shown: boolean, page: boolean) => {
+  const session = params.get('sketchSession');
+  const [boardOpen, setBoardOpen] = useState(false);
+  const [scene, setScene] = useState({ shown: false, page: false });
+  const onShown = useCallback((shown: boolean, page: boolean) => setScene({ shown, page }), []);
+  useEffect(() => {
     const host = (window as Window & { ReactNativeWebView?: { postMessage: (s: string) => void } }).ReactNativeWebView;
-    host?.postMessage(JSON.stringify({ type: 'stage', shown, page }));
-  }, []);
+    host?.postMessage(JSON.stringify({ type: 'stage', shown: boardOpen || scene.shown, page: boardOpen || scene.page }));
+  }, [boardOpen, scene]);
   if (!room) return null;
-  return <VoiceStage roomId={room} active className="w-full" onShown={onShown} fill />;
+  return <>
+    {session && <div className="flex shrink-0 justify-center py-0.5">
+      <CallSketch key={session} room={room} session={session} onToggle={setBoardOpen} />
+    </div>}
+    <VoiceStage roomId={room} active className="w-full" onShown={onShown} fill />
+  </>;
 }
 
 export default function VoiceStagePage() {
