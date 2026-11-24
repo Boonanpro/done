@@ -153,7 +153,7 @@ type Props = {
   view?: PartBox;
   /** 部品をサムネの枠で切る（既定 true。出力・案の小さな絵）。部品の一覧の絵は切らずに部品の全部を見せる */
   clip?: boolean;
-  /** エディターの作業台: サムネの枠の外も見せる範囲（サムネの画素）。枠の外にはみ出た部品も描き、枠の外は暗くする。
+  /** エディターの作業台: サムネの枠の外も見せる範囲（サムネの画素）。枠の外にはみ出た部品も薄く描く。
    *  2026-11-24 本人「アスペクト比はあくまで表示するウインドウ。はみ出た場所にも自由に置けるように」 */
   pasteboard?: PartBox;
   onPointerDown?: React.PointerEventHandler<SVGSVGElement>;
@@ -185,28 +185,15 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
 
   const vb = pasteboard || view;
   const board = pasteboard;
-  return (
-    <svg
-      ref={ref}
-      viewBox={vb ? `${vb.x} ${vb.y} ${vb.w} ${vb.h}` : `0 0 ${doc.width} ${doc.height}`}
-      width={width}
-      xmlns="http://www.w3.org/2000/svg"
-      className={className}
-      {...handlers}
-      style={{ display: 'block', overflow: 'visible', background: board ? 'transparent' : (doc.background || '#111'), aspectRatio: vb ? `${vb.w} / ${vb.h}` : `${doc.width} / ${doc.height}`, ...style }}
-    >
-      <defs><clipPath id={clipId}><rect x={0} y={0} width={doc.width} height={doc.height} /></clipPath></defs>
-      {board ? <rect x={0} y={0} width={doc.width} height={doc.height} fill={doc.background || '#111'} pointerEvents="none" /> : null}
-      <g clipPath={clip && !board ? `url(#${clipId})` : undefined}>
-      {doc.parts.map((p) => {
+  const renderParts = (ghost: boolean) => doc.parts.map((p) => {
         if (p.hidden) return null;
         const rot = p.rotation || 0;
         const [cx, cy] = partCenter(p, boxes?.[p.id]);
-        const extra = partProps?.(p) || {};
+        const extra = ghost ? {} : (partProps?.(p) || {});
         if (p.type === 'image') {
           const flip = p.flip_x ? `translate(${2 * p.x + p.w} 0) scale(-1 1)` : '';
           return (
-            <g key={p.id} data-part-id={p.id} opacity={p.opacity ?? 1} transform={rot ? `rotate(${rot} ${cx} ${cy})` : undefined} {...extra}>
+            <g key={p.id} data-part-id={ghost ? undefined : p.id} opacity={p.opacity ?? 1} transform={rot ? `rotate(${rot} ${cx} ${cy})` : undefined} {...extra}>
               <image
                 href={p.src}
                 x={p.x}
@@ -215,19 +202,21 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
                 height={p.h}
                 preserveAspectRatio="none"
                 transform={flip || undefined}
-                onLoad={() => done(p.src)}
-                onError={() => done(p.src)}
+                onLoad={ghost ? undefined : () => done(p.src)}
+                onError={ghost ? undefined : () => done(p.src)}
                 style={{ imageRendering: 'auto' }}
               />
             </g>
           );
         }
         return (
-          <g key={p.id} data-part-id={p.id} opacity={p.opacity ?? 1} transform={rot ? `rotate(${rot} ${cx} ${cy})` : undefined} {...extra}>
-            <TextPart p={p} onMeasure={onMeasure ? (id, box) => onMeasure(id, box) : undefined} />
+          <g key={p.id} data-part-id={ghost ? undefined : p.id} opacity={p.opacity ?? 1} transform={rot ? `rotate(${rot} ${cx} ${cy})` : undefined} {...extra}>
+            <TextPart p={p} onMeasure={onMeasure && !ghost ? (id, box) => onMeasure(id, box) : undefined} />
           </g>
         );
-      })}
+      });
+  const marksEl = (
+    <>
       {marks?.map((m, i) => (
         <polyline
           key={`m${i}`}
@@ -240,14 +229,32 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
           pointerEvents="none"
         />
       ))}
+    </>
+  );
+  return (
+    <svg
+      ref={ref}
+      viewBox={vb ? `${vb.x} ${vb.y} ${vb.w} ${vb.h}` : `0 0 ${doc.width} ${doc.height}`}
+      width={width}
+      xmlns="http://www.w3.org/2000/svg"
+      className={className}
+      {...handlers}
+      style={{ display: 'block', overflow: 'visible', background: board ? 'transparent' : (doc.background || '#111'), aspectRatio: vb ? `${vb.w} / ${vb.h}` : `${doc.width} / ${doc.height}`, ...style }}
+    >
+      <defs><clipPath id={clipId}><rect x={0} y={0} width={doc.width} height={doc.height} /></clipPath></defs>
+      {board ? <rect x={0} y={0} width={doc.width} height={doc.height} fill={doc.background || '#111'} pointerEvents="none" /> : null}
+      {/* 作業台では、枠の外にはみ出た所も薄く描く（出力には入らない所）。濃い方は枠で切る */}
+      {board ? <g opacity={0.4} pointerEvents="none" data-pasteboard-ghost>{renderParts(true)}</g> : null}
+      <g clipPath={clip || board ? `url(#${clipId})` : undefined}>
+      {renderParts(false)}
+      {board ? null : marksEl}
       </g>
+      {board ? marksEl : null}
       {board ? (
         <>
-          {/* 枠の外は暗くする（出力には入らない所）。枠の線でサムネの範囲を示す */}
-          <path d={`M${board.x} ${board.y}h${board.w}v${board.h}h${-board.w}Z M0 0v${doc.height}h${doc.width}v${-doc.height}Z`}
-            fillRule="evenodd" fill="rgba(24,24,27,0.62)" pointerEvents="none" data-pasteboard-dim />
-          <rect x={0} y={0} width={doc.width} height={doc.height} fill="none" stroke="rgba(255,255,255,0.55)"
-            strokeWidth={Math.max(1, doc.width / 900)} vectorEffect="non-scaling-stroke" pointerEvents="none" />
+          {/* 枠の線でサムネの範囲（出力される所）を示す */}
+          <rect x={0} y={0} width={doc.width} height={doc.height} fill="none" stroke="rgba(255,255,255,0.7)"
+            strokeWidth={1.5} vectorEffect="non-scaling-stroke" pointerEvents="none" data-pasteboard-frame />
         </>
       ) : null}
       {overlay}
