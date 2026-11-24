@@ -151,6 +151,11 @@ type Props = {
   className?: string;
   /** 見せる範囲（既定はサムネ全体）。部品の一覧の小さな絵で、その部品の所だけを見せる */
   view?: PartBox;
+  /** 部品をサムネの枠で切る（既定 true。出力・案の小さな絵）。部品の一覧の絵は切らずに部品の全部を見せる */
+  clip?: boolean;
+  /** エディターの作業台: サムネの枠の外も見せる範囲（サムネの画素）。枠の外にはみ出た部品も描き、枠の外は暗くする。
+   *  2026-11-24 本人「アスペクト比はあくまで表示するウインドウ。はみ出た場所にも自由に置けるように」 */
+  pasteboard?: PartBox;
   onPointerDown?: React.PointerEventHandler<SVGSVGElement>;
   onPointerMove?: React.PointerEventHandler<SVGSVGElement>;
   onPointerUp?: React.PointerEventHandler<SVGSVGElement>;
@@ -159,7 +164,7 @@ type Props = {
 };
 
 export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas(
-  { doc, width = '100%', marks, onImageState, onMeasure, boxes, partProps, overlay, style, className, view, ...handlers }, ref,
+  { doc, width = '100%', marks, onImageState, onMeasure, boxes, partProps, overlay, style, className, view, clip = true, pasteboard, ...handlers }, ref,
 ) {
   const images = doc.parts.filter((p) => p.type === 'image' && !p.hidden);
   const loadedRef = useRef(new Set<string>());
@@ -178,18 +183,21 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
     onImageState?.(loadedRef.current.size, new Set(images.map((p) => (p as { src: string }).src)).size);
   };
 
+  const vb = pasteboard || view;
+  const board = pasteboard;
   return (
     <svg
       ref={ref}
-      viewBox={view ? `${view.x} ${view.y} ${view.w} ${view.h}` : `0 0 ${doc.width} ${doc.height}`}
+      viewBox={vb ? `${vb.x} ${vb.y} ${vb.w} ${vb.h}` : `0 0 ${doc.width} ${doc.height}`}
       width={width}
       xmlns="http://www.w3.org/2000/svg"
       className={className}
       {...handlers}
-      style={{ display: 'block', overflow: 'visible', background: doc.background || '#111', aspectRatio: view ? `${view.w} / ${view.h}` : `${doc.width} / ${doc.height}`, ...style }}
+      style={{ display: 'block', overflow: 'visible', background: board ? 'transparent' : (doc.background || '#111'), aspectRatio: vb ? `${vb.w} / ${vb.h}` : `${doc.width} / ${doc.height}`, ...style }}
     >
       <defs><clipPath id={clipId}><rect x={0} y={0} width={doc.width} height={doc.height} /></clipPath></defs>
-      <g clipPath={`url(#${clipId})`}>
+      {board ? <rect x={0} y={0} width={doc.width} height={doc.height} fill={doc.background || '#111'} pointerEvents="none" /> : null}
+      <g clipPath={clip && !board ? `url(#${clipId})` : undefined}>
       {doc.parts.map((p) => {
         if (p.hidden) return null;
         const rot = p.rotation || 0;
@@ -233,13 +241,22 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
         />
       ))}
       </g>
+      {board ? (
+        <>
+          {/* 枠の外は暗くする（出力には入らない所）。枠の線でサムネの範囲を示す */}
+          <path d={`M${board.x} ${board.y}h${board.w}v${board.h}h${-board.w}Z M0 0v${doc.height}h${doc.width}v${-doc.height}Z`}
+            fillRule="evenodd" fill="rgba(24,24,27,0.62)" pointerEvents="none" data-pasteboard-dim />
+          <rect x={0} y={0} width={doc.width} height={doc.height} fill="none" stroke="rgba(255,255,255,0.55)"
+            strokeWidth={Math.max(1, doc.width / 900)} vectorEffect="non-scaling-stroke" pointerEvents="none" />
+        </>
+      ) : null}
       {overlay}
     </svg>
   );
 });
 
-/** 部品の見せる範囲: その部品の枠（回転も含む）をサムネの枠で切った所。枠の外に全部出ている時は部品の枠のまま */
-export function partView(doc: ThumbDoc, p: ThumbPart, box: PartBox, full: PartBox = box): PartBox {
+/** 部品が実際に占める範囲（回してあれば回した四角を囲む範囲）。サムネの画素 */
+export function partBounds(p: ThumbPart, box: PartBox, full: PartBox = box): PartBox {
   let { x, y, w, h } = box;
   const rot = ((p.rotation || 0) * Math.PI) / 180;
   if (rot) {
@@ -251,8 +268,12 @@ export function partView(doc: ThumbDoc, p: ThumbPart, box: PartBox, full: PartBo
     const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
     x = Math.min(...xs); y = Math.min(...ys); w = Math.max(...xs) - x; h = Math.max(...ys) - y;
   }
-  const x0 = Math.max(0, x), y0 = Math.max(0, y), x1 = Math.min(doc.width, x + w), y1 = Math.min(doc.height, y + h);
-  if (x1 - x0 >= 4 && y1 - y0 >= 4) { x = x0; y = y0; w = x1 - x0; h = y1 - y0; }
+  return { x, y, w, h };
+}
+
+/** 部品の見せる範囲: その部品の全部（枠の外にはみ出た所も切らない。2026-11-24 本人「はみ出た分が部品一覧からも消える」） */
+export function partView(_doc: ThumbDoc, p: ThumbPart, box: PartBox, full: PartBox = box): PartBox {
+  const { x, y, w, h } = partBounds(p, box, full);
   const pad = Math.max(w, h) * 0.04;
   return { x: x - pad, y: y - pad, w: w + pad * 2, h: h + pad * 2 };
 }
@@ -317,7 +338,7 @@ export function PartPreview({ doc, part, box, className }: { doc: ThumbDoc; part
   const one: ThumbDoc = { ...doc, background: 'transparent', parts: [{ ...part, hidden: false, opacity: Math.max(0.35, part.opacity ?? 1) } as ThumbPart] };
   return (
     <span className={`pointer-events-none block overflow-hidden rounded-sm ${className || ''}`} style={{ background: CHECKER }} data-part-preview={part.id}>
-      <ThumbCanvas doc={one} boxes={{ [part.id]: box }} view={partView(doc, part, shown, box)} width="100%"
+      <ThumbCanvas doc={one} clip={false} boxes={{ [part.id]: box }} view={partView(doc, part, shown, box)} width="100%"
         style={{ width: '100%', height: '100%', aspectRatio: 'auto', background: 'transparent', overflow: 'hidden' }} />
     </span>
   );

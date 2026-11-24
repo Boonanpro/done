@@ -3,11 +3,12 @@
 // サムネの案を並べて増やす帯（2026-11-23 本人「サムネは何パターンか作りたいんで自由に増やせるように。canvaみたいな
 // 使い心地」→ 11/24「どうやって別パターンのサムネ足すん？」）。エディターの下に、その動画の案が小さな絵で並ぶ。
 // - 押すとその案を開く。先頭が表のサムネ（「表」の印）
-// - 「＋」で今の案を複製するか白紙から足す
+// - 「＋」で白紙の案を足す。複製は Ctrl+D（部品を選んでいない時）と案の「…」の「複製する」
+//   （2026-11-24 本人「案を足すというテキストいらない。＋ボタンを押したら普通に白紙を。複製はCtrl+Dと…だけで良い」）
 // - 案の「…」で 表のサムネにする・複製・消す（消すのは控えに回すだけ。最後の1つは消せない）
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Copy, FilePlus2, Loader2, MoreHorizontal, Plus, Star, Trash2 } from 'lucide-react';
+import { Copy, Loader2, MoreHorizontal, Plus, Star, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { ThumbCanvas } from './thumb-canvas';
@@ -27,15 +28,18 @@ function url(path: string, roomId: string) {
   return `/api/v1/production-assets/contents/${path}${path.includes('?') ? '&' : '?'}room_id=${encodeURIComponent(roomId)}`;
 }
 
-export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, beforeSwitch }: {
+export type ThumbPatternActions = { duplicateCurrent: () => void };
+
+export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, beforeSwitch, onActions }: {
   roomId: string; currentId: string; liveDoc: ThumbDoc; link: ThumbPatternLink; compact: boolean;
   /** 別の案へ移る・複製する前に、今の直しを保存しておく */
   beforeSwitch: () => Promise<void>;
+  /** エディターの Ctrl+D（部品を選んでいない時）から今の案を複製できるよう、その操作を渡す */
+  onActions?: (a: ThumbPatternActions | null) => void;
 }) {
   const [items, setItems] = useState<Pattern[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [menu, setMenu] = useState<string | null>(null);
-  const [addOpen, setAddOpen] = useState(false);
   // 帯は横に送れる箱なので、小さな欄は画面に固定して出す（箱の中だと切れる）
   const [at, setAt] = useState<{ left: number; bottom: number }>({ left: 0, bottom: 0 });
   const place = (el: Element) => { const r = el.getBoundingClientRect(); setAt({ left: Math.max(8, Math.min(window.innerWidth - 184, r.right - 176)), bottom: window.innerHeight - r.top + 4 }); };
@@ -58,16 +62,17 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
 
   // 帯の外を押したら開いている小さな欄を閉じる
   useEffect(() => {
-    if (!menu && !addOpen) return;
+    if (!menu) return;
     const onDown = (ev: PointerEvent) => {
-      if (boxRef.current && !boxRef.current.contains(ev.target as Node)) { setMenu(null); setAddOpen(false); }
+      if (boxRef.current && !boxRef.current.contains(ev.target as Node)) setMenu(null);
     };
     window.addEventListener('pointerdown', onDown);
     return () => window.removeEventListener('pointerdown', onDown);
-  }, [menu, addOpen]);
+  }, [menu]);
 
   const add = async (fromId: string | null) => {
-    setAddOpen(false); setMenu(null);
+    if (busy === 'add') return;
+    setMenu(null);
     setBusy('add');
     try {
       await beforeSwitch();
@@ -85,6 +90,14 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
       setBusy(null);
     }
   };
+
+  const addRef = useRef(add);
+  useEffect(() => { addRef.current = add; });
+  useEffect(() => {
+    if (!onActions) return;
+    onActions({ duplicateCurrent: () => void addRef.current(currentId) });
+    return () => onActions(null);
+  }, [onActions, currentId]);
 
   const makePrimary = async (id: string) => {
     setMenu(null);
@@ -145,7 +158,7 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
               {k === 0 ? <span className="flex items-center gap-0.5 rounded bg-amber-400/90 px-1 font-semibold text-black" title="表のサムネ（動画に使う案）"><Star className="h-2.5 w-2.5" />表</span> : null}
               <span className={`min-w-0 flex-1 truncate ${cur ? 'font-semibold' : 'text-muted-foreground'}`}>{p.title || `案${k + 1}`}</span>
               {busy === p.id ? <Loader2 className="h-3 w-3 animate-spin" /> : (
-                <button type="button" title="この案の操作" className="rounded p-0.5 hover:bg-muted" onClick={(e) => { place(e.currentTarget); setAddOpen(false); setMenu((m) => (m === p.id ? null : p.id)); }} data-thumb-pattern-menu>
+                <button type="button" title="この案の操作" className="rounded p-0.5 hover:bg-muted" onClick={(e) => { place(e.currentTarget); setMenu((m) => (m === p.id ? null : p.id)); }} data-thumb-pattern-menu>
                   <MoreHorizontal className="h-3.5 w-3.5" />
                 </button>
               )}
@@ -158,7 +171,7 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
                   </button>
                 ) : null}
                 <button type="button" className="flex w-full items-center gap-1.5 px-2.5 py-2 text-left hover:bg-muted" onClick={() => void add(p.id)} data-thumb-pattern-dup>
-                  <Copy className="h-3.5 w-3.5" />複製する
+                  <Copy className="h-3.5 w-3.5" />複製する<span className="ml-auto text-[10px] text-muted-foreground">{p.id === currentId ? 'Ctrl+D' : ''}</span>
                 </button>
                 <button type="button" disabled={items.length <= 1} className="flex w-full items-center gap-1.5 px-2.5 py-2 text-left text-destructive hover:bg-muted disabled:opacity-40" onClick={() => void remove(p.id)} data-thumb-pattern-remove>
                   <Trash2 className="h-3.5 w-3.5" />消す
@@ -168,23 +181,12 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
           </div>
         );
       })}
-      <div className="relative shrink-0" style={{ width: Math.round(cardW * 0.6) }}>
-        <button type="button" onClick={(e) => { place(e.currentTarget); setMenu(null); setAddOpen((v) => !v); }} disabled={busy === 'add'} title="案を足す"
+      <div className="relative shrink-0 self-start" style={{ width: Math.round(cardW * 0.6) }}>
+        <button type="button" onClick={() => void add(null)} disabled={busy === 'add'} title="白紙の案を足す（複製は Ctrl+D か案の …）"
           className="flex w-full items-center justify-center rounded-md border-2 border-dashed border-border text-muted-foreground hover:border-sky-400 hover:text-sky-500"
           style={{ aspectRatio: '16 / 9' }} data-thumb-pattern-add>
           {busy === 'add' ? <Loader2 className="h-5 w-5 animate-spin" /> : <Plus className="h-5 w-5" />}
         </button>
-        <div className="mt-1 text-center text-[11px] text-muted-foreground">案を足す</div>
-        {addOpen ? (
-          <div className="fixed z-[60] w-44 overflow-hidden rounded-md border border-border bg-popover text-xs shadow-lg" style={{ left: at.left, bottom: at.bottom }}>
-            <button type="button" className="flex w-full items-center gap-1.5 px-2.5 py-2 text-left hover:bg-muted" onClick={() => void add(currentId)} data-thumb-pattern-add-copy>
-              <Copy className="h-3.5 w-3.5" />今の案を複製
-            </button>
-            <button type="button" className="flex w-full items-center gap-1.5 px-2.5 py-2 text-left hover:bg-muted" onClick={() => void add(null)} data-thumb-pattern-add-blank>
-              <FilePlus2 className="h-3.5 w-3.5" />白紙から
-            </button>
-          </div>
-        ) : null}
       </div>
     </div>
   );
