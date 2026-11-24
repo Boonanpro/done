@@ -17,6 +17,7 @@ nodes.tool = '道具';
 nodes.error = 'エラー';
 const field = 'w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900';
 const button = 'rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm font-semibold hover:bg-stone-100 disabled:opacity-40';
+const chip = 'max-w-72 shrink-0 truncate rounded-md border border-stone-300 bg-white px-2 py-1 text-xs font-semibold hover:bg-stone-100 disabled:opacity-40';
 const format = (date: string) => new Date(date).toLocaleString('ja-JP', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'});
 const reason = (error: unknown) => error instanceof ApiError ? String((error.data as {detail?:string})?.detail || '記録を取得できませんでした。')
   : error instanceof Error ? error.message : '記録を取得できませんでした。';
@@ -140,24 +141,26 @@ export function ConversationCircuit({visible, controls, ...props}: MapActions & 
   const selectedItem=items.find(i=>i.id===shown);
   // ボードの時は上の帯だけ細く出し、残りを全部ボードに使う（2026-11-24 本人「表示領域を最大限でかく」）
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-1.5">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-stone-200 bg-white px-2 py-1">
-        <h2 className="flex items-center gap-1.5 text-sm font-bold"><Radio size={15} className="text-emerald-700"/>今動いている依頼</h2>
+      <div className="flex shrink-0 items-center gap-1.5 rounded-xl border border-stone-200 bg-white px-2 py-1">
+        <h2 className="flex shrink-0 items-center gap-1 text-xs font-bold"><Radio size={14} className="text-emerald-700"/>今動いている依頼</h2>
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
         {liveError ? <span role="alert" className="text-xs text-rose-800">{liveError}</span> : !liveItems.length && <span className="text-xs text-stone-500">{loadedLive?'現在はありません':'確認中…'}</span>}
         {liveItems.map(item=><button key={item.room+item.id} disabled={busy} title={[(rooms.find(r=>r.id===item.room)?.title), item.state, item.title].filter(Boolean).join(' · ')}
           aria-pressed={section==='live' && item.id===selected && item.room===room} onClick={()=>watchRequest(item)}
-          className={button+' max-w-72 truncate aria-pressed:border-emerald-700 aria-pressed:bg-emerald-50'}>{item.kind} · {item.title}{item.state==='受付' || item.state.includes('待ち') ? '（'+item.state+'）' : ''}</button>)}
-        <div className="ml-auto flex flex-wrap gap-1">
+          className={chip+' aria-pressed:border-emerald-700 aria-pressed:bg-emerald-50'}>{item.kind} · {item.title}{item.state==='受付' || item.state.includes('待ち') ? '（'+item.state+'）' : ''}</button>)}
+        </div>
+        <div className="flex shrink-0 gap-1">
           {([['trial','依頼を試す',Activity],['history','前の会話を流し直す',HistoryIcon]] as const).map(([id,title,Icon])=>
             <button key={id} disabled={busy} onClick={()=>{mode(section===id?'idle':id);}} aria-pressed={section===id}
-              className={button+' inline-flex items-center gap-1 aria-pressed:border-emerald-700'}><Icon size={14}/>{title}</button>)}
-          {section!=='idle' && <button className={button} disabled={busy} onClick={()=>mode('idle')}>表示を閉じる</button>}
+              className={chip+' inline-flex items-center gap-1 aria-pressed:border-emerald-700'}><Icon size={13}/>{title}</button>)}
+          {section!=='idle' && <button className={chip} disabled={busy} onClick={()=>mode('idle')}>表示を閉じる</button>}
         </div>
       </div>
       {section==='trial' && <div className="flex flex-wrap gap-2">{([['chat','チャット'],['editor','エディターの会話'],['voice','音声（無音）']] as const).map(([id,title])=><button key={id} aria-pressed={channel===id} disabled={busy} onClick={()=>chooseChannel(id)} className={button+' '+(channel===id?'ring-2 ring-emerald-700':'')}>{title}</button>)}</div>}
       {(section==='history' || section==='trial') && <label className="block space-y-1 text-sm font-semibold">会話の部屋<select disabled={busy} className={field} value={room} onChange={e=>changeRoom(e.target.value)}>
         {!available.length&&<option value="">部屋がありません</option>}{available.map(r=><option key={r.id} value={r.id}>{r.title}</option>)}</select></label>}
       {error && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-900">{error}</p>}
-      {section==='idle'?<div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-stone-200">{props.renderDiagram()}</div>:<div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain">{section==='history' || section==='live'?<>
+      {section==='idle'?<div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-stone-200">{props.renderDiagram()}</div>:<div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain">{section==='history' || section==='live'?<>
         {origin && <p className="text-sm">依頼が届きました。受付の記録を待っています。</p>}
         {historyError && <p role="alert" className="text-sm text-rose-800">{historyError}</p>}
         {section==='history' && <div className="flex flex-wrap items-end gap-3">

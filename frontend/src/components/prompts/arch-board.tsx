@@ -390,7 +390,7 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
             const b = frameOf(id);
             return <div key={id} className="group absolute rounded-2xl border-2 border-dashed border-stone-300 bg-stone-50/80" style={{ left: b.x, top: b.y, width: b.w, height: b.h }}>
               <span data-frame-grip={id} className="absolute left-3 top-1.5 cursor-move text-[13px] font-bold text-stone-600">{f.name}</span>
-              {f.line && <p className="absolute left-3.5 right-3.5 top-[190px] text-[12px] text-stone-500">{f.line}</p>}
+              {f.line && <p className="absolute bottom-2 left-3.5 right-3.5 text-[12px] text-stone-500">{f.line}</p>}
               <span data-resize={'frame:' + id} className="absolute bottom-0 right-0 hidden cursor-nwse-resize rounded-sm border border-stone-400 bg-white group-hover:block"
                 style={{ width: handle, height: handle, transform: 'translate(50%,50%)' }} />
             </div>;
@@ -452,7 +452,7 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
                     </button>}
                   </>}
                 </div>}
-                {n.id === 'reply' && <div data-reply className="absolute inset-x-0 max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-[15px] leading-relaxed" style={{ top: b.h + 8 }}
+                {n.id === 'reply' && <div data-reply className="absolute inset-x-0 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-[15px] leading-relaxed" style={{ top: b.h + 8 }}
                   onWheel={e => e.stopPropagation()}>
                   {trace?.reply || '返事の記録がある依頼を選ぶと、ここに本文が出ます。'}
                 </div>}

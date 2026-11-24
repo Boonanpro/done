@@ -595,7 +595,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   };
 
   // 構成図のボード。いつもの時は左の欄いっぱい、依頼の流れを再生する時はその枠の中で決まった高さ
-  const renderDiagram = (trace?: Trace) => <div className={trace ? 'h-[min(70dvh,760px)]' : 'h-full'}>
+  const renderDiagram = (trace?: Trace) => <div className={trace ? 'h-[min(70dvh,760px)]' : 'absolute inset-0'}>
     <ArchBoard trace={trace} skills={skills} onSkills={(name, pid) => navigate({ place: 'reader-' + name, id: pid })} counts={counts}
       active={place === 'video' ? 'v-owner' : library ? 'skills' : node?.id || ''} glow={work?.state === 'editing' ? workNode : ''}
       onPick={p => { navigate({ place: p }); }}
@@ -638,7 +638,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           <button type="button" aria-label="閉じる" onClick={() => setHidWork(workKey)} className="rounded p-1 text-violet-800 hover:bg-violet-100"><X className="h-4 w-4" /></button>
         </div>
       ) : null}
-      <div ref={circuit} className="flex min-h-[82dvh] flex-1 flex-col lg:min-h-0"><ConversationCircuit controls={trial} visible onEdit={p => { if (navigate({place:p})) requestAnimationFrame(() => list.current?.scrollIntoView({block:"start"})); }} renderDiagram={renderDiagram}
+      <div ref={circuit} className="flex min-h-[calc(100dvh-12px)] flex-1 flex-col lg:min-h-0"><ConversationCircuit controls={trial} visible onEdit={p => { if (navigate({place:p})) requestAnimationFrame(() => list.current?.scrollIntoView({block:"start"})); }} renderDiagram={renderDiagram}
         onPrompt={(pid, source) => {
           const owner = NODES.find(n => n.id === source && n.prompts?.includes(pid)) || NODES.find(n => n.prompts?.includes(pid));
           navigate({place: pid.startsWith('skill/') ? 'skills' : owner?.id || source, id: pid});
