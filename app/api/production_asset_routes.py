@@ -9519,7 +9519,7 @@ class EditorInstructionRequest(BaseModel):
 @router.post("/contents/{content_id}/instructions")
 async def send_editor_instruction(content_id: str, data: EditorInstructionRequest,
                                   current_user: TokenData = Depends(get_current_user)):
-    """ピン・ペン・枠・素材の枠の指示1つを、作品の部屋の並行作業として始める。"""
+    """クリップへのコメント・ペン・枠・素材の枠の指示1つを、作品の部屋の並行作業として始める。"""
     _room_dir(data.room_id)
     from app.services import editor_instructions
     try:
