@@ -167,3 +167,54 @@ def test_send_starts_quiet(asset_root, job_root, monkeypatch):
     out = asyncio.run(ei.send('u1', 'lib', 'c1', {'id': 'a', 'kind': 'marker', 'start': 1, 'note': '音を足して'}))
     assert out['job_id'] == 'j9' and seen['quiet'] is True and seen['room_id'] == 'work-room'
     assert 'チャットには出ない' in seen['task']
+
+
+def test_clip_comment_tells_dan_which_clips_and_earlier_comments(asset_root, job_root, monkeypatch):
+    """11/25 本人「ピンという項目いらない。クリップを選択したらそれに対してコメントできるようにして修正指示が出せるように」。
+    選んだクリップの中身（id・段・文字・素材の区間）と、同じクリップに前に送ったコメントの結果が作業に渡る。"""
+    import asyncio
+    from app.services import editor_instructions as ei, editor_rooms, parallel_job_runner
+    seq = {'tracks': [
+        {'id': 't0', 'type': 'video', 'clips': [{'id': 'v1', 'asset_id': 'a1', 'timeline_start': 10, 'timeline_end': 14,
+                                                'source_start': 2, 'source_end': 6}]},
+        {'id': 't1', 'type': 'caption', 'clips': [{'id': 'c9', 'text': '24歳の夏', 'timeline_start': 20, 'timeline_end': 21.5}]},
+    ]}
+    old = {'id': 'cc_old', 'kind': 'clip', 'intent': 'comment', 'start': 20, 'end': 21.5, 'note': '明朝体にして',
+           'data': {'clip_ids': ['c9'], 'job_id': J1}}
+    other = {'id': 'cc_other', 'kind': 'clip', 'note': '別のクリップ', 'data': {'clip_ids': ['v1']}}
+    _room(asset_root, 'lib', [{'id': 'a1', 'kind': 'video', 'filename': 'S24録画.mp4'}],
+          [{'id': 'c1', 'title': 't', 'timeline': {'sequence': seq, 'annotations': [old, other]}}])
+    _job(job_root, J1, task=ei.build_task(old, 't', None), result='明朝体に戻しました。')
+    seen = {}
+
+    async def fake_room(user_id, asset_room_id, content_id):
+        return {'room_id': 'work-room'}
+
+    async def fake_start(room_id, user_id, task, **kw):
+        seen.update(kw, task=task)
+        return {'id': 'j9', 'state': 'queued'}
+
+    monkeypatch.setattr(editor_rooms, 'ensure_room', fake_room)
+    monkeypatch.setattr(parallel_job_runner, 'start', fake_start)
+    monkeypatch.setattr(ei, 'frame_path', lambda *a: None)
+    ann = {'id': 'cc_new', 'kind': 'clip', 'intent': 'comment', 'start': 20, 'end': 21.5, 'note': 'もっと大きく',
+           'data': {'clip_ids': ['c9'], 'at': 20.6}}
+    asyncio.run(ei.send('u1', 'lib', 'c1', ann))
+    task = seen['task']
+    assert '選んだクリップへのコメント' in task and '「もっと大きく」' in task
+    assert 'id=c9' in task and '24歳の夏' in task
+    assert '「明朝体にして」→ 明朝体に戻しました。' in task and '別のクリップ' not in task
+    assert seen['title'].startswith('コメント')
+    # 動画のクリップは素材の名前と使っている区間まで渡る
+    lines = ei.clip_lines('lib', {'timeline': {'sequence': seq}}, {'data': {'clip_ids': ['v1', 'gone']}})
+    assert 'S24録画.mp4' in lines[0] and '2.00〜6.00秒' in lines[0] and '見当たらない' in lines[1]
+
+
+def test_clip_comment_frame_is_saved_without_marks(tmp_path):
+    from PIL import Image
+    from app.services.editor_instructions import _draw_marks
+    src = tmp_path / 'f.png'
+    Image.new('RGB', (32, 18), (10, 20, 30)).save(src)
+    out = tmp_path / 'o.png'
+    assert _draw_marks(src, out, {'kind': 'clip', 'data': {'clip_ids': ['x']}})
+    assert Image.open(out).getpixel((5, 5)) == (10, 20, 30)

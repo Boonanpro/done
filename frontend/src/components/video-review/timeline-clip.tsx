@@ -56,8 +56,24 @@ type Props = {
   sourceStart?: number;
   sourceEnd?: number;
   volume?: number;
+  /** このクリップに送ったコメント（直しの指示）の進み具合。右上の吹き出しの色になる */
+  comment?: ClipCommentState;
   fns: React.MutableRefObject<ClipBoxFns>;
 };
+
+export type ClipCommentState = 'active' | 'done' | 'failed';
+
+/** クリップの右上の吹き出し。コメントを送ったクリップに出る（作業中=黄の点滅・済み=緑・止まった=赤） */
+function CommentDot({ state }: { state: ClipCommentState }) {
+  const cls = state === 'active' ? 'animate-pulse bg-amber-400 text-black' : state === 'done' ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white';
+  const tip = state === 'active' ? 'コメントをダンが直しています' : state === 'done' ? 'コメントをダンが直しました' : 'コメントの作業が止まりました';
+  return (
+    <span data-clip-comment={state} title={tip}
+      className={`pointer-events-none absolute right-0.5 top-0.5 z-[2] flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-[8px] leading-none shadow ${cls}`}>
+      ✎
+    </span>
+  );
+}
 
 /** An editable scene's texts as rows inside its clip: where each one is on screen. Pressing a row
  *  selects the clip (the press goes on to the clip) and tells the side panel which text to open. */
@@ -309,7 +325,7 @@ function VolumeLine({ clipId, volume, fns, onLive }: {
   );
 }
 
-function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip, narrow, selected, linkedSelected, touch, appear, vanish, title, peaksUrl, sourceStart = 0, sourceEnd = 0, volume = 1, fns }: Props) {
+function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip, narrow, selected, linkedSelected, touch, appear, vanish, title, peaksUrl, sourceStart = 0, sourceEnd = 0, volume = 1, comment, fns }: Props) {
   const look = CLIP_KIND_STYLE[kind];
   const isAudio = kind === 'voice' || kind === 'bgm' || kind === 'se';
   const [liveVol, setLiveVol] = useState<number | null>(null);
@@ -341,12 +357,15 @@ function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip,
         onPointerDown={(event) => fns.current.startDrag(event, clipId, 'move')}
         onDoubleClick={(event) => { event.stopPropagation(); fns.current.focusClip(clipId); }}
         onContextMenu={(event) => fns.current.openMenu(event, clipId)}
-      />
+      >
+        {comment ? <CommentDot state={comment} /> : null}
+      </div>
     );
   }
   const showThumb = !!thumb && widthPx >= 40;
   return (
     <div data-clip-id={clipId} data-clip-kind={kind} className={cls} style={style} title={title} onContextMenu={(event) => fns.current.openMenu(event, clipId)}>
+      {comment ? <CommentDot state={comment} /> : null}
       {isAudio && peaksUrl && sourceEnd > sourceStart ? (
         <Waveform url={peaksUrl} sourceStart={sourceStart} sourceEnd={sourceEnd} widthPx={widthPx} volume={vol} dark={look.dark} />
       ) : null}

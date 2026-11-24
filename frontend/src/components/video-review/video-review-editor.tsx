@@ -20,7 +20,6 @@ import {
   VolumeX,
   ChevronDown,
   ChevronRight,
-  MapPin,
   Maximize,
   Maximize2,
   Minimize,
@@ -39,7 +38,7 @@ import {
   Undo2,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipKind } from './timeline-clip';
+import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipCommentState, type ClipKind } from './timeline-clip';
 import { visualLane } from './lane-order';
 import { perfLog } from '@/lib/perf-log';
 import { startEditorFeel } from './editor-feel';
@@ -80,7 +79,8 @@ type Point = { x: number; y: number };
 
 export type ReviewAnnotation = {
   id: string;
-  kind: 'rect' | 'freehand' | 'marker' | 'note';
+  // clip = 選んだクリップに付けたコメント（data.clip_ids。2026-11-25 本人「ピンはいらない。クリップを選んでコメントして直しの指示を出したい」）
+  kind: 'rect' | 'freehand' | 'marker' | 'note' | 'clip';
   intent: Intent | string;
   label?: string | null;
   note?: string | null;
@@ -1232,6 +1232,8 @@ export function VideoReviewEditor({
     }
 
     for (const a of annotations) {
+      // クリップへのコメントは段に置かない（コメントしたクリップの右上の印と、選んだ時の欄に出す）
+      if (a.kind === 'clip') continue;
       const zone = trackForIntent(a.intent);
       // Annotations carry their own lane via data.layer (default 5 = a lane above the clips), so
       // they can be dragged up/down between lanes like clips. Falls back to 5 for legacy ones.
@@ -2316,9 +2318,9 @@ export function VideoReviewEditor({
   // 送信されたタイミングから実行が順次始まっていく。別々に始まるけど、エディターの中のダンは全体を把握している」）──
   // 1つ送るごとに、右の「ダンと制作」の部屋の並行作業が1つ始まる（app/services/editor_instructions.py）。
   // 指示はタイムラインに残り、色と札で「順番待ち・作業中・済み」が分かる。済んだ指示は本人が消す。
-  const sendInstruction = useCallback(async (ann: ReviewAnnotation) => {
-    if (!roomId || !contentId) { toast.error('この画面からは指示を送れません'); return; }
-    if (!(ann.note || '').trim()) { toast.error('ダンにやってほしいことを書いてください'); return; }
+  const sendInstruction = useCallback(async (ann: ReviewAnnotation): Promise<boolean> => {
+    if (!roomId || !contentId) { toast.error('この画面からは指示を送れません'); return false; }
+    if (!(ann.note || '').trim()) { toast.error('ダンにやってほしいことを書いてください'); return false; }
     setSendingId(ann.id);
     try {
       const res = await fetch(`/api/v1/production-assets/contents/${encodeURIComponent(contentId)}/instructions`, {
@@ -2331,8 +2333,10 @@ export function VideoReviewEditor({
       setAnnotations((prev) => prev.map((a) => (a.id === ann.id
         ? { ...a, data: { ...(a.data || {}), job_id: out.job_id, sent_at: new Date().toISOString() } }
         : a)));
+      return true;
     } catch (error) {
       toast.error('指示を送れませんでした', { description: String(error).slice(0, 180) });
+      return false;
     } finally {
       setSendingId(null);
     }
@@ -2371,6 +2375,70 @@ export function VideoReviewEditor({
     void poll();
     return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
   }, [instrJobIdsKey]);
+
+  // ── 選んだクリップへのコメント（2026-11-25 本人「ピンという項目いらない。代わりにクリップを選択したらそれに対して
+  // コメントできるようにして修正指示が出せるように」）──
+  // コメント1つ = kind 'clip' の指示1つ（data.clip_ids に選んでいたクリップ、data.at に絵を撮る時刻）。送ると
+  // ほかの指示と同じく作品の部屋の並行作業が1つ始まり（sendInstruction）、進み具合はクリップの右上の印と、選んだ時の欄に出る。
+  const [clipCommentDraft, setClipCommentDraft] = useState<{ key: string; text: string }>({ key: '', text: '' });
+  const [clipCommentSending, setClipCommentSending] = useState(false);
+  const clipCommentsByClip = useMemo(() => {
+    const m = new Map<string, ReviewAnnotation[]>();
+    for (const a of annotations) {
+      if (a.kind !== 'clip') continue;
+      for (const id of ((a.data as { clip_ids?: string[] } | undefined)?.clip_ids || [])) {
+        const list = m.get(String(id)) || [];
+        list.push(a);
+        m.set(String(id), list);
+      }
+    }
+    return m;
+  }, [annotations]);
+  const clipCommentState = useMemo(() => {
+    const m = new Map<string, ClipCommentState>();
+    for (const [id, list] of clipCommentsByClip) {
+      const jobs = list.map((a) => instrJobOf(a, instrJobs)).filter((j): j is InstrJob => !!j);
+      if (!jobs.length) continue;
+      m.set(id, jobs.some((j) => j.active) ? 'active' : jobs[jobs.length - 1].state === 'completed' ? 'done' : 'failed');
+    }
+    return m;
+  }, [clipCommentsByClip, instrJobs]);
+  const sendClipComment = useCallback(async (clipIds: string[], text: string): Promise<boolean> => {
+    const note = text.trim();
+    if (!note) { toast.error('ダンに直してほしいことを書いてください'); return false; }
+    const clips = clipIds
+      .map((id) => allSequenceClips.find((c) => c.id === id))
+      .filter((c): c is SequenceClip => !!c);
+    if (!clips.length) return false;
+    const start = Math.min(...clips.map((c) => c.timeline_start));
+    const end = Math.max(...clips.map((c) => c.timeline_end));
+    const now = liveTimeRef.current;
+    const at = now >= start && now <= end ? now : (start + end) / 2;
+    const ann: ReviewAnnotation = {
+      id: `cc_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      kind: 'clip',
+      intent: 'comment',
+      label: 'comment',
+      note,
+      start: Number(start.toFixed(2)),
+      end: Number(end.toFixed(2)),
+      data: { clip_ids: clips.map((c) => c.id), at: Number(at.toFixed(2)) },
+      created_at: new Date().toISOString(),
+    };
+    setClipCommentSending(true);
+    setAnnotations((prev) => [...prev, ann]);
+    try {
+      const ok = await sendInstruction(ann);
+      // 送れなかったコメントは残さない（書いた言葉は欄に残したまま）
+      if (!ok) setAnnotations((prev) => prev.filter((a) => a.id !== ann.id));
+      return ok;
+    } finally {
+      setClipCommentSending(false);
+    }
+  }, [allSequenceClips, sendInstruction]);
+  const removeClipComment = useCallback((id: string) => {
+    setAnnotations((prev) => prev.filter((a) => a.id !== id));
+  }, []);
 
   // Per-clip 実行 (生成/ダンに指示): dispatch this one instruction clip to Dan and reflect it.
   const [executingId, setExecutingId] = useState<string | null>(null);
@@ -4518,7 +4586,7 @@ export function VideoReviewEditor({
                                     />
                                     <span className="min-w-0 flex-1 truncate px-1">
                                       {ijob ? <b className="mr-1">{instrBadge(ijob) === '済み' ? '✓' : instrBadge(ijob)}</b> : null}
-                                      {a.intent === 'comment' ? ({ marker: 'ピン', freehand: 'ペン', rect: '枠' } as Record<string, string>)[a.kind] || '指示' : itemTypeBadge(item.itemType)}
+                                      {a.intent === 'comment' ? ({ marker: 'ピン', freehand: 'ペン', rect: '枠', clip: 'コメント' } as Record<string, string>)[a.kind] || '指示' : itemTypeBadge(item.itemType)}
                                       {a.note && a.intent !== 'blur' ? `：${a.note}` : ''}
                                     </span>
                                     {a.note ? (
@@ -4602,6 +4670,7 @@ export function VideoReviewEditor({
                                   touch={danTouch.ids.includes(clip.id)}
                                   appear={danTouch.appear.includes(clip.id)}
                                   vanish={danTouch.vanish.includes(clip.id)}
+                                  comment={clipCommentState.get(clip.id)}
                                   title={`${badge}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}${isVideo && clip.asset_id ? ' ／ 右クリックで再生位置を静止画に' : ''}`}
                                   fns={clipFns}
                                 />
@@ -5743,6 +5812,56 @@ export function VideoReviewEditor({
                         : '最後に動かした人: 記録なし（記録を始める前の変更）'}
                     </div>
                   ) : null}
+                  {roomId && contentId ? (() => {
+                    const ids = selectedSequenceClipIds.length > 1 ? selectedSequenceClipIds : [selectedSequenceClip.id];
+                    const key = ids.join(',');
+                    const text = clipCommentDraft.key === key ? clipCommentDraft.text : '';
+                    const seen = new Set<string>();
+                    const history = ids.flatMap((id) => clipCommentsByClip.get(id) || [])
+                      .filter((a) => (seen.has(a.id) ? false : (seen.add(a.id), true)))
+                      .slice(-5);
+                    const send = async () => {
+                      if (clipCommentSending) return;
+                      if (await sendClipComment(ids, text)) setClipCommentDraft({ key, text: '' });
+                    };
+                    return (
+                      <div className="space-y-1.5 rounded-md border border-sky-400/50 bg-sky-500/5 p-2" data-testid="clip-comment">
+                        <div className="text-xs font-medium">{ids.length > 1 ? `選んだ${ids.length}個のクリップにコメント` : 'このクリップにコメント'}</div>
+                        {history.map((a) => {
+                          const job = instrJobOf(a, instrJobs);
+                          return (
+                            <div key={a.id} data-clip-comment-row className={`rounded border p-1.5 text-[11px] ${!job ? 'border-border' : job.active ? 'border-amber-400/60 bg-amber-500/10' : job.state === 'completed' ? 'border-emerald-400/60 bg-emerald-500/10' : 'border-red-400/60 bg-red-500/10'}`}>
+                              <div className="flex items-start justify-between gap-1">
+                                <div className="min-w-0 flex-1 whitespace-pre-wrap text-foreground">{a.note}</div>
+                                <button type="button" className="shrink-0 text-[10px] text-muted-foreground hover:text-red-400" title="このコメントを消す（直した結果は残ります）" onClick={() => removeClipComment(a.id)}>消す</button>
+                              </div>
+                              <div className="mt-0.5 flex items-center gap-1 font-medium">
+                                {job?.active ? <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" /> : null}
+                                {!job ? '送っています…' : job.active ? (job.state === 'running' ? 'ダンが作業中' : '順番待ち') : job.state === 'completed' ? '✓ ダンが直しました' : `止まりました（${job.label}）`}
+                              </div>
+                              {job?.active && job.progress ? <div className="mt-0.5 text-muted-foreground">{job.progress}</div> : null}
+                              {job && !job.active && job.result ? <div className="mt-0.5 line-clamp-4 whitespace-pre-wrap text-muted-foreground">{job.result}</div> : null}
+                            </div>
+                          );
+                        })}
+                        <Textarea
+                          key={`cc-${key}`}
+                          value={text}
+                          onChange={(e) => setClipCommentDraft({ key, text: e.target.value })}
+                          onKeyDown={(e) => {
+                            // Ctrl(⌘)+Enter で送る。文字を打っている間はタイムラインのキー操作に渡さない
+                            e.stopPropagation();
+                            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send(); }
+                          }}
+                          rows={3}
+                          placeholder={history.length ? '足りない所を書き足して、もう一度送れます' : 'このクリップをどう直してほしいか（例: もっと大きく出して。文字は明朝体に）'}
+                        />
+                        <Button size="sm" className="w-full" disabled={clipCommentSending || !text.trim()} onClick={() => void send()}>
+                          {clipCommentSending ? '送っています…' : 'ダンに送る（Ctrl+Enter）'}
+                        </Button>
+                      </div>
+                    );
+                  })() : null}
                   <Input
                     value={selectedSequenceClip.label || ''}
                     onChange={(e) => updateSelectedSequenceClip({ label: e.target.value })}
@@ -6291,10 +6410,6 @@ export function VideoReviewEditor({
                 <Button variant={tool === 'select' ? 'default' : 'outline'} size="sm" title="選択・移動" onClick={() => setTool('select')}>
                   <MousePointer2 className="h-4 w-4" />
                   <span className="hidden sm:inline">選択</span>
-                </Button>
-                <Button variant={tool === 'marker' ? 'default' : 'outline'} size="sm" title="ピン：プレビューの指したい所を押して、ダンにやってほしいことを書いて送る（再生位置に1秒の指示が置かれる）" onClick={() => setTool('marker')}>
-                  <MapPin className="h-4 w-4" />
-                  <span className="hidden sm:inline">ピン</span>
                 </Button>
                 <Button variant={tool === 'freehand' ? 'default' : 'outline'} size="sm" title="ペン：プレビューに線や丸を描いて、言葉を足して送る。ダンには描いた線ごとその場面の絵が届く" onClick={() => setTool('freehand')}>
                   <Pencil className="h-4 w-4" />
