@@ -58,6 +58,26 @@
    "kind": "text"
   },
   {
+   "id": "call/screen",
+   "title": "共有した画面を見て話す",
+   "place": "voice",
+   "reader": "音声のダン",
+   "when": "本人が通話中に「画面を見せる」で画面を共有した時",
+   "source": "app/services/voice_owner_screen.py",
+   "why": "「これ」「ここ」と画面の物を指して話した時に、今の画面の絵と発言を一緒に読むため。",
+   "kind": "text"
+  },
+  {
+   "id": "call/screen-ended",
+   "title": "画面の共有が止まった時",
+   "place": "voice",
+   "reader": "音声のダン",
+   "when": "本人が通話中に画面の共有を止めた時",
+   "source": "app/services/voice_owner_screen.py",
+   "why": "止めた後に、前の画面を見えているつもりで答えないため。",
+   "kind": "text"
+  },
+  {
    "id": "call/persona",
    "title": "通話のダンが、自分は誰かを知る文",
    "place": "voice",

@@ -209,6 +209,14 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
                 context[-1]['sketch_reference'] = reference
                 if item.get('name') == 'steer_job' and args.get('kind', 'update') == 'update':
                     args = {**args, 'instruction': str(args.get('instruction') or '') + reference}
+        screen = getattr(dialogue, 'owner_screen', None)
+        if screen and screen.sharing() and item.get('name') in {'start_work', 'steer_job'}:
+            context = [dict(t) for t in context]
+            if context:
+                reference = screen.handoff()
+                context[-1]['screen_reference'] = reference
+                if item.get('name') == 'steer_job' and args.get('kind', 'update') == 'update':
+                    args = {**args, 'instruction': str(args.get('instruction') or '') + reference}
         output = (search_output(early, str(args.get('query') or '')) if item.get('name') == 'web_search' else early) if early is not None else await run_function(item.get('name'), args, user_id, room_id, context, speak=speak)
     except Exception as exc:
         output = {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
@@ -771,6 +779,8 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
             state = voice_live.get_session(session_id, user_id)
             if own and state is not None:
                 dialogue.sketch = state['sketch'] = voice_sketch.Sketch(dialogue, send)
+                from app.services import voice_owner_screen   # the screen he chose to show (call-owner-screen.tsx)
+                dialogue.owner_screen = state['owner_screen'] = voice_owner_screen.Screen(dialogue, send)
                 state['dialogue'] = dialogue   # the screens tell it which room the owner looks at (/live/backend/focus)
             pending = {}
             from app.services.voice_interruption import Interruption

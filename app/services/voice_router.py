@@ -323,6 +323,10 @@ class Router:
         if sketch and sketch.frames:
             # The text-only fast routes cannot resolve a pointing gesture. The normal visual backend has the same work tools.
             return 'other', '', '', 1.0, 0
+        screen = getattr(self.dialogue, 'owner_screen', None)
+        if screen and screen.points(self.request_words()):
+            # 「これ何？」 on a shared screen: only the backend model sees the picture (voice_owner_screen)
+            return 'other', '', '', 1.0, 0
         running = self.running()
         early = self.early_route(running)
         if early is not None:
@@ -618,6 +622,11 @@ class Router:
         sketch = getattr(self.dialogue, 'sketch', None)
         if sketch and sketch.frames:
             given[0]['content'] = [{'type': 'input_text', 'text': given[0]['content']}, *sketch.parts()]
+        screen = getattr(self.dialogue, 'owner_screen', None)
+        if screen and screen.sharing():
+            if isinstance(given[0]['content'], str):
+                given[0]['content'] = [{'type': 'input_text', 'text': given[0]['content']}]
+            given[0]['content'] = [*given[0]['content'], *screen.parts()]
         previous = None
 
         async def speak(text):   # a later result of a function goes into the call as spoken commentary
@@ -798,6 +807,11 @@ async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=Fal
         task += sketch.handoff()
     else:
         task += next((t['sketch_reference'] for t in reversed(turns) if t.get('sketch_reference')), '')
+    screen = getattr(dialogue, 'owner_screen', None)
+    if screen and screen.sharing():
+        task += screen.handoff()
+    else:
+        task += next((t['screen_reference'] for t in reversed(turns) if t.get('screen_reference')), '')
     return task, editor, frames
 
 

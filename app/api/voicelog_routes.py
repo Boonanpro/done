@@ -313,6 +313,45 @@ async def receive_sketch(room_id: str, body: SketchFrame, request: Request):
         raise HTTPException(422, '絵を読み込めませんでした') from exc
 
 
+class ScreenFrame(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+    number: int = Field(ge=0)
+    jpeg: str = Field(min_length=4, max_length=1500000)
+    surface: str = Field(default='', max_length=20)
+
+
+class ScreenStop(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+
+
+def _owner_screen(room_id, session_id, request):
+    from app.services import voice_live
+    state = voice_live.get_session(session_id, _get_user(request).user_id)
+    if not state or state.get('room_id') != room_id:
+        raise HTTPException(403, 'この部屋の音声接続を確認できません')
+    return state.get('owner_screen')
+
+
+@router.post('/live/backend/screen/{room_id}')
+async def receive_owner_screen(room_id: str, body: ScreenFrame, request: Request):
+    """A picture of the screen the owner shares during the call (components/voice/call-owner-screen.tsx), sent when it
+    changed. The call's backend model reads the newest one when he speaks (app/services/voice_owner_screen.py)."""
+    from app.services import voice_router
+    screen = _owner_screen(room_id, body.session_id, request)
+    if screen is None or not voice_router.enabled():
+        raise HTTPException(409, '画面を受け取る準備ができていません')
+    try:
+        return {'accepted': await screen.receive(body.number, body.jpeg, body.surface)}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(422, '画面の絵を読み込めませんでした') from exc
+
+
+@router.post('/live/backend/screen/{room_id}/stop')
+async def stop_owner_screen(room_id: str, body: ScreenStop, request: Request):
+    screen = _owner_screen(room_id, body.session_id, request)
+    return {'stopped': bool(screen is not None and await screen.stop())}
+
+
 class LiveFocus(BaseModel):
     session_id: str = Field(min_length=1, max_length=200)
     room_id: str = Field(min_length=1, max_length=80)
