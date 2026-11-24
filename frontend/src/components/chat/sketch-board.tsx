@@ -3,13 +3,35 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { PointerEvent } from 'react';
-import { Circle, Eraser, ImagePlus, Mic, Pencil, Square, Undo2, X } from 'lucide-react';
+import { Circle, Eraser, ImagePlus, Mic, Minus, Pencil, Plus, Square, Undo2, X } from 'lucide-react';
 import type { ThumbMark } from '@/components/thumbnail/thumb-doc';
 import { QUIET_SPEECH_MIC } from '@/components/voice/quiet-speech';
 
 const WIDTH = 1280, HEIGHT = 800;
 const colors = [['墨', '#292c36'], ['赤', '#c83d46'], ['青', '#315dc5'], ['緑', '#258366']];
 type Mark = ThumbMark & { erase?: boolean };
+type View = { x: number; y: number; scale: number };
+const initialView: View = { x: 0, y: 0, scale: 1 };
+
+function wholeBoard(marks: Mark[]): View {
+  let left = 0, top = 0, right = WIDTH, bottom = HEIGHT;
+  for (const mark of marks) {
+    if (mark.erase) continue;
+    const radius = mark.width / 2;
+    for (const [x, y] of mark.points) {
+      left = Math.min(left, x - radius); top = Math.min(top, y - radius);
+      right = Math.max(right, x + radius); bottom = Math.max(bottom, y + radius);
+    }
+  }
+  const scale = Math.min(WIDTH / (right - left), HEIGHT / (bottom - top));
+  return { scale, x: (WIDTH - (right + left) * scale) / 2, y: (HEIGHT - (bottom + top) * scale) / 2 };
+}
+
+function canvasPoint(el: HTMLCanvasElement, x: number, y: number): [number, number] {
+  const box = el.getBoundingClientRect();
+  return [(x - box.left) * WIDTH / box.width, (y - box.top) * HEIGHT / box.height];
+}
+
 type Props = {
   room: string;
   session: string | null;
@@ -36,6 +58,10 @@ export function SketchBoard({ room, session, voiceOpen, onVoice, onAttach, onClo
   const image = useRef<HTMLImageElement | null>(null);
   const marks = useRef<Mark[]>([]);
   const active = useRef<number | null>(null);
+  const view = useRef<View>(initialView);
+  const pan = useRef<{ id: number; x: number; y: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+  const [zoomScale, setZoomScale] = useState(1);
   const version = useRef(0);
   const input = useRef<HTMLInputElement>(null);
   const alive = useRef(true);
@@ -53,8 +79,8 @@ export function SketchBoard({ room, session, voiceOpen, onVoice, onAttach, onClo
   const [error, setError] = useState('');
   const [discard, setDiscard] = useState(false);
 
-  function draw() {
-    const ctx = canvas.current?.getContext('2d');
+  function composite(target: HTMLCanvasElement | null, layer: HTMLCanvasElement | null, camera: View) {
+    const ctx = target?.getContext('2d');
     if (!ctx) return;
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -62,9 +88,16 @@ export function SketchBoard({ room, session, voiceOpen, onVoice, onAttach, onClo
       const img = image.current;
       const scale = Math.min(WIDTH / img.naturalWidth, HEIGHT / img.naturalHeight);
       const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+      ctx.save();
+      ctx.setTransform(camera.scale, 0, 0, camera.scale, camera.x, camera.y);
       ctx.drawImage(img, (WIDTH - w) / 2, (HEIGHT - h) / 2, w, h);
+      ctx.restore();
     }
-    if (ink.current) ctx.drawImage(ink.current, 0, 0);
+    if (layer) ctx.drawImage(layer, 0, 0);
+  }
+
+  function draw() {
+    composite(canvas.current, ink.current, view.current);
     version.current++;
   }
 
@@ -76,22 +109,45 @@ export function SketchBoard({ room, session, voiceOpen, onVoice, onAttach, onClo
     draw();
   }
 
-  function undo() {
-    marks.current.pop();
-    const ctx = ink.current?.getContext('2d');
-    ctx?.clearRect(0, 0, WIDTH, HEIGHT);
+  function renderInk(layer: HTMLCanvasElement | null, camera: View) {
+    const ctx = layer?.getContext('2d');
+    if (!ctx) return;
+    ctx.resetTransform();
+    ctx.clearRect(0, 0, WIDTH, HEIGHT);
+    ctx.setTransform(camera.scale, 0, 0, camera.scale, camera.x, camera.y);
     for (const mark of marks.current) {
-      if (!ctx) break;
       ctx.globalCompositeOperation = mark.erase ? 'destination-out' : 'source-over';
       paint(ctx, mark);
     }
+  }
+
+  function setView(camera: View) {
+    view.current = camera;
+    renderInk(ink.current, camera);
+    setZoomScale(camera.scale);
+    draw();
+  }
+
+  function zoom(factor: number, x = WIDTH / 2, y = HEIGHT / 2) {
+    const prev = view.current;
+    const scale = Math.max(0.125, Math.min(8, prev.scale * factor));
+    if (scale === prev.scale) return;
+    const ratio = scale / prev.scale;
+    setView({ scale, x: x + (prev.x - x) * ratio, y: y + (prev.y - y) * ratio });
+  }
+
+  function undo() {
+    if (active.current !== null) return;
+    marks.current.pop();
     setCount(marks.current.length);
+    renderInk(ink.current, view.current);
     draw();
   }
 
   function point(e: PointerEvent<HTMLCanvasElement>): [number, number] {
-    const box = e.currentTarget.getBoundingClientRect();
-    return [(e.clientX - box.left) * WIDTH / box.width, (e.clientY - box.top) * HEIGHT / box.height];
+    const [x, y] = canvasPoint(e.currentTarget, e.clientX, e.clientY);
+    const camera = view.current;
+    return [(x - camera.x) / camera.scale, (y - camera.y) / camera.scale];
   }
 
   async function loadImage(file?: File) {
@@ -117,6 +173,20 @@ export function SketchBoard({ room, session, voiceOpen, onVoice, onAttach, onClo
       media.current?.getTracks().forEach(t => t.stop());
     };
   }, []);
+  useEffect(() => {
+    const el = canvas.current;
+    if (!el || clip) return;
+    const wheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      if (active.current !== null || pan.current) return;
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1;
+      zoom(Math.exp(-e.deltaY * unit * 0.002), ...canvasPoint(el, e.clientX, e.clientY));
+    };
+    el.addEventListener('wheel', wheel, { passive: false });
+    return () => el.removeEventListener('wheel', wheel);
+  }, [clip]);
+
   useEffect(() => {
     if (clip) return;
     const paste = (e: ClipboardEvent) => {
@@ -212,7 +282,13 @@ export function SketchBoard({ room, session, voiceOpen, onVoice, onAttach, onClo
     try {
       let file = clip;
       if (!file && canvas.current) {
-        const blob = await new Promise<Blob | null>(resolve => canvas.current!.toBlob(resolve));
+        // A still attachment includes strokes drawn outside the current viewport.
+        const target = document.createElement('canvas'), layer = document.createElement('canvas');
+        target.width = layer.width = WIDTH; target.height = layer.height = HEIGHT;
+        const camera = wholeBoard(marks.current);
+        renderInk(layer, camera);
+        composite(target, layer, camera);
+        const blob = await new Promise<Blob | null>(resolve => target.toBlob(resolve));
         if (blob) file = new File([blob], '手描きの説明.png', { type: blob.type });
       }
       if (!file) throw new Error();
@@ -234,23 +310,51 @@ export function SketchBoard({ room, session, voiceOpen, onVoice, onAttach, onClo
         <button className={button} disabled={!count || !!clip} onClick={undo}><Undo2 size={15}/>戻す</button>
         <input ref={input} type="file" accept="image/*" hidden onChange={e => { void loadImage(e.target.files?.[0]); e.target.value = ''; }}/>
         <button className={button} disabled={!!clip} onClick={() => input.current?.click()} title="スクリーンショットや写真に描く"><ImagePlus size={15}/>下絵を選ぶ</button>
+        <div className="flex items-center gap-1 sm:ml-auto">
+          <button className={button} aria-label="縮小" disabled={!!clip || zoomScale <= 0.125} onClick={() => zoom(1 / 1.25)}><Minus size={15}/></button>
+          <span className="min-w-12 text-center text-sm tabular-nums">{Math.round(zoomScale * 100)}%</span>
+          <button className={button} aria-label="拡大" disabled={!!clip || zoomScale >= 8} onClick={() => zoom(1.25)}><Plus size={15}/></button>
+          <button className={button} disabled={!!clip} onClick={() => setView(wholeBoard(marks.current))}>全体を表示</button>
+        </div>
       </div>
       <div className="flex justify-center rounded-xl border border-stone-300 bg-stone-200 p-1">
-        <canvas ref={canvas} width={WIDTH} height={HEIGHT} aria-label="手描きボード" style={{ pointerEvents: clip ? 'none' : 'auto', width: 'min(100%, 91dvh)', height: 'auto', touchAction: 'none' }} className="block aspect-[8/5] cursor-crosshair bg-white"
+        <canvas ref={canvas} width={WIDTH} height={HEIGHT} aria-label="手描きボード" style={{ pointerEvents: clip ? 'none' : 'auto', width: 'min(100%, 91dvh)', height: 'auto', touchAction: 'none', cursor: panning ? 'grabbing' : 'crosshair' }} className="block aspect-[8/5] bg-white"
+          onContextMenu={e => e.preventDefault()}
           onPointerDown={e => {
-            if (active.current !== null || e.button !== 0) return;
+            if (active.current !== null || pan.current) return;
+            if (e.button === 2) {
+              e.preventDefault();
+              const [x, y] = canvasPoint(e.currentTarget, e.clientX, e.clientY);
+              pan.current = { id: e.pointerId, x, y };
+              e.currentTarget.setPointerCapture(e.pointerId);
+              setPanning(true);
+              return;
+            }
+            if (e.button !== 0) return;
             active.current = e.pointerId; e.currentTarget.setPointerCapture(e.pointerId);
-            const mark = { color, width: erase ? 32 : 5, erase, points: [point(e)] };
+            const mark = { color, width: (erase ? 32 : 5) / view.current.scale, erase, points: [point(e)] };
             marks.current.push(mark); stroke(mark); setCount(marks.current.length);
           }}
           onPointerMove={e => {
+            const drag = pan.current;
+            if (drag?.id === e.pointerId) {
+              const [x, y] = canvasPoint(e.currentTarget, e.clientX, e.clientY);
+              const camera = view.current;
+              setView({ ...camera, x: camera.x + x - drag.x, y: camera.y + y - drag.y });
+              drag.x = x; drag.y = y;
+              return;
+            }
             if (active.current !== e.pointerId) return;
             const mark = marks.current[marks.current.length - 1];
             const last = mark.points[mark.points.length - 1], next = point(e);
             mark.points.push(next); stroke({ ...mark, points: [last, next] });
           }}
-          onLostPointerCapture={() => { active.current = null; }}/>
+          onLostPointerCapture={e => {
+            if (active.current === e.pointerId) active.current = null;
+            if (pan.current?.id === e.pointerId) { pan.current = null; setPanning(false); }
+          }}/>
       </div>
+      <p className="mt-1 hidden text-xs text-stone-600 [@media(pointer:fine)]:block">Ctrl＋ホイールで拡大・縮小、右ドラッグで移動</p>
       <footer className="mt-3 flex flex-wrap items-center gap-2">
         {recordState === 'recording' ? <button className={button} onClick={() => { setRecordState('stopping'); recorder.current?.stop(); }}><Square size={14} fill="currentColor"/>録画を止める</button> :
           !clip && <button className={button} disabled={recording || voiceOpen || busy} onClick={() => void record()}><Circle size={14} fill="#bd3847" color="#bd3847"/>声つきで録画</button>}
