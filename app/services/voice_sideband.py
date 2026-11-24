@@ -13,6 +13,7 @@ Switch: DAN_VOICE_SIDEBAND=0 turns everything off. A failure here never touches 
 Only metadata is logged (event types, sizes, timing): no audio, no words.
 """
 import asyncio
+from collections import deque
 import json
 import logging
 import os
@@ -94,6 +95,7 @@ class Dialogue:
         self.actions = None
         self.prefetch = None   # voice_prefetch.Prefetch while this server answers the call
         self.history = []      # full transcript for this bounded (MAX_SECONDS) call; never written to logs
+        self.routing_events = deque(maxlen=100)  # owner-visible decisions for this call, never sent to the speech model
         self.history_chars = 0
         self.history_complete = True
         self.failure_notices = set()

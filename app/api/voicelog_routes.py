@@ -370,6 +370,35 @@ async def receive_owner_screen(room_id: str, body: ScreenPictures, request: Requ
         raise HTTPException(422, '画面の絵を読み込めませんでした') from exc
 
 
+@router.get('/live/backend/routing')
+async def live_routing(session_id: str, request: Request):
+    """Read observations in the process that owns this call. Never send them into its conversation."""
+    from app.services import voice_live
+    from app.services.conversation_circuit import ROUTES
+    state = voice_live.get_session(session_id, _get_user(request).user_id)
+    if not state:
+        raise HTTPException(404, 'この通話は終了しました。')
+    dialogue = state.get('dialogue')
+    if dialogue is None:
+        return {'turns': []}
+    rows = []
+    for i in range(len(dialogue.history)-1, -1, -1):
+        turn = dialogue.history[i]
+        if turn['role'] != 'user':
+            continue
+        decisions = []
+        for event in dialogue.routing_events:
+            if event['turn'] != i:
+                continue
+            route = event['route'] or ''
+            label = {'change': '進行中の作業を変更', 'stop': '進行中の作業を停止'}.get(route.split(':')[0])
+            decisions.append({**event, 'route': label or ROUTES.get(route, route)})
+        rows.append({'turn': i, 'words': turn['text'][-2000:], 'decisions': decisions})
+        if len(rows) >= 20:
+            break
+    return {'turns': rows}
+
+
 class LiveFocus(BaseModel):
     session_id: str = Field(min_length=1, max_length=200)
     room_id: str = Field(min_length=1, max_length=80)

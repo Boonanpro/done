@@ -115,7 +115,7 @@ class Decisions:
         _credential_cache[self.user_id] = (time.monotonic() + (30 if self._key else 5), self._key)
         return self._key
 
-    async def choose(self, state, questions):
+    async def choose(self, state, questions, *, model="jev-latest"):
         if not self.enabled:
             return {'available': False, 'reason': 'disabled', 'elapsed_ms': 0}
         if self.unavailable and self.retry_at is not None and time.monotonic() >= self.retry_at:
@@ -124,7 +124,7 @@ class Decisions:
         if self.unavailable or self.calls >= self.max_calls:
             return {'available': False, 'reason': 'decision_budget', 'elapsed_ms': 0}
         # A conservative byte bound, not an estimate that Japanese bytes=tokens.
-        body = {'model': 'jev-latest', 'state': state, 'questions': questions}
+        body = {'model': model, 'state': state, 'questions': questions}
         if len(json.dumps(body, ensure_ascii=False).encode('utf-8')) > 24000:
             return {'available': False, 'reason': 'state_too_large', 'elapsed_ms': 0}
         def well_formed(q):

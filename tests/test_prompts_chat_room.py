@@ -25,6 +25,7 @@ class FakeService:
 
 def test_chat_room_made_once_and_remade_when_gone(tmp_path, monkeypatch):
     monkeypatch.setattr(prompt_store, 'root', lambda: tmp_path)
+    monkeypatch.setattr(prompts_screen, 'resolve_owner_user_id', lambda: 'owner')
     import app.services.project_service as ps
     FakeService.made, FakeService.alive = [], set()
     monkeypatch.setattr(ps, 'ProjectService', FakeService)
@@ -47,3 +48,17 @@ def test_chat_room_made_once_and_remade_when_gone(tmp_path, monkeypatch):
 def test_sha_matches_item(monkeypatch):
     pid = prompt_store.catalog()['prompts'][0]['id']
     assert prompts_screen._sha(pid)['sha'] == prompts_screen._item(pid)['sha']
+
+
+def test_development_page_uses_the_existing_owner_room(monkeypatch):
+    import app.services.project_service as ps
+    monkeypatch.setattr(prompts_screen, 'resolve_owner_user_id', lambda: 'owner')
+
+    class Existing:
+        async def get_project_by_room_id(self, room):
+            assert room == '7b5184bd-21a9-4b18-a6c6-da4c0ce1243f'
+            return {'id': 'project', 'title': 'ダン開発室', 'user_id': 'owner'}
+
+    monkeypatch.setattr(ps, 'ProjectService', Existing)
+    result = asyncio.run(prompts_screen.prompts_chat_room(types.SimpleNamespace(user_id='owner')))
+    assert result['room_id'] == prompts_screen.DEV_LEAD_ROOM and result['development']

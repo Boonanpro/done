@@ -32,7 +32,19 @@ def main():
     m.add_argument('--find', default='', help='これから直す所の、今の文（その行が光る）')
     m.add_argument('--lines', default='', help='これから直す行 12-15')
     m.add_argument('--note', default='', help='何をしているか（画面に出る短い一言）')
+    from app.services import development_board
+    board = sub.add_parser('board', help='構成図の箱に変更案・作業・確認結果を表示する')
+    board.add_argument('node')
+    board.add_argument('phase', choices=development_board.STAGES)
+    board.add_argument('text')
     args = ap.parse_args()
+    if args.cmd == 'board':
+        import re
+        architecture = prompt_store.REPO / 'frontend/src/components/prompts/architecture.ts'
+        if args.node not in re.findall(r"\{ id: '([^']+)', name:", architecture.read_text()):
+            ap.error('構成図にない箱です。')
+        development_board.add(args.node, args.phase, args.text)
+        return
     if args.cmd == 'list':
         for item in prompt_store.catalog()['prompts']:
             info = prompt_store.summary(item['id'])

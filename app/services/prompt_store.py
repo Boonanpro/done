@@ -259,6 +259,15 @@ def problems(prompt_id, value):
         return ['空にはできません。']
     kind = item.get('kind', 'text')
     out = []
+    if kind == 'jev_model' and not re.fullmatch(r'jev-(latest|[0-9]+(?:\.[0-9]+){1,3})', value.strip()):
+        out.append('jev-latest または提供されている固定版のモデル名を入力してください。')
+    if kind == 'probability':
+        try:
+            valid = 0 <= float(value) <= 1
+        except ValueError:
+            valid = False
+        if not valid:
+            out.append('0から1の数値を入力してください。')
     if kind == 'sections':
         keys = list(parse_sections(value))
         need = item.get('keys') or []
