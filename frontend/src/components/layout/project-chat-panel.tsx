@@ -3582,6 +3582,9 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
               // 「今日」「昨日」「8月7日(木)」のチップを挟む。作業ブロックは
               // 日付を持たないので判定を進めない（前後のメッセージに任せる）。
               let prevDateKey: string | null = null;
+              // 👍は直前の本人の発言に押すスタンプ。直前が本人でない（裏の知らせで起こされた番の）👍は、ダン自身の発言に
+              // 付いて見えるので描かない（2026-11-24 本人「何で自分の発言にいいねしてんの？」。新しい物は保存もしない）。
+              let prevSender: string | null = null;
               const nodes: ReactNode[] = [];
               visibleDisplayItems.forEach((item, index) => {
                 if (item.kind === 'execution-block') {
@@ -3597,6 +3600,11 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
                   );
                   return;
                 }
+
+                const sender = item.msg.sender_type;
+                const strayReaction = sender === 'ai' && (item.msg.content || '').trim() === '👍' && prevSender !== 'user';
+                prevSender = sender;
+                if (strayReaction) return;
 
                 const d = item.msg.created_at ? new Date(item.msg.created_at) : null;
                 // ボード部屋は1セット表示なので日付チップは出さない

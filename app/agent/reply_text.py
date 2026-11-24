@@ -118,6 +118,22 @@ def is_silent_reply(text: Optional[str]) -> bool:
     return inner in SILENT_MARKS
 
 
+# 👍だけの返事は、本人の直前の発言に押す受領のスタンプとして描く（frontend の project-chat-panel.tsx）。本人の発言に答えて
+# いない番（並行作業の結果・GitHub の知らせ・見張りなど、裏の知らせで起こされた番）の👍は、画面ではダン自身の発言の
+# 下に付いて「自分の発言にいいね」に見えた（2026-11-24 本人「何で自分の発言にいいねしてんの？」）。そういう番の👍は
+# 伝えることが無いのと同じなので保存しない。
+REACTION_MARK = "👍"
+
+
+def is_reaction(text: Optional[str]) -> bool:
+    return (text or "").strip() == REACTION_MARK
+
+
+def is_stray_reaction(text: Optional[str], last_sender_type: Optional[str]) -> bool:
+    """👍だけの返事で、部屋の最後の発言が本人のものではない（押す先が無い）か。"""
+    return is_reaction(text) and (last_sender_type or "") != "user"
+
+
 # 「前に書いた返事のままでよい」の印（2026-11-09）。終わり際の関所（scripts/hook_*.py の Stop hook）に止められた後に
 # 書いた文が、本人に届く返事の全部になる（Claude の result も Codex の最後の agent_message も最後の文だけ）。
 # 11/9 17:55、関所の取り違えに「上の返事のままにします」とだけ答え、その一言がエディターの調べ結果の返事の代わりに

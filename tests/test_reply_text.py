@@ -141,3 +141,12 @@ def test_keep_mark_restores_the_reply_written_before_the_gate():
     assert resolve_reply("「REPLY_UNCHANGED」の印を足しました。", parts) == "「REPLY_UNCHANGED」の印を足しました。"
     # 同じ文の塊の末尾に印が続いた時は、印の行を落として返事だけ
     assert resolve_reply("REPLY_UNCHANGED", ["答えです。\n\nREPLY_UNCHANGED"]) == "答えです。"
+
+
+def test_stray_reaction_only_when_last_message_is_not_owner():
+    from app.agent.reply_text import is_stray_reaction
+    assert is_stray_reaction("👍", "ai")
+    assert is_stray_reaction(" 👍\n", "system")
+    assert is_stray_reaction("👍", None)
+    assert not is_stray_reaction("👍", "user")
+    assert not is_stray_reaction("了解です👍", "ai")
