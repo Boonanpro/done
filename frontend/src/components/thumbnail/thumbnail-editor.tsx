@@ -12,12 +12,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ArrowLeft, ArrowDown, ArrowUp, Check, Copy, Download, Eye, EyeOff, ImagePlus, LayoutGrid, Loader2, Lock, MessageSquare,
-  MousePointer2, PenLine, Redo2, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
+  Frame, MousePointer2, PenLine, Redo2, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { PartPreview, ThumbCanvas, partCenter, type PartBox } from './thumb-canvas';
-import { ThumbPatterns, type ThumbPatternLink } from './thumb-patterns';
+import { PartPreview, ThumbCanvas, partBounds, partCenter, type PartBox } from './thumb-canvas';
+import { ThumbPatterns, type ThumbPatternActions, type ThumbPatternLink } from './thumb-patterns';
 import { useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
 import {
   THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, newPartId, removeFinish,
@@ -61,6 +61,11 @@ type Drag =
   | { kind: 'pen' };
 
 const PEN_COLOR = '#ff2a2a';
+// コメントを付けた部品を、ダンに渡す絵の上で囲む色
+const TARGET_COLOR = '#38bdf8';
+// 作業台（サムネの枠の外）の余白。枠の周りに少しと、はみ出た部品の周り
+const BOARD_PAD = 0.06;
+const BOARD_PART_PAD = 40;
 // サムネの周りの余白（角のつまみと回すつまみが出る所）
 const STAGE_MARGIN = 28;
 // 絵の透けた所を押しても、その絵は選ばない（下の部品を選ぶ）。この濃さより薄い所は透けている扱い
@@ -153,6 +158,14 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const [finishJob, setFinishJob] = useState<ThumbFinishJob | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
+  // 出力の形だけを見る（枠の外を切る）。既定は枠の外にはみ出た部品も見えて、つかめる作業台
+  const [outputView, setOutputView] = useState(false);
+  // 部品・書き込みに付けるコメントの欄（台本の画面と同じく、その場に出る）。part_id が無ければペンの書き込みへのコメント
+  const [composer, setComposer] = useState<{ partId: string | null } | null>(null);
+  const patternActions = useRef<ThumbPatternActions | null>(null);
+  const setPatternActions = useCallback((a: ThumbPatternActions | null) => { patternActions.current = a; }, []);
+  // つかんでいる・描いている間（その間は作業台の広さを止め、コメントのボタンを隠す）
+  const [gesture, setGesture] = useState<{ kind: 'pen' | 'part'; board: PartBox | null } | null>(null);
 
   // ── 読み込み・ダンの直しを読み直す・保存 ──
   const load = useCallback(async (force = false) => {
@@ -241,19 +254,6 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
 
   // ── 画面の大きさ ──
   const stageWrap = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const el = stageWrap.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => {
-      const r = el.getBoundingClientRect();
-      const ratio = doc ? doc.width / doc.height : 16 / 9;
-      // 周りに余白を残す（ふちまである部品の角のつまみが、画面の端で切れずに掴めるように）2026-11-24
-      const m = STAGE_MARGIN * 2;
-      setStageW(Math.max(200, Math.floor(Math.min(r.width - m, (compact ? (r.width - m) / ratio : r.height - m) * ratio))));
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [doc, compact]);
   const viewW = Math.round(stageW * zoom);
   const scale = doc ? viewW / doc.width : 1;
   const hasDoc = !!doc;
@@ -313,6 +313,47 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const lh = p.line_height || p.size * 1.25;
     return { x: p.x, y: p.y - p.size, w: p.size * Math.max(1, ...ls.map((l) => l.length)), h: p.size * 1.2 + lh * (ls.length - 1) };
   }, [boxes]);
+
+  // ── 作業台の範囲（2026-11-24 本人「アスペクト比はあくまで表示するウインドウ。はみ出た場所にも自由に置けるように。
+  //    出力されるプレビューと切り替えて見れるように」）。サムネの枠の周りに少しと、はみ出た部品の全部が入る範囲。
+  //    引きずっている間は広げ直さない（画面の大きさが動いて手元がずれないように）。手を離した時に広げ直す
+  const liveBoard = useMemo<PartBox | null>(() => {
+    if (!doc) return null;
+    if (outputView) return { x: 0, y: 0, w: doc.width, h: doc.height };
+    let x0 = -doc.width * BOARD_PAD, y0 = -doc.height * BOARD_PAD, x1 = doc.width * (1 + BOARD_PAD), y1 = doc.height * (1 + BOARD_PAD);
+    for (const p of doc.parts) {
+      if (p.hidden) continue;
+      const b = partBounds(p, boxOf(p), boxes[p.id]);
+      if (!Number.isFinite(b.x + b.y + b.w + b.h)) continue;
+      x0 = Math.min(x0, b.x - BOARD_PART_PAD); y0 = Math.min(y0, b.y - BOARD_PART_PAD);
+      x1 = Math.max(x1, b.x + b.w + BOARD_PART_PAD); y1 = Math.max(y1, b.y + b.h + BOARD_PART_PAD);
+    }
+    return { x: Math.floor(x0), y: Math.floor(y0), w: Math.ceil(x1 - x0), h: Math.ceil(y1 - y0) };
+  }, [doc, boxes, boxOf, outputView]);
+  const board = gesture?.board || liveBoard;
+  const boardKey = board ? `${board.x},${board.y},${board.w},${board.h}` : '';
+  // 画面の大きさ: 作業台の全部が欄に収まる大きさ（stageW はサムネの枠の幅の画素）
+  useEffect(() => {
+    const el = stageWrap.current;
+    if (!el || !doc || !board) return;
+    const fit = () => {
+      const r = el.getBoundingClientRect();
+      // 周りに余白を残す（ふちまである部品の角のつまみが、画面の端で切れずに掴めるように）2026-11-24
+      const m = STAGE_MARGIN * 2;
+      const k = Math.min((r.width - m) / board.w, compact ? Infinity : (r.height - m) / board.h);
+      setStageW(Math.max(200, Math.floor(doc.width * k)));
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardKey, compact, hasDoc, doc?.width]);
+  const boardW = board ? Math.round(board.w * scale) : viewW;
+  const boardH = board ? Math.round(board.h * scale) : Math.round(viewW * (doc ? doc.height / doc.width : 9 / 16));
+  // 作業台の上の点（サムネの画素）を、作業台の左上からの画面の画素に
+  const toStagePx = (x: number, y: number): [number, number] => (board ? [(x - board.x) * scale, (y - board.y) * scale] : [x * scale, y * scale]);
+  const inBoard = (pt: [number, number]) => !!board && pt[0] >= board.x && pt[1] >= board.y && pt[0] <= board.x + board.w && pt[1] <= board.y + board.h;
 
   const toSvg = (ev: { clientX: number; clientY: number }): [number, number] => {
     const svg = svgRef.current;
@@ -422,10 +463,19 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       ev.preventDefault();
       (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
       drag.current = { kind: 'pen' };
+      setGesture({ kind: 'pen', board: liveBoard });
       setMarks((m) => [...m, { color: PEN_COLOR, width: Math.max(6, 3 / scale), points: [pt] }]);
       return;
     }
     const target = ev.target as Element;
+    // コメントの印を押したら、そのコメントを開く（右の欄で光らせ、書き込みを重ねて見せる）
+    const pin = target.closest('[data-comment-pin]')?.getAttribute('data-comment-pin');
+    if (pin) {
+      ev.preventDefault();
+      setShowInstr((v) => (v === pin ? null : pin));
+      window.setTimeout(() => document.querySelector(`[data-thumb-instruction="${CSS.escape(pin)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 30);
+      return;
+    }
     const handle = target.closest('[data-handle]')?.getAttribute('data-handle');
     const sel = selected ? doc.parts.find((p) => p.id === selected) : undefined;
     if (handle && sel) {
@@ -434,17 +484,20 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       const b = boxOf(sel);
       const center = partCenter(sel, boxes[sel.id]);
       if (handle === 'rotate') {
+        setGesture({ kind: 'part', board: liveBoard });
         drag.current = { kind: 'rotate', id: sel.id, center, startAngle: Math.atan2(pt[1] - center[1], pt[0] - center[0]), orig: clone(sel), before: clone(doc) };
       } else {
         // つかんだ角の向かいの角を止めて、大きさを変える（回してある時は回した角）
         const corners: Record<string, [number, number]> = { nw: [b.x + b.w, b.y + b.h], ne: [b.x, b.y + b.h], sw: [b.x + b.w, b.y], se: [b.x, b.y] };
         const anchorLocal = corners[handle] || [b.x, b.y];
         const anchor = sel.rotation ? rotatePoint(anchorLocal, center, sel.rotation) : anchorLocal;
+        setGesture({ kind: 'part', board: liveBoard });
         drag.current = { kind: 'scale', id: sel.id, anchor, startDist: Math.hypot(pt[0] - anchor[0], pt[1] - anchor[1]) || 1, orig: clone(sel), before: clone(doc) };
       }
       return;
     }
-    const inCanvas = pt[0] >= 0 && pt[1] >= 0 && pt[0] <= doc.width && pt[1] <= doc.height;
+    // 押せる範囲: 作業台の全部（枠の外にはみ出た部品も選べる）。出力だけを見ている時はサムネの枠の中
+    const inCanvas = outputView ? (pt[0] >= 0 && pt[1] >= 0 && pt[0] <= doc.width && pt[1] <= doc.height) : inBoard(pt);
     press.current = null;
     // 選んでいる部品の上（四角の中）を押したら、透けた所でもその部品をつかむ（2026-11-24 本人「集中線が選択後に
     // 移動できない。長押しすると選択が外れる」）。動かさずに離した時だけ、その上に重なって見えている部品へ選び替える。
@@ -463,7 +516,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       const selIdx = doc.parts.findIndex((p) => p.id === sel.id);
       const above = partsAt(pt, true).find((p) => doc.parts.indexOf(p) > selIdx);
       press.current = { at: [ev.clientX, ev.clientY], pick: above?.id || null };
-      if (!sel.locked) drag.current = { kind: 'move', id: sel.id, start: pt, orig: clone(sel), before: clone(doc) };
+      if (!sel.locked) { drag.current = { kind: 'move', id: sel.id, start: pt, orig: clone(sel), before: clone(doc) }; setGesture({ kind: 'part', board: liveBoard }); }
       return;
     }
     if (ev.altKey && inCanvas) {
@@ -479,7 +532,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     ev.preventDefault();
     (ev.currentTarget as Element).setPointerCapture(ev.pointerId);
     setSelected(part.id);
-    if (!part.locked) drag.current = { kind: 'move', id: part.id, start: pt, orig: clone(part), before: clone(doc) };
+    if (!part.locked) { drag.current = { kind: 'move', id: part.id, start: pt, orig: clone(part), before: clone(doc) }; setGesture({ kind: 'part', board: liveBoard }); }
   };
 
   // 右クリック: その点に重なっている部品を全部並べて、どれでも選べる（上にある・下にある・透けている物も）
@@ -538,6 +591,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const onPointerUp = (ev?: React.PointerEvent<SVGSVGElement>) => {
     const dr = drag.current;
     drag.current = null;
+    setGesture(null);
     const pr = press.current;
     press.current = null;
     // 動かさずに離した（クリック）: 選んでいる部品の上に重なって見えている部品があれば、そちらを選ぶ
@@ -565,6 +619,12 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       if (mod && ev.key.toLowerCase() === 'y') { ev.preventDefault(); redo(); return; }
       const d = docRef.current;
       const sel = selected && d ? d.parts.find((p) => p.id === selected) : undefined;
+      if (ev.key === 'Escape' && composer) { setComposer(null); return; }
+      // Ctrl+D: 部品を選んでいればその部品、選んでいなければ今の案を複製する（2026-11-24 本人「複製はCtrl+Dと…だけで良い」）
+      if (mod && ev.key.toLowerCase() === 'd' && !sel) {
+        if (patternActions.current) { ev.preventDefault(); patternActions.current.duplicateCurrent(); }
+        return;
+      }
       if (!sel || !d) return;
       if (mod && ev.key.toLowerCase() === 'd') { ev.preventDefault(); duplicate(sel); return; }
       if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); remove(sel.id); return; }
@@ -676,39 +736,62 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     void addImageFiles(files, inside ? pt : undefined);
   };
 
-  // ── 書き込んで送る ──
+  // ── コメントを付けて送る（部品を選んでコメント／ペンで書き込んでコメント）──
+  // 2026-11-24 本人「サムネに直接書き込んだり修正点を指示して修正することができるように。要素を選択したらコメントできるように。
+  // 台本エディターみたいに」。コメントはその場に印として残り、ダンが直した結果がその下に出る
+  const marksBounds = (ms: ThumbMark[]): PartBox | null => {
+    const xs = ms.flatMap((m) => m.points.map((p) => p[0]));
+    const ys = ms.flatMap((m) => m.points.map((p) => p[1]));
+    if (!xs.length) return null;
+    return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+  };
   const sendMarks = async () => {
     const d = docRef.current;
-    if (!d || (!marks.length && !note.trim())) return;
+    const text = note.trim();
+    const target = composer?.partId ? d?.parts.find((p) => p.id === composer.partId) : undefined;
+    if (!d || (!marks.length && !text)) return;
+    if (!text && target && !marks.length) return;
     setSending(true);
     try {
-      const xs = marks.flatMap((m) => m.points.map((p) => p[0]));
-      const ys = marks.flatMap((m) => m.points.map((p) => p[1]));
       const pad = 12;
-      const box = xs.length ? [Math.max(0, Math.min(...xs) - pad), Math.max(0, Math.min(...ys) - pad), 0, 0] : [];
-      if (xs.length) { box[2] = Math.min(d.width, Math.max(...xs) + pad) - box[0]; box[3] = Math.min(d.height, Math.max(...ys) + pad) - box[1]; }
+      // ダンに渡す絵: ペンの線（赤）と、コメントを付けた部品の枠（水色）
+      const tb = target ? partBounds(target, boxOf(target), boxes[target.id]) : null;
+      const targetMark: ThumbMark | null = tb ? {
+        color: TARGET_COLOR, width: Math.max(5, 3 / scale),
+        points: [[tb.x, tb.y], [tb.x + tb.w, tb.y], [tb.x + tb.w, tb.y + tb.h], [tb.x, tb.y + tb.h], [tb.x, tb.y]],
+      } : null;
+      const mb = marksBounds(marks);
+      const area = mb ? { x: mb.x - pad, y: mb.y - pad, w: mb.w + pad * 2, h: mb.h + pad * 2 } : tb;
+      const box = area ? [area.x, area.y, area.w, area.h] : [];
       const hit = (b: PartBox) => box.length === 4 && b.x < box[0] + box[2] && b.x + b.w > box[0] && b.y < box[1] + box[3] && b.y + b.h > box[1];
-      const under = [...d.parts].reverse().filter((p) => !p.hidden && hit(boxOf(p))).map((p) => `${p.id}（${partLabel(p)}）`);
+      const under = mb ? [...d.parts].reverse().filter((p) => !p.hidden && hit(boxOf(p))).map((p) => `${p.id}（${partLabel(p)}）`) : [];
+      const sent = targetMark ? [...marks, targetMark] : marks;
+      const anchor: [number, number] | null = mb ? [mb.x + mb.w, mb.y] : tb ? [tb.x + tb.w, tb.y] : null;
       const id = `ti_${Date.now().toString(36)}`;
-      const selPart = selected ? d.parts.find((p) => p.id === selected) : undefined;
       const res = await fetch(`/api/v1/production-assets/contents/${encodeURIComponent(contentId)}/instructions`, {
         method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           room_id: roomId,
           annotation: {
-            id, kind: 'thumb_marks', note: note.trim(),
-            data: { marks, box, parts_under: under, selected: selPart ? `${selPart.id}（${partLabel(selPart)}）` : null, job_id: resendOf?.job_id },
+            id, kind: 'thumb_marks', note: text,
+            data: {
+              marks: sent, box, parts_under: under,
+              target: target && tb ? partDetail(target, boxOf(target)) : null,
+              selected: target ? `${target.id}（${partLabel(target)}）` : null,
+              job_id: resendOf?.job_id,
+            },
           },
         }),
       });
       if (!res.ok) throw new Error(await res.text());
       const j = (await res.json()) as { job_id: string };
-      const instr: ThumbInstruction = { id, note: note.trim(), marks, job_id: j.job_id, created_at: new Date().toISOString() };
+      const instr: ThumbInstruction = { id, note: text, marks: sent, job_id: j.job_id, created_at: new Date().toISOString(), part_id: target?.id || null, anchor };
       const cur = docRef.current || d;
       const list = (cur.instructions || []).filter((x) => x.id !== resendOf?.id);
       commit({ ...cur, instructions: [...list, instr] });
       setJobs((s) => ({ ...s, [j.job_id]: { job_id: j.job_id, state: 'queued', label: '順番待ち', active: true } }));
-      setMarks([]); setNote(''); setResendOf(null); setMode('select');
+      setMarks([]); setNote(''); setResendOf(null); setComposer(null);
+      if (mode === 'pen') setMode('select');
     } catch (e) {
       toast.error('ダンに送れませんでした', { description: String(e).slice(0, 160) });
     } finally {
@@ -861,7 +944,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const b = boxOf(sel);
     const [cx, cy] = partCenter(sel, boxes[sel.id]);
     const sw = 1.5 / scale;
-    const roomAbove = b.y * scale + STAGE_MARGIN;
+    const roomAbove = (b.y - (board?.y ?? 0)) * scale + STAGE_MARGIN;
     const rotY = roomAbove >= 28 + handleR * scale ? b.y - 28 / scale : b.y + 28 / scale;
     return (
       <g transform={sel.rotation ? `rotate(${sel.rotation} ${cx} ${cy})` : undefined}>
@@ -876,6 +959,28 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       </g>
     );
   })() : null;
+
+  // コメントの印（番号の丸）。押すとそのコメントを開く。大きさは寄っても引いても画面の上で同じ
+  const instrAnchor = (ins: ThumbInstruction): [number, number] | null => {
+    if (ins.anchor) return ins.anchor;
+    const pens = ins.marks.filter((m) => m.color !== TARGET_COLOR);
+    const mb = marksBounds(pens.length ? pens : ins.marks);
+    return mb ? [mb.x + mb.w, mb.y] : null;
+  };
+  const pins = (doc?.instructions || []).map((ins, k) => {
+    const a = instrAnchor(ins);
+    if (!a) return null;
+    const st = ins.job_id ? jobs[ins.job_id] : undefined;
+    const active = st ? st.active : true;
+    const on = showInstr === ins.id;
+    return (
+      <g key={ins.id} data-comment-pin={ins.id} transform={`translate(${a[0]} ${a[1]}) scale(${1 / scale})`} style={{ cursor: 'pointer' }}>
+        <path d="M0 0 L3 -14 L14 -3 Z" fill={active ? '#0ea5e9' : '#10b981'} stroke="#fff" strokeWidth={1.5} strokeLinejoin="round" />
+        <circle cx={14} cy={-14} r={13} fill={active ? '#0ea5e9' : '#10b981'} stroke="#fff" strokeWidth={on ? 3 : 2} />
+        <text x={14} y={-14} textAnchor="middle" dominantBaseline="central" fontSize={13} fontWeight={700} fill="#fff" style={{ userSelect: 'none' }}>{k + 1}</text>
+      </g>
+    );
+  });
 
   const partProps = useCallback((p: ThumbPart) => ({
     style: { cursor: mode === 'pen' ? 'crosshair' : p.locked ? 'default' : 'move', pointerEvents: mode === 'pen' ? 'none' : 'auto' },
@@ -962,7 +1067,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       <button type="button" className={toolBtn(mode === 'select')} onClick={() => { setMode('select'); setMarks([]); setResendOf(null); }} title="部品を選んで動かす">
         <MousePointer2 className="h-3.5 w-3.5" />選ぶ
       </button>
-      <button type="button" className={toolBtn(mode === 'pen')} onClick={() => { setMode('pen'); setSelected(null); }} title="ペンで書き込んでダンに直してもらう" data-thumb-pen>
+      <button type="button" className={toolBtn(mode === 'pen')} onClick={() => { setMode('pen'); setSelected(null); setComposer(null); }} title="ペンで丸や矢印を描き、コメントを付けてダンに直してもらう" data-thumb-pen>
         <PenLine className="h-3.5 w-3.5" />書き込む
       </button>
       <button type="button" className={toolBtn(false)} onClick={addText} title="文字を足す"><Type className="h-3.5 w-3.5" />文字</button>
@@ -978,6 +1083,10 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       </button>
       <button type="button" className={toolBtn(listView)} onClick={() => setListView((v) => !v)} title="YouTube の一覧の大きさで見る" data-thumb-list>
         <LayoutGrid className="h-3.5 w-3.5" />{compact ? '一覧' : '一覧で見る'}
+      </button>
+      <button type="button" className={toolBtn(outputView)} onClick={() => setOutputView((v) => !v)}
+        title={outputView ? '枠の外にはみ出た部品も見る・つかむ' : '書き出される形だけを見る（枠の外を切る）'} data-thumb-output-view>
+        <Frame className="h-3.5 w-3.5" />{outputView ? '枠の外も見る' : '仕上がりで見る'}
       </button>
       <span className="mx-1 h-5 w-px bg-border" />
       <button type="button" className={toolBtn(false)} onClick={undo} disabled={!undoStack.current.length} title="元に戻す（Ctrl+Z）"><Undo2 className="h-3.5 w-3.5" /></button>
@@ -1000,6 +1109,11 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         <span className="min-w-0 flex-1" title={partLabel(sel)}>
           <PartPreview doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === sel.id) || sel} box={boxOf(sel)} className="h-12 w-full" />
         </span>
+        {!chatLink ? (
+          <button type="button" title="この部品にコメントしてダンに直してもらう" className="rounded p-1 hover:bg-muted" onClick={() => setComposer({ partId: sel.id })} data-thumb-comment-part>
+            <MessageSquare className="h-4 w-4" />
+          </button>
+        ) : null}
         <button type="button" title="前へ" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'up')}><ArrowUp className="h-4 w-4" /></button>
         <button type="button" title="後ろへ" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'down')}><ArrowDown className="h-4 w-4" /></button>
         <button type="button" title="複製（Ctrl+D）" className="rounded p-1 hover:bg-muted" onClick={() => duplicate(sel)}><Copy className="h-4 w-4" /></button>
@@ -1112,25 +1226,36 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
 
   const instrList = instructions.length ? (
     <div data-thumb-instructions>
-      <div className="mb-1 text-[11px] font-semibold text-muted-foreground">ダンへの書き込み</div>
+      <div className="mb-1 text-[11px] font-semibold text-muted-foreground">コメント</div>
       <ul className="space-y-1.5">
         {[...instructions].reverse().map((ins) => {
           const st = ins.job_id ? jobs[ins.job_id] : undefined;
           const active = st ? st.active : true;
+          const num = instructions.indexOf(ins) + 1;
+          const tp = ins.part_id ? (viewDoc || doc).parts.find((q) => q.id === ins.part_id) : undefined;
           return (
-            <li key={ins.id} className={`rounded border p-2 text-xs ${showInstr === ins.id ? 'border-red-400' : 'border-border'}`}
+            <li key={ins.id} data-thumb-instruction={ins.id} className={`rounded border p-2 text-xs ${showInstr === ins.id ? 'border-sky-400 ring-1 ring-sky-400' : 'border-border'}`}
               onMouseEnter={() => setShowInstr(ins.id)} onMouseLeave={() => setShowInstr(null)}>
               <div className="flex items-start gap-1.5">
-                {active ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-sky-500" /> : <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />}
-                <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setShowInstr((v) => (v === ins.id ? null : ins.id))}>
+                <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white ${active ? 'bg-sky-500' : 'bg-emerald-500'}`}>{num}</span>
+                <button type="button" className="min-w-0 flex-1 text-left" onClick={() => { setShowInstr((v) => (v === ins.id ? null : ins.id)); if (tp) { setSelected(tp.id); setMode('select'); } }}>
+                  {tp ? <PartPreview doc={viewDoc || doc} part={tp} box={boxOf(tp)} className="mb-1 h-10 w-full" /> : null}
                   <div className="font-medium">{ins.note || '（書き込みだけ）'}</div>
-                  <div className="mt-0.5 text-muted-foreground">{st ? (st.active ? (st.progress || st.label) : (st.result || st.label)) : '順番待ち'}</div>
+                  <div className="mt-1 flex items-start gap-1 text-muted-foreground">
+                    {active ? <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-sky-500" /> : <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" />}
+                    <span>{st ? (st.active ? (st.progress || st.label) : (st.result || st.label)) : '順番待ち'}</span>
+                  </div>
                 </button>
                 <button type="button" title="消す" className="rounded p-0.5 text-muted-foreground hover:text-destructive" onClick={() => removeInstruction(ins.id)}><X className="h-3.5 w-3.5" /></button>
               </div>
               {!active ? (
                 <button type="button" className="mt-1.5 text-[11px] text-sky-600 hover:underline dark:text-sky-300"
-                  onClick={() => { setResendOf(ins); setMarks(ins.marks); setNote(ins.note); setMode('pen'); setSelected(null); }}>
+                  onClick={() => {
+                    setResendOf(ins); setNote(ins.note);
+                    const pens = ins.marks.filter((m) => m.color !== TARGET_COLOR);
+                    if (tp && !pens.length) { setMarks([]); setMode('select'); setSelected(tp.id); setComposer({ partId: tp.id }); }
+                    else { setMarks(pens); setMode('pen'); setSelected(null); setComposer(tp ? { partId: tp.id } : null); }
+                  }}>
                   書き直して、もう一度送る
                 </button>
               ) : null}
@@ -1179,45 +1304,109 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       </div>
     </div>
   ) : mode === 'pen' ? (
-    <div className="rounded-md border border-red-300 bg-red-50/60 p-2 dark:bg-red-950/30" data-thumb-penbar>
-      <textarea
-        value={note}
-        onChange={(e) => setNote(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void sendMarks(); }}
-        rows={2}
-        placeholder="ダンへの一言"
-        className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
-        data-thumb-note
-      />
+    <div className="rounded-md border border-red-300 bg-red-50/60 p-2 text-xs leading-relaxed dark:bg-red-950/30" data-thumb-penbar>
+      <div>{marks.length ? '描いた線の横の欄に、どう直してほしいかを書いて送ってください。' : 'サムネの上に丸や矢印を描くと、その横にコメントの欄が出ます。'}</div>
       <div className="mt-1.5 flex gap-1.5">
-        <button type="button" disabled={sending || (!marks.length && !note.trim())} onClick={() => void sendMarks()}
-          className="flex h-8 flex-1 items-center justify-center gap-1 rounded-md bg-red-600 text-xs font-semibold text-white disabled:opacity-40" data-thumb-send>
-          {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}送る
-        </button>
         <button type="button" onClick={() => setMarks((m) => m.slice(0, -1))} disabled={!marks.length} className="h-8 rounded-md border border-border px-2 text-xs disabled:opacity-40">1本消す</button>
         <button type="button" onClick={() => { setMarks([]); setNote(''); setResendOf(null); setMode('select'); }} className="h-8 rounded-md border border-border px-2 text-xs">やめる</button>
       </div>
     </div>
   ) : null;
 
+  // ── その場に出るコメントの欄（台本の画面のコメントと同じく、選んだ部品・描いた線の横に出る）──
+  const penDrawing = gesture?.kind === 'pen';
+  const composerAt: { anchor: [number, number]; part: ThumbPart | null } | null = (() => {
+    if (chatLink) return null;
+    if (mode === 'pen') {
+      const mb = marks.length && !penDrawing ? marksBounds(marks) : null;
+      if (!mb) return null;
+      const part = composer?.partId ? doc.parts.find((p) => p.id === composer.partId) || null : null;
+      return { anchor: [mb.x + mb.w, mb.y], part };
+    }
+    if (!composer?.partId) return null;
+    const part = doc.parts.find((p) => p.id === composer.partId);
+    if (!part || part.id !== selected) return null;
+    const tb = partBounds(part, boxOf(part), boxes[part.id]);
+    return { anchor: [tb.x + tb.w, tb.y], part };
+  })();
+  // 選んだ部品の右上の小さな「コメント」ボタン（つかんでいる間は隠す）
+  const commentBtnAt: [number, number] | null = !chatLink && mode === 'select' && sel && !sel.hidden && !gesture && !composerAt ? (() => {
+    const tb = partBounds(sel, boxOf(sel), boxes[sel.id]);
+    return toStagePx(tb.x + tb.w, tb.y);
+  })() : null;
+  const COMPOSER_W = 272;
+  const floatPos = ([px, py]: [number, number], w: number, h: number) => ({
+    left: Math.max(4, Math.min(boardW - w - 4, px + 12)),
+    top: Math.max(4, Math.min(boardH - h - 4, py - 8)),
+  });
+  const floating = (
+    <>
+      {commentBtnAt ? (
+        <button type="button" onPointerDown={(e) => e.stopPropagation()} onClick={() => sel && setComposer({ partId: sel.id })}
+          title="この部品にコメントしてダンに直してもらう"
+          className="absolute z-20 flex h-8 items-center gap-1 rounded-full bg-sky-600 px-2.5 text-xs font-semibold text-white shadow-lg hover:bg-sky-500"
+          style={floatPos(commentBtnAt, 96, 32)} data-thumb-comment-btn>
+          <MessageSquare className="h-3.5 w-3.5" />コメント
+        </button>
+      ) : null}
+      {composerAt ? (() => {
+        const [px, py] = toStagePx(composerAt.anchor[0], composerAt.anchor[1]);
+        const target = composerAt.part;
+        return (
+          <div onPointerDown={(e) => e.stopPropagation()} className="absolute z-30 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-xl"
+            style={{ width: COMPOSER_W, ...floatPos([px, py], COMPOSER_W, 150) }} data-thumb-composer>
+            {target ? (
+              <div className="mb-1.5 flex items-center gap-1.5">
+                <PartPreview doc={viewDoc || doc} part={(viewDoc || doc).parts.find((q) => q.id === target.id) || target} box={boxOf(target)} className="h-8 w-14 shrink-0" />
+                <span className="text-[11px] text-muted-foreground">この部品へのコメント{marks.length ? '（赤い線つき）' : ''}</span>
+              </div>
+            ) : <div className="mb-1.5 text-[11px] text-muted-foreground">赤い線へのコメント</div>}
+            <textarea
+              autoFocus
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') { e.preventDefault(); setComposer(null); if (mode === 'pen') { setMarks([]); setMode('select'); } return; }
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void sendMarks(); }
+              }}
+              rows={2}
+              placeholder="どう直してほしいか（Enter で送る）"
+              className="w-full resize-none rounded border border-border bg-background px-2 py-1.5 text-sm"
+              data-thumb-note
+            />
+            <div className="mt-1.5 flex gap-1.5">
+              <button type="button" disabled={sending || !note.trim()} onClick={() => void sendMarks()}
+                className="flex h-8 flex-1 items-center justify-center gap-1 rounded-md bg-sky-600 text-xs font-semibold text-white disabled:opacity-40" data-thumb-send>
+                {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}ダンに送る
+              </button>
+              <button type="button" onClick={() => { setComposer(null); setNote(''); setResendOf(null); if (mode === 'pen') { setMarks([]); setMode('select'); } }}
+                className="h-8 rounded-md border border-border px-2 text-xs">やめる</button>
+            </div>
+          </div>
+        );
+      })() : null}
+    </>
+  );
+
   const stage = (
     <div className={`relative min-h-0 min-w-0 ${compact ? 'w-full' : 'h-full w-full'}`}>
     <div ref={stageWrap} className={`min-h-0 min-w-0 overflow-auto ${compact ? 'w-full' : 'h-full w-full'}`}
-      style={compact ? { height: Math.round(stageW * doc.height / doc.width) + STAGE_MARGIN * 2 } : undefined} data-thumb-stage-wrap
+      style={compact ? { height: boardH + STAGE_MARGIN * 2 } : undefined} data-thumb-stage-wrap
       onPointerDown={onStagePointerDown}
       onDragOver={(e) => { if (Array.from(e.dataTransfer?.items || []).some((i) => i.kind === 'file')) e.preventDefault(); }}
       onDrop={onStageDrop}>
       <div className="flex min-h-full min-w-full w-max items-center justify-center" style={{ padding: STAGE_MARGIN }}>
-      <div style={{ width: viewW }} className="relative shrink-0 shadow-lg" data-thumb-stage>
+      <div style={{ width: boardW }} className={`relative shrink-0 ${outputView ? 'shadow-lg' : ''}`} data-thumb-stage>
         <ThumbCanvas
           ref={svgRef}
           doc={viewDoc || doc}
-          width={viewW}
+          width={boardW}
+          pasteboard={outputView || !board ? undefined : board}
           boxes={boxes}
           marks={shownMarks}
           onMeasure={(id, box) => setBoxes((b) => (b[id] && Math.abs(b[id].x - box.x) < 0.5 && Math.abs(b[id].y - box.y) < 0.5 && Math.abs(b[id].w - box.w) < 0.5 && Math.abs(b[id].h - box.h) < 0.5 ? b : { ...b, [id]: box }))}
           partProps={partProps}
-          overlay={overlay}
+          overlay={<>{overlay}{pins}</>}
           style={{ touchAction: 'none', cursor: mode === 'pen' ? 'crosshair' : undefined }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -1225,6 +1414,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           onPointerCancel={() => onPointerUp()}
           onContextMenu={onContextMenu}
         />
+        {floating}
       </div>
       </div>
     </div>
@@ -1258,7 +1448,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   );
 
   const strip = patterns ? (
-    <ThumbPatterns roomId={roomId} currentId={contentId} liveDoc={doc} link={patterns} compact={compact}
+    <ThumbPatterns roomId={roomId} currentId={contentId} liveDoc={doc} link={patterns} compact={compact} onActions={setPatternActions}
       beforeSwitch={async () => { if (saveTimer.current) window.clearTimeout(saveTimer.current); await flush(); }} />
   ) : null;
 

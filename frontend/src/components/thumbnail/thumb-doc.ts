@@ -66,6 +66,10 @@ export type ThumbInstruction = {
   marks: ThumbMark[];
   job_id?: string;
   created_at: string;
+  /** コメントを付けた部品（部品を選んでコメントした時） */
+  part_id?: string | null;
+  /** コメントの印を出す所（サムネの画素） */
+  anchor?: [number, number] | null;
 };
 
 export type ThumbFontId =

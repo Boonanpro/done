@@ -244,17 +244,22 @@ def build_thumb_task(ann: dict[str, Any], content: dict[str, Any], asset_room_id
     parts = data.get('parts_under') or []
     from app.services.thumbnail_doc import cli
     tool = cli()
+    target = str(data.get('target') or '').strip()
     lines = [
-        f"本人がエディターでサムネ「{content.get('title') or cid}」の上にペンで書き込んで送った直しの指示（チャットには書いていない）。",
-        f"- 指示の言葉: 「{note}」" if note else "- 指示の言葉: （無し。書き込みの形から読み取る）",
-        f"- 書き込みを描いたサムネの絵: {image}（Read で開ける。赤い線が本人の書き込み。裏で描いているので、無ければ数秒待つ）",
+        f"本人がエディターでサムネ「{content.get('title') or cid}」に付けたコメント（直しの指示。チャットには書いていない）。"
+        + ("部品を選んでコメントした。" if target else "ペンで書き込んでコメントした。"),
+        f"- コメントの言葉: 「{note}」" if note else "- コメントの言葉: （無し。書き込みの形から読み取る）",
+        f"- 書き込みを描いたサムネの絵: {image}（Read で開ける。赤い線は本人のペンの書き込み、水色の枠はコメントを付けた部品。"
+        "サムネの枠の外にある物は絵に入らないことがある。裏で描いているので、無ければ数秒待つ）",
     ]
+    if target:
+        lines.append(f"- コメントを付けた部品（「これ」「この文字」「この絵」はこの部品）: {target}")
     if len(box) == 4:
         lines.append(f"- 書き込みの範囲（サムネの画素、幅{content.get('timeline', {}).get('thumbnail', {}).get('width', 1920)}基準）: "
                      f"x={box[0]:.0f} y={box[1]:.0f} 幅={box[2]:.0f} 高さ={box[3]:.0f}")
     if parts:
         lines.append(f"- 書き込みの下にある部品（手前から）: {', '.join(str(p) for p in parts)}")
-    if data.get('selected'):
+    if data.get('selected') and not target:
         lines.append(f"- 本人がその時に選んでいた部品: {data.get('selected')}")
     lines += [
         "",
