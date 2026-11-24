@@ -58,6 +58,46 @@
    "kind": "text"
   },
   {
+   "id": "call/router-look",
+   "title": "この頼みは画面を見ないと分からないか",
+   "place": "voice",
+   "reader": "振り分け（Jev）",
+   "when": "通話で本人が何か頼むたび",
+   "source": "app/services/voice_router.py",
+   "why": "画面を見るのは要る時だけにするため。見ると決めた時だけ、共有中の画面やエディターの位置を判断と作業に渡す。",
+   "kind": "sections"
+  },
+  {
+   "id": "call/router-look-ask",
+   "title": "画面を見るかの問い",
+   "place": "voice",
+   "reader": "振り分け（Jev）",
+   "when": "通話で本人が何か頼むたび",
+   "source": "app/services/voice_router.py",
+   "why": "会話の中で前に出た物を指す「これ」を、画面の物と取り違えないため。",
+   "kind": "text"
+  },
+  {
+   "id": "call/screen-backend",
+   "title": "話している間の共有画面の読み方",
+   "place": "voice",
+   "reader": "通話の判断役",
+   "when": "画面を見ると決めた頼みを、共有画面を添えて判断する時・作業に渡す時",
+   "source": "app/services/voice_owner_screen.py",
+   "why": "頼みを話していた時に映っていた画面で判断し、話し終えた後に開いた画面と取り違えないため。決められない時は聞き返す。",
+   "kind": "text"
+  },
+  {
+   "id": "call/screen-unseen",
+   "title": "画面を見たいのに見えない時",
+   "place": "voice",
+   "reader": "通話の判断役",
+   "when": "画面を見ると決めた頼みで、画面が共有されていない時",
+   "source": "app/services/voice_router.py",
+   "why": "見えたつもりで答えず、共有を頼むため。",
+   "kind": "text"
+  },
+  {
    "id": "call/persona",
    "title": "通話のダンが、自分は誰かを知る文",
    "place": "voice",

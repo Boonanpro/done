@@ -54,6 +54,8 @@ ASKING = re.compile(r'(？|\?|くれる|ですか|でしょうか|かな|どれ|
 PROMISE_QUIET_S = 2.0
 PROMISE_TAIL = 70         # the promise is among the last characters of Dan's turn (not 「確認するね。…」 followed by the answer itself)
 ANSWER_CHARS = 30         # the owner's words this short, after Dan asked back, answer that question: the earlier request goes with them
+LOOK_ASKED = re.compile(r'画面(?:を|も)?(?:見て|みて|見える|見えて|見ながら|確認して)|(?:これ|ここ)(?:を)?見て')
+NO_LOOK = ('status', 'clock', 'reply', 'end', 'stop:')   # answered from the call's own state: nothing on the screen helps
 FILLERS = re.compile(r'^(?:えっと|えーと|えー|あの|あのー|あー|なんか|ちょっと|で|じゃあ|うん|まあ|そう|ねえ|おい|ダン)[、,。\s]*')
 
 
@@ -81,7 +83,8 @@ def questions(running, targets):
     went to a new site job, and 「でもこれ四十キロじゃん」 to a lookup (scripts/voice_route_eval.py, 38 of 50 at first)."""
     out = {'route': {'type': 'choice', 'criteria': dict(_PROMPTS['ROUTES']()), 'instructions': _PROMPTS['ASK']()},
            'reply': {'type': 'choice', 'criteria': _PROMPTS['REPLY'](), 'instructions': '最後の本人の言葉は、ダンにしてほしいことがあるのか、ダンに頼まれたことへの返事・報告だけか。'},
-           'calendar': {'type': 'choice', 'criteria': _PROMPTS['CALENDAR'](), 'instructions': '予定を聞いている時、どの期間か。'}}
+           'calendar': {'type': 'choice', 'criteria': _PROMPTS['CALENDAR'](), 'instructions': '予定を聞いている時、どの期間か。'},
+           'look': look_question()}
     for i, work in enumerate(running[-4:]):
         out[f'work_{i}'] = {'type': 'choice', 'criteria': {k: v.format(label=work['label']) for k, v in _PROMPTS['WORK']().items()},
                             'instructions': f'最後の本人の言葉が、今動いている「{work["label"]}」について何を言っているか。'}
@@ -89,6 +92,21 @@ def questions(running, targets):
         out['target'] = {'type': 'choice', 'criteria': {**targets, 'none': '上のどれでもない・分からない'},
                          'instructions': '画面に出してと頼んだのは、どのページや成果物か。'}
     return out
+
+
+def look_question():
+    """Does the request need what is on the owner's screen? (2026-11-25, the owner: 「Jevが『今は画面を見た方が良い』と判断したら
+    その時は見させる」). Only then the router fetches the screen he shares and gives it to the work; the speech model is told
+    nothing about the screen either way (voice_owner_screen)."""
+    return {'type': 'choice', 'criteria': _PROMPTS['LOOK'](), 'instructions': _PROMPTS['LOOK_ASK']()}
+
+
+def looks(answers, words):
+    """True when Jev says the request needs the screen, or he asked Dan to look (「画面見て」 always looks)."""
+    if LOOK_ASKED.search(words or ''):
+        return True
+    choice, p = chosen(answers, 'look')
+    return choice == 'look' and p >= CONFIDENT
 
 
 def decide(answers, running):
@@ -162,6 +180,8 @@ class Router:
         self.mark = (0, 0)          # where the call's words stood at the last delegation (turn, characters): the owner's words since are the request
         self.jobs = {}              # job id -> label, the chat Dan work started from this call
         self.targets = None         # artifact name -> path, read once
+        self.look = False           # Jev said the request being routed needs the owner's screen (look_question)
+        self.seen = []              # the pictures of his shared screen fetched for it (voice_owner_screen.Screen.look)
         self.tasks = set()
         self.closed = False
         self.answering = {}         # delegation id -> (label, started): requests the earlier backend (luna) is working on now
@@ -232,7 +252,7 @@ class Router:
             await self._settle(created)
             with prompt_store.observed_reads() as reads:
                 route, target, span, probability, elapsed = await self.route()
-            self.record('route_chosen', delegation_id=delegation_id[:40], route=route, probability=round(probability, 2), ms=elapsed,
+            self.record('route_chosen', delegation_id=delegation_id[:40], route=route, probability=round(probability, 2), ms=elapsed, look=self.look,
                         prompts=list(reads), after_ms=round((time.monotonic() - created) * 1000), **({'auto': True} if auto else {}))
             if auto and route in ('status', 'end'):   # nothing to start: the promise was about something else
                 return
@@ -320,6 +340,7 @@ class Router:
         if self.judge is None:
             self.judge = Decisions(self.user_id, timeout=JEV_TIMEOUT_S, max_calls=200, retry_transient_after=10)
         sketch = getattr(self.dialogue, 'sketch', None)
+        self.look = None   # not asked yet (a drawing on the board goes to the backend without Jev)
         if sketch and sketch.frames:
             # The text-only fast routes cannot resolve a pointing gesture. The normal visual backend has the same work tools.
             return 'other', '', '', 1.0, 0
@@ -337,7 +358,10 @@ class Router:
         fit(state, asked)
         got = await self.judge.choose(state, asked)
         if not got.get('available'):
+            # unknown: the earlier backend reads the screen he shares itself and the editor's moments as before
+            self.look = True if LOOK_ASKED.search(self.request_words()) else None
             return 'other', '', '', 0.0, got.get('elapsed_ms')
+        self.look = looks(got['answers'], self.request_words())
         route, probability = decide(got['answers'], running)
         target, sure = chosen(got['answers'], 'target')
         span, _ = chosen(got['answers'], 'calendar')
@@ -354,6 +378,7 @@ class Router:
         route, probability = chosen(judged[1].get('answers'), 'route')
         if not route or probability < .85 or route in ('show', 'calendar'):
             return None
+        self.look = looks(judged[1].get('answers'), latest)
         return route, '', '', probability, 0
 
     async def run(self, route, target, span, delegation_id, created):
@@ -367,6 +392,7 @@ class Router:
         if route == 'reply':
             return await self.replied(words, delegation_id, created)
         self.last_words = words
+        route = await self.look_at_screen(route, target, span, words)
         if route == 'calendar' and span in ('today', 'tomorrow', 'week'):
             return await self.reply(delegation_id, created, await self.calendar_text(span), spoken=True)
         if route == 'show' and target:
@@ -387,6 +413,26 @@ class Router:
             return await self.change(route, words, delegation_id, created)
         # document / message / rooms / other: the earlier backend, which writes on the stage and reads other rooms
         return await self.luna(delegation_id, created)
+
+    async def look_at_screen(self, route, target, span, words):
+        """When Jev said the request needs the screen: the pictures of his shared screen while he said it, for the model
+        that reads images (luna) and as files for the work. A route whose model reads no pictures goes to luna then."""
+        look = False if route.startswith(NO_LOOK) else self.look   # None: Jev did not answer
+        self.dialogue.looking = look
+        self.dialogue.screen_seen, self.seen = '', []
+        from app.services import voice_owner_screen
+        screen = getattr(self.dialogue, 'owner_screen', None)
+        sharing = screen is not None and screen.sharing()
+        if look is False or (look is None and not sharing):
+            return route
+        if sharing:
+            started = time.monotonic()
+            self.seen = await screen.look(words)
+            self.dialogue.screen_seen = await asyncio.to_thread(voice_owner_screen.handoff, self.seen, screen.folder)
+            self.record('screen_looked', pictures=len(self.seen), ms=round((time.monotonic() - started) * 1000))
+        if route == 'lookup' or (route == 'show' and not target) or (route == 'calendar' and span not in ('today', 'tomorrow', 'week')):
+            return 'other'   # the lookup reads no pictures
+        return route
 
     async def reply(self, delegation_id, created, text, spoken=True):
         """The answer to this delegation, through the call's one entry (voice_say). An answer (spoken) is the one thing
@@ -527,9 +573,10 @@ class Router:
             return await self.reply(delegation_id, created, '今の条件で調べ直している。', spoken=False)
         from app.services.command_center import execute
         editor = getattr(self.dialogue, 'editor', None)
-        if editor is not None:   # where he was in the editor while saying the correction (voice_editor)
+        if editor is not None and self.dialogue.looking is not False:   # where he was in the editor while saying the correction (voice_editor)
             from app.services import voice_editor
             words += chr(10) + await asyncio.to_thread(voice_editor.last_moment_text, self.dialogue.history, editor.asset_room_id, editor.content_id)
+        words += getattr(self.dialogue, 'screen_seen', '')
         out = await execute({'action': 'control_job', 'job_id': work_id, 'operation': 'update',
                              'task': '本人が通話で言った訂正・追加（こちらを優先）: ' + words}, self.room_id, self.user_id)
         ok = isinstance(out, dict) and isinstance(out.get('job'), dict)
@@ -606,10 +653,12 @@ class Router:
         # asked the owner which product 「まろっぴゃくさんじゅう」 was and then for the product page's address, though both
         # had been found in the call, and a second run drafted an Instagram message nobody had asked for.
         editor = getattr(self.dialogue, 'editor', None)
-        if editor is not None:   # a call from the editor: where he is and what he pointed at while speaking (voice_editor)
+        if editor is not None and self.dialogue.looking is not False:   # where he is and what he pointed at while speaking (voice_editor)
             from app.services import voice_editor
             said = (await asyncio.to_thread(editor.place) + chr(10)
                     + await asyncio.to_thread(voice_editor.turns_text, self.dialogue.history, editor.asset_room_id, editor.content_id, 16000))
+        elif editor is not None:   # Jev said the request needs nothing on the screen: which work, not where in it
+            said = await asyncio.to_thread(editor.place) + chr(10) + turns_text(self.dialogue.history, 16000)
         else:
             place = await asyncio.to_thread(screen_place, self.dialogue)
             said = (place + chr(10) if place else '') + turns_text(self.dialogue.history, 16000)
@@ -618,6 +667,14 @@ class Router:
         sketch = getattr(self.dialogue, 'sketch', None)
         if sketch and sketch.frames:
             given[0]['content'] = [{'type': 'input_text', 'text': given[0]['content']}, *sketch.parts()]
+        if self.dialogue.looking or self.seen:   # the request needs his screen (look_at_screen)
+            from app.services import voice_owner_screen
+            if isinstance(given[0]['content'], str):
+                given[0]['content'] = [{'type': 'input_text', 'text': given[0]['content']}]
+            shown = voice_owner_screen.parts(self.seen)
+            if not shown and editor is None and self.dialogue.looking:
+                shown = [{'type': 'input_text', 'text': prompt_store.text('call/screen-unseen')}]
+            given[0]['content'] = [*given[0]['content'], *shown]
         previous = None
 
         async def speak(text):   # a later result of a function goes into the call as spoken commentary
@@ -773,12 +830,14 @@ async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=Fal
         place = await asyncio.to_thread(voice_editor.call_editor, room_id)
         editor = voice_editor.Moments(place['asset_room_id'], place['content_id'], room_id=room_id) if place else None
     frames = []
+    # Jev said the request needs nothing on his screen: the work gets which work it is, not where in it he was
+    looking = getattr(dialogue, 'looking', None) is not False
     if editor is not None:
         from app.services import editor_handoff, timeline_draft
         last = next((turn for turn in reversed(turns) if turn.get('role') == 'user'), {})
         original = last.get('text') or words
-        note, frames = voice_editor.note_for(editor.asset_room_id, editor.content_id, turns)
-        moment = await asyncio.to_thread(voice_editor.turns_text, [last], editor.asset_room_id, editor.content_id)
+        note, frames = voice_editor.note_for(editor.asset_room_id, editor.content_id, turns) if looking else ('', [])
+        moment = await asyncio.to_thread(voice_editor.turns_text, [last], editor.asset_room_id, editor.content_id) if looking else ''
         reference = ''
         if len(turns) > 1 and not preview:
             folder = timeline_draft._room_dir(editor.asset_room_id) / 'assistant' / 'handoffs'
@@ -798,6 +857,9 @@ async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=Fal
         task += sketch.handoff()
     else:
         task += next((t['sketch_reference'] for t in reversed(turns) if t.get('sketch_reference')), '')
+    # the shared screen the router looked at for this request (Router.look_at_screen), or the one luna's start_work carried
+    task += getattr(dialogue, 'screen_seen', '') or next((t['screen_reference'] for t in reversed(turns)
+                                                         if isinstance(t, dict) and t.get('screen_reference')), '')
     return task, editor, frames
 
 
@@ -826,6 +888,8 @@ _PROMPTS = {
     'CALENDAR': lambda: prompt_store.sections('call/router-calendar'),
     'PROMISE': lambda: re.compile('(' + '|'.join(re.escape(w) for w in prompt_store.words('call/router-promise-words')) + ')'),
     'LUNA_RULES': lambda: prompt_store.text('call/luna-rules'),
+    'LOOK': lambda: prompt_store.sections('call/router-look'),
+    'LOOK_ASK': lambda: prompt_store.text('call/router-look-ask'),
     'CALL_JOB_NOTE': lambda: '\n\n' + prompt_store.text('call/call-job-note'),
 }
 

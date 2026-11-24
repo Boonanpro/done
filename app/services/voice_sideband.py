@@ -107,6 +107,9 @@ class Dialogue:
         # /live/backend/focus), each of his turns keeps it ('room'), and work he asks for goes there (voice_router.work_room).
         self.focus_room = ''
         self.focus_title = ''
+        self.owner_screen = None  # voice_owner_screen.Screen: the screen he shows in the call, looked at only when needed
+        self.screen_seen = ''     # the pictures the router fetched for the request being worked on, as files for its work
+        self.looking = None       # Jev said this request needs his screen (True/False); None outside a routed request
 
     def add(self, role, delta):
         if not delta: return
@@ -116,6 +119,8 @@ class Dialogue:
         else: self.history.append({'role': role, 'text': delta})
         if role == 'user' and self.focus_room:   # the room on his screen when he said it (the end of the turn)
             self.history[-1]['room'] = self.focus_room
+        if role == 'user' and self.owner_screen is not None:   # when he said it, for the shared screen (voice_owner_screen)
+            self.owner_screen.heard(delta)
         if role == 'user' and self.editor is not None:   # where he was in the editor while saying it (voice_editor)
             try: self.editor.heard(self.history[-1])
             except Exception: pass
@@ -207,6 +212,14 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
             if context:
                 reference = sketch.handoff()
                 context[-1]['sketch_reference'] = reference
+                if item.get('name') == 'steer_job' and args.get('kind', 'update') == 'update':
+                    args = {**args, 'instruction': str(args.get('instruction') or '') + reference}
+        # the screen the router looked at for this request (voice_router.Router.look), only when Jev said it was needed
+        if getattr(dialogue, 'screen_seen', '') and item.get('name') in {'start_work', 'steer_job'}:
+            context = [dict(t) for t in context]
+            if context:
+                reference = dialogue.screen_seen
+                context[-1]['screen_reference'] = reference
                 if item.get('name') == 'steer_job' and args.get('kind', 'update') == 'update':
                     args = {**args, 'instruction': str(args.get('instruction') or '') + reference}
         output = (search_output(early, str(args.get('query') or '')) if item.get('name') == 'web_search' else early) if early is not None else await run_function(item.get('name'), args, user_id, room_id, context, speak=speak)
@@ -771,6 +784,8 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
             state = voice_live.get_session(session_id, user_id)
             if own and state is not None:
                 dialogue.sketch = state['sketch'] = voice_sketch.Sketch(dialogue, send)
+                from app.services import voice_owner_screen   # the screen he chose to show (call-owner-screen.tsx)
+                dialogue.owner_screen = state['owner_screen'] = voice_owner_screen.Screen(dialogue)
                 state['dialogue'] = dialogue   # the screens tell it which room the owner looks at (/live/backend/focus)
             pending = {}
             from app.services.voice_interruption import Interruption

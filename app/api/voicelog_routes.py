@@ -313,6 +313,63 @@ async def receive_sketch(room_id: str, body: SketchFrame, request: Request):
         raise HTTPException(422, '絵を読み込めませんでした') from exc
 
 
+class ScreenPicture(BaseModel):
+    ago_ms: int = Field(ge=0, le=600000)
+    jpeg: str = Field(min_length=4, max_length=1500000)
+    surface: str = Field(default='', max_length=20)
+
+
+class ScreenPictures(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+    want_id: str = Field(min_length=1, max_length=40)
+    frames: list[ScreenPicture] = Field(default_factory=list, max_length=8)
+
+
+class ScreenSession(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+    surface: str = Field(default='', max_length=20)
+
+
+def _owner_screen(room_id, session_id, request):
+    from app.services import voice_live, voice_router
+    state = voice_live.get_session(session_id, _get_user(request).user_id)
+    if not state or state.get('room_id') != room_id:
+        raise HTTPException(403, 'この部屋の音声接続を確認できません')
+    screen = state.get('owner_screen')
+    if screen is None or not voice_router.enabled():
+        raise HTTPException(409, '画面を受け取る準備ができていません')
+    return screen
+
+
+@router.post('/live/backend/screen/{room_id}/start')
+async def start_owner_screen(room_id: str, body: ScreenSession, request: Request):
+    """The owner began to show his screen in the call (components/voice/call-owner-screen.tsx). The page keeps the
+    pictures; nothing is said to the speech model (app/services/voice_owner_screen.py)."""
+    _owner_screen(room_id, body.session_id, request).start(body.surface)
+    return {'started': True}
+
+
+@router.post('/live/backend/screen/{room_id}/stop')
+async def stop_owner_screen(room_id: str, body: ScreenSession, request: Request):
+    return {'stopped': _owner_screen(room_id, body.session_id, request).stop()}
+
+
+@router.post('/live/backend/screen/{room_id}/wait')
+async def wait_owner_screen(room_id: str, body: ScreenSession, request: Request):
+    """The page's long poll: answered when a request in the call needs the screen (Jev's choice, voice_router)."""
+    screen = _owner_screen(room_id, body.session_id, request)
+    return {'want': await screen.next_want() if screen.sharing() else None, 'sharing': screen.sharing()}
+
+
+@router.post('/live/backend/screen/{room_id}')
+async def receive_owner_screen(room_id: str, body: ScreenPictures, request: Request):
+    screen = _owner_screen(room_id, body.session_id, request)
+    try:
+        return {'accepted': screen.receive(body.want_id, [f.model_dump() for f in body.frames])}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(422, '画面の絵を読み込めませんでした') from exc
+
+
 class LiveFocus(BaseModel):
     session_id: str = Field(min_length=1, max_length=200)
     room_id: str = Field(min_length=1, max_length=80)
