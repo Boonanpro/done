@@ -1253,7 +1253,8 @@ function AssetThumb({ asset, fallback }: { asset: ProductionAsset; fallback: Rea
   return <>{fallback}</>;
 }
 
-// 動画とひと組の切り替え（動画 / サムネ1 / サムネ2…）。サムネのページの上に出す
+// 動画とひと組の切り替え（動画 / サムネ）。サムネのページの上に出す。サムネの案が何枚あっても札は「サムネ」1つで、
+// 案はサムネのページの下の帯で選ぶ（2026-11-24 本人「上のタブでサムネ2という感じで増えていく必要は無い。動画かサムネかだけで良い」）
 function WorkSections({ video, thumbs, current, compact, onOpen, onCreate }: {
   video: ProductionContent; thumbs: ProductionContent[]; current: string; compact: boolean;
   onOpen: (content: ProductionContent) => void; onCreate?: () => Promise<void>;
@@ -1261,14 +1262,15 @@ function WorkSections({ video, thumbs, current, compact, onOpen, onCreate }: {
   const [busy, setBusy] = useState(false);
   const tab = (active: boolean) =>
     `flex shrink-0 items-center gap-1 rounded-md px-2.5 ${compact ? 'h-9 text-sm' : 'h-7 text-xs'} font-medium ${active ? 'bg-primary text-primary-foreground' : 'text-foreground hover:bg-muted'}`;
+  const onThumb = thumbs.some((t) => t.id === current);
   return (
     <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-muted/30 px-2 py-1" data-work-sections>
       <button type="button" className={tab(video.id === current)} onClick={() => onOpen(video)} data-section-video><Film className="h-3.5 w-3.5" />動画</button>
-      {thumbs.map((t, k) => (
-        <button key={t.id} type="button" className={tab(t.id === current)} onClick={() => onOpen(t)} data-section-thumb={t.id}>
-          <ImageIcon className="h-3.5 w-3.5" />{thumbs.length > 1 ? `${k === 0 ? '★' : ''}${t.title || `サムネ${k + 1}`}` : 'サムネ'}
+      {thumbs.length ? (
+        <button type="button" className={tab(onThumb)} onClick={() => { if (!onThumb) onOpen(thumbs[0]); }} data-section-thumb={thumbs[0].id}>
+          <ImageIcon className="h-3.5 w-3.5" />サムネ
         </button>
-      ))}
+      ) : null}
       {!thumbs.length && onCreate ? (
         <button type="button" className={tab(false)} disabled={busy} data-section-thumb-create
           onClick={async () => { setBusy(true); try { await onCreate(); } finally { setBusy(false); } }}>

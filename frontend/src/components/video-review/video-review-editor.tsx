@@ -4789,6 +4789,7 @@ export function VideoReviewEditor({
           // 絵: PC のタイムラインと同じ（動画はクリップが使っている所の1分の絵の帯の1コマ、画像はその画像）
           let img: string | undefined;
           let frame: number | undefined;
+          let strip: { base: string; ss: number; se: number } | undefined;
           const clip = it.clip;
           if (clip && it.itemType === 'video' && !isSceneClip(clip)) {
             const asset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
@@ -4798,9 +4799,12 @@ export function VideoReviewEditor({
               const sec = Math.max(0, Number(clip.source_start || 0) + 0.5);
               img = `${asset.filmstrip_base}&m=${Math.floor(sec / 60)}`;
               frame = Math.floor((sec % 60) / 2);
+              const ss = Number(clip.source_start || 0);
+              const se = clip.source_end != null ? Number(clip.source_end) : ss + ((Number(it.end) || 0) - (Number(it.start) || 0));
+              strip = { base: asset.filmstrip_base, ss, se };
             } else img = asset?.thumbnail_url || undefined;
           }
-          return { s: Number(it.start) || 0, e: Number(it.end) || 0, color, img, frame };
+          return { s: Number(it.start) || 0, e: Number(it.end) || 0, color, img, frame, strip };
         })
         .sort((a, b) => a.s - b.s);
       const maxLen = items.reduce((m, it) => Math.max(m, it.e - it.s), 0);

@@ -149,6 +149,8 @@ type Props = {
   overlay?: ReactNode;            // 選んだ部品の枠など（同じ座標で上に描く）
   style?: React.CSSProperties;
   className?: string;
+  /** 見せる範囲（既定はサムネ全体）。部品の一覧の小さな絵で、その部品の所だけを見せる */
+  view?: PartBox;
   onPointerDown?: React.PointerEventHandler<SVGSVGElement>;
   onPointerMove?: React.PointerEventHandler<SVGSVGElement>;
   onPointerUp?: React.PointerEventHandler<SVGSVGElement>;
@@ -157,7 +159,7 @@ type Props = {
 };
 
 export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas(
-  { doc, width = '100%', marks, onImageState, onMeasure, boxes, partProps, overlay, style, className, ...handlers }, ref,
+  { doc, width = '100%', marks, onImageState, onMeasure, boxes, partProps, overlay, style, className, view, ...handlers }, ref,
 ) {
   const images = doc.parts.filter((p) => p.type === 'image' && !p.hidden);
   const loadedRef = useRef(new Set<string>());
@@ -179,12 +181,12 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
   return (
     <svg
       ref={ref}
-      viewBox={`0 0 ${doc.width} ${doc.height}`}
+      viewBox={view ? `${view.x} ${view.y} ${view.w} ${view.h}` : `0 0 ${doc.width} ${doc.height}`}
       width={width}
       xmlns="http://www.w3.org/2000/svg"
       className={className}
       {...handlers}
-      style={{ display: 'block', overflow: 'visible', background: doc.background || '#111', aspectRatio: `${doc.width} / ${doc.height}`, ...style }}
+      style={{ display: 'block', overflow: 'visible', background: doc.background || '#111', aspectRatio: view ? `${view.w} / ${view.h}` : `${doc.width} / ${doc.height}`, ...style }}
     >
       <defs><clipPath id={clipId}><rect x={0} y={0} width={doc.width} height={doc.height} /></clipPath></defs>
       <g clipPath={`url(#${clipId})`}>
@@ -235,3 +237,36 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
     </svg>
   );
 });
+
+/** 部品の見せる範囲: その部品の枠（回転も含む）をサムネの枠で切った所。枠の外に全部出ている時は部品の枠のまま */
+export function partView(doc: ThumbDoc, p: ThumbPart, box: PartBox): PartBox {
+  let { x, y, w, h } = box;
+  const rot = ((p.rotation || 0) * Math.PI) / 180;
+  if (rot) {
+    const [cx, cy] = partCenter(p, box);
+    const pts = [[x, y], [x + w, y], [x, y + h], [x + w, y + h]].map(([px, py]) => [
+      cx + (px - cx) * Math.cos(rot) - (py - cy) * Math.sin(rot),
+      cy + (px - cx) * Math.sin(rot) + (py - cy) * Math.cos(rot),
+    ]);
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+    x = Math.min(...xs); y = Math.min(...ys); w = Math.max(...xs) - x; h = Math.max(...ys) - y;
+  }
+  const x0 = Math.max(0, x), y0 = Math.max(0, y), x1 = Math.min(doc.width, x + w), y1 = Math.min(doc.height, y + h);
+  if (x1 - x0 >= 4 && y1 - y0 >= 4) { x = x0; y = y0; w = x1 - x0; h = y1 - y0; }
+  const pad = Math.max(w, h) * 0.04;
+  return { x: x - pad, y: y - pad, w: w + pad * 2, h: h + pad * 2 };
+}
+
+// 透けている所が分かる市松模様（部品の一覧の小さな絵の下地）
+const CHECKER = 'repeating-conic-gradient(rgba(255,255,255,0.14) 0% 25%, transparent 0% 50%) 50% / 10px 10px, #2a2a2a';
+
+/** 部品1つだけを、その部品の所だけ切り取って描く小さな絵（部品の一覧・右クリックの一覧・選んだ部品の欄）。
+ *  2026-11-24 本人「どんなパーツかをテキストで表すんじゃなくて、全部にサムネをつけて。見ただけで分かるように」 */
+export function PartPreview({ doc, part, box, className }: { doc: ThumbDoc; part: ThumbPart; box: PartBox; className?: string }) {
+  const one: ThumbDoc = { ...doc, background: 'transparent', parts: [{ ...part, hidden: false, opacity: Math.max(0.35, part.opacity ?? 1) } as ThumbPart] };
+  return (
+    <span className={`pointer-events-none block overflow-hidden rounded-sm ${className || ''}`} style={{ background: CHECKER }} data-part-preview={part.id}>
+      <ThumbCanvas doc={one} view={partView(doc, part, box)} width="100%" style={{ width: '100%', height: '100%', aspectRatio: 'auto', background: 'transparent', overflow: 'hidden' }} />
+    </span>
+  );
+}
