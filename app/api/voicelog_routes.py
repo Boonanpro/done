@@ -372,6 +372,8 @@ class TranscriptRequest(BaseModel):
     role: str = Field(pattern="^(user|assistant)$")
     content: str = Field(min_length=1, max_length=8000)
     created_at: Optional[datetime] = None
+    session_id: Optional[str] = Field(default=None, max_length=200)
+    audio_endpoint: Optional[str] = Field(default=None, pattern="^(pin|phone)$")
 
 
 @router.post("/{room_id}")
@@ -393,7 +395,8 @@ async def add_voice_transcript(room_id: str, request: Request, body: TranscriptR
     svc = ChatService()
     try:
         message = await svc.send_message(room_id, user.user_id, content, sender_type=sender_type,
-            created_at=body.created_at.isoformat() if body.created_at else None)
+            created_at=body.created_at.isoformat() if body.created_at else None,
+            ai_context={"voice_session_id": body.session_id, "audio_endpoint": body.audio_endpoint} if body.session_id else None)
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
     return {"ok": True, "id": message.get("id")}

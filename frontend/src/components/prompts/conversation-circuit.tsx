@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react';
 import { Activity, AudioLines, CircleStop, Play, History as HistoryIcon, Radio } from 'lucide-react';
 import { ApiError } from '@/lib/api-client';
 import { promptRequest, promptsChat } from '@/lib/prompts-api';
@@ -21,7 +21,9 @@ const format = (date: string) => new Date(date).toLocaleString('ja-JP', {month:'
 const reason = (error: unknown) => error instanceof ApiError ? String((error.data as {detail?:string})?.detail || '記録を取得できませんでした。')
   : error instanceof Error ? error.message : '記録を取得できませんでした。';
 const templates = ['この字幕をもう少し大きくして', '明日の予定を教えて', '今どこまで進んでる？'];
-export function ConversationCircuit({visible, ...props}: MapActions & {visible:boolean}) {
+export type TrialChannel = 'voice' | 'editor' | 'chat';
+export type TrialControls = { open: (channel: TrialChannel) => void };
+export function ConversationCircuit({visible, controls, ...props}: MapActions & {visible:boolean; controls?: Ref<TrialControls>}) {
   const [trialView, setTrialView] = useState<'current' | 'previous' | 'actual'>('current');
   const [rooms,setRooms]=useState<Room[]>([]), [room,setRoom]=useState('');
   const [section,setSection]=useState<'idle'|'live'|'history'|'trial'>('idle'), [kind,setKind]=useState('');
@@ -124,6 +126,11 @@ export function ConversationCircuit({visible, ...props}: MapActions & {visible:b
     }catch(e){setError(reason(e));}
     finally{actionLock.current=false;setBusy(false);controller.current=null;}
   }
+  useImperativeHandle(controls, () => ({open(next) {
+    if (busy) return;
+    if (next !== channel) chooseChannel(next);
+    setSection('trial'); setExecute(false); setError('');
+  }}));
   const items=history.items.filter(i=>!kind||i.kind===kind);
   const shown=selected||history.selected;
   function watchRequest(item:Item & {room:string}){

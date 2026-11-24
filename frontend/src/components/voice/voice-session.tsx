@@ -103,7 +103,7 @@ export function VoiceSession({ roomId, onClose, stageWidthClass = 'w-[520px]' }:
       void fetch(`/api/v1/voicelog/${encodeURIComponent(roomId)}`, {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify({ role, content: content.slice(0, 7500), created_at: createdAt }),
+        body: JSON.stringify({ role, content: content.slice(0, 7500), created_at: createdAt, session_id: liveSessionIdRef.current || undefined }),
         keepalive: true,
       }).catch(() => {});
     },

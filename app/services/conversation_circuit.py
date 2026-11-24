@@ -245,6 +245,24 @@ def chat_steps(rows):
     return events
 
 
+def event_time(event):
+    try:
+        value = datetime.fromisoformat(str(event.get('at') or '').replace('Z', '+00:00'))
+        return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).timestamp()
+    except (ValueError, OverflowError):
+        return float('-inf')
+
+
+def chat_replies(db, room, turns):
+    if not turns:
+        return []
+    rows = (db.table('chat_messages').select('created_at,content')
+            .eq('room_id', room).eq('sender_type', 'ai').in_('ai_context->>turn_id', sorted(turns))
+            .order('created_at').execute().data or [])
+    return [step(m['created_at'], 'owner', 'ダンの返事', m['content'])
+            for m in rows if (m.get('content') or '').strip()]
+
+
 def snapshot(db, room, user, selected=''):
     runs = (db.table('agent_runs').select('id,origin_message_id,state,created_at,updated_at')
             .eq('room_id', room).order('created_at', desc=True).limit(50).execute().data or [])
@@ -292,7 +310,9 @@ def snapshot(db, room, user, selected=''):
                               state='履歴', kind='チャット'))
         if current and m['sender_type'] in ('human','user','dan','ai','assistant'):
             human = m['sender_type'] in ('human','user')
-            standalone[current].append(step(m['created_at'], 'owner' if human else 'chat',
+            if not human:
+                standalone[current].append(step(m['created_at'], 'chat', '返事を書きました'))
+            standalone[current].append(step(m['created_at'], 'owner',
                                             '本人の言葉' if human else 'ダンの返事', m['content']))
     items.sort(key=lambda x: x['at'], reverse=True)
     key = selected or (items[0]['id'] if items else '')
@@ -304,10 +324,11 @@ def snapshot(db, room, user, selected=''):
         if msg:
             events.append(step(msg['created_at'], 'owner', '本人から届いた言葉', msg['content']))
         events.append(step(run['created_at'], 'chat', 'チャットで受付'))
-        rows = (db.table('execution_events').select('created_at,event_type,tool_name,tool_label,metadata')
+        rows = (db.table('execution_events').select('created_at,event_type,tool_name,tool_label,metadata,turn_id')
                 .eq('room_id', room).eq('run_id', run['id']).in_('event_type',['tool_use','phase','done','error'])
                 .order('seq', desc=True).limit(250).execute().data or [])
         events.extend(chat_steps(rows))
+        events.extend(chat_replies(db, room, {r['turn_id'] for r in rows if r.get('turn_id')}))
         if run['state'] not in ('running','queued'):
             events.append(step(run['updated_at'], 'chat', STATE.get(run['state'],run['state'])))
         break
@@ -318,19 +339,32 @@ def snapshot(db, room, user, selected=''):
         except ValueError:
             turn_id = None
         if turn_id:
-            rows = (db.table('execution_events').select('created_at,event_type,tool_name,tool_label,metadata')
+            rows = (db.table('execution_events').select('created_at,event_type,tool_name,tool_label,metadata,turn_id')
                     .eq('room_id', room).eq('turn_id', turn_id).is_('run_id', 'null')
                     .in_('event_type', ['tool_use','phase','done','error']).order('seq', desc=True)
                     .limit(250).execute().data or [])
-            events = chat_steps(rows)
+            events = chat_steps(rows) + chat_replies(db, room, {turn_id})
             if rows:
                 items.insert(0, dict(id=key, at=events[0]['at'], title='チャットの作業', kind='チャット',
                                      state='完了' if rows[0]['event_type']=='done' else '作業中'))
     if key.startswith('message/'):
         events = standalone.get(key[8:], [])
     if key.startswith('voice/'):
-        events = voice_steps(calls.get(key[6:], []), jobs)
+        sid = key[6:]
+        events = voice_steps(calls.get(sid, []), jobs)
+        if sid in calls:
+            transcript = (db.table('chat_messages').select('sender_type,content,created_at,ai_context')
+                          .eq('room_id', room).eq('ai_context->>voice_session_id', sid)
+                          .order('created_at').execute().data or [])
+            for row in transcript:
+                human = row['sender_type'] == 'human'
+                text = (row.get('content') or '').removeprefix('🎙 ').strip()
+                if text:
+                    events.append(step(row['created_at'], 'owner', '聞き取った言葉' if human else 'ダンが話した言葉', text))
+                    if human and (row.get('ai_context') or {}).get('audio_endpoint') == 'pin':
+                        events.append(step(row['created_at'], 'pin', 'ピンから音声を入力'))
+                        events.append(step(row['created_at'], 'audio', 'スマホの音声モードに届きました'))
     if key.startswith('job/'):
         events = next((job_steps(j) for j in jobs if j['id']==key[4:]), [])
+    events.sort(key=event_time)
     return dict(items=items, selected=key, steps=events)
-

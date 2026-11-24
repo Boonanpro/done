@@ -21,6 +21,7 @@ export interface ArchNode {
   model: string;          // 中で動く物（モデル・プログラム）
   line: string;           // 何をする所か（1文）
   icon: string;           // public/prompts/arch/<icon>.webp
+  height?: number;
   x: number; y: number; w: number;   // 図の中の位置（左上・幅。単位は図の幅 W に対して）
   prompts?: string[];     // この箱が読む指示文（app/prompts/catalog.json の id。skill/* は手順書）
   skills?: boolean;       // 手順書（.claude/skills）もここで読む
@@ -41,79 +42,103 @@ export interface ArchEdge {
   at?: number;            // 線の上の札の位置（0=出る所、1=着く所。省くと0.5）
 }
 
-export const W = 1000;
-export const H = 1320;
+export const W = 2620;
+export const H = 2190;
 export const BOX_H = 78;
 
 export const NODES: ArchNode[] = [
-  { id: 'owner', name: 'みきさん', model: 'スマホ・PCのチャット・エディター', icon: 'owner', x: 360, y: 8, w: 280,
+  { id: 'owner', name: 'みきさん', model: 'スマホ・PCのチャット・エディター', icon: 'miki-room', height: 202, x: 16, y: 164, w: 164,
     line: '話しかける・頼む・直す。チャットと通話とエディターの画面から。' },
-  { id: 'next', name: '画面のサーバー', model: 'Next.js（dan.paina.info）', icon: 'next', x: 360, y: 118, w: 280,
+  { id: 'devices', name: 'PC・スマホのチャット', model: 'ダンのチャット画面', icon: 'chat-pc',
+    x: 228, y: 74, w: 205, height: 148, line: 'PCやスマホからダンの部屋に依頼を送り、同じチャットで返事を読む。' },
+  { id: 'pin', name: '胸元のダンピン', model: 'スマホで通話を開始', icon: 'chest-pin',
+    x: 230, y: 427, w: 178, height: 144, line: '胸元のピンを押すと、つないだスマホのダンが通話を始める。',
+    programs: [{path: 'mobile/App.tsx', what: 'ピンからのタップを受け、スマホで音声モードを開く。'}] },
+  { id: 'audio', name: 'スマホ・PCの音声モード', model: '声を届け、返事を聞く', icon: 'voice',
+    x: 515, y: 500, w: 214, line: 'マイクで話した声を通話のダンに送り、音声の返事を受け取る。' },
+  { id: 'editor-ui', name: 'エディター', model: '作品とタイムライン', icon: 'editor-screen', height: 132, x: 228, y: 240, w: 205,
+    line: '作品を開き、ダンと制作の会話で編集を頼む。' },
+  { id: 'reply', name: '届いた返事', model: 'チャット・通話', icon: 'chat', x: 2260, y: 175, w: 305,
+    line: '選んだ依頼に対してダンが実際に返した言葉。' },
+  { id: 'skills', name: 'スキルの手順書', model: '全文・参考ページ', icon: 'v-skills', x: 1220, y: 870, w: 235,
+    line: 'ダンが仕事に使う手順書を検索し、読んで編集する。' },
+  { id: 'next', name: '画面のサーバー', model: 'Next.js（dan.paina.info）', icon: 'next', x: 502, y: 105, w: 178,
     line: '画面を出し、チャットや通話の要求を入口へ渡す。' },
-  { id: 'gateway', name: '入口', model: 'プログラム（9100・8100）', icon: 'gateway', x: 360, y: 228, w: 280,
+  { id: 'gateway', name: '入口', model: 'プログラム（9100・8100）', icon: 'gateway', x: 718, y: 105, w: 152,
     line: '要求を、今動いている版の会話の本体・道具のサーバーへ渡す。ダンを入れ替えても会話を切らないための所。' },
-  { id: 'core', name: '会話の本体', model: 'プログラム（9000）', icon: 'core', x: 20, y: 346, w: 240,
+  { id: 'core', name: '会話の本体', model: 'プログラム（9000）', icon: 'core', x: 952, y: 42, w: 179,
     line: 'チャットの1通ごとにチャットのダンを起こし、作業の部屋の仕事を回す。' },
-  { id: 'sandbox', name: '道具と通話のサーバー', model: 'プログラム（8000）', icon: 'sandbox', x: 380, y: 346, w: 500,
+  { id: 'sandbox', name: '道具と通話のサーバー', model: 'プログラム（8000）', icon: 'sandbox', x: 948, y: 270, w: 202,
     line: '通話を作って横で聞き、振り分け・調べもの係・画面係を動かす。エディターの裏もここ。' },
-  { id: 'chat', name: 'チャットのダン', model: 'Claude Code', icon: 'chat', x: 20, y: 470, w: 240, video: true,
+  { id: 'chat', name: 'チャットのダン', model: '部屋で選んだモデル', icon: 'chat', x: 1236, y: 24, w: 207, video: true,
     prompts: ['workspace/user', 'workspace/soul', 'workspace/rules', 'code/command-center'], skills: true,
     line: 'チャットで話し、道具を使って作業する。モデルは部屋ごとに決まる。USER・SOUL・RULES は毎回読む。Done の部屋だけ部屋の役目の文も読む。' },
-  { id: 'voice', name: '通話のダン', model: 'GPT-Live（OpenAI）', icon: 'voice', x: 300, y: 470, w: 240,
+  { id: 'voice', name: '通話のダン', model: 'GPT-Live（OpenAI）', icon: 'voice', x: 950, y: 504, w: 196,
     prompts: ['call/persona', 'call/policies', 'call/editor-place', 'call/router-job-started'],
     line: '声で受け答えする。自分で答えられない頼みは、裏に任せる。' },
-  { id: 'editor', name: 'エディターのダンと制作', model: '部屋のモデル（チャットと同じ）', icon: 'editor', x: 740, y: 470, w: 240, same: 'chat', skills: true, video: true, prompts: ['work/editor-handoff'],
+  { id: 'editor', name: 'エディターのダンと制作', model: '部屋のモデル（チャットと同じ）', icon: 'editor', x: 1220, y: 229, w: 210, same: 'chat', skills: true, video: true, prompts: ['work/editor-handoff'],
     line: '作品ごとの隠れた部屋の、ふつうのチャット。チャットのダンと同じ決まりで動き、その作品のタイムラインの道具が足される。' },
-  { id: 'router', name: '振り分け', model: 'Jev', icon: 'router', x: 300, y: 688, w: 240,
+  { id: 'router', name: '振り分け', model: 'Jev', icon: 'router', x: 1222, y: 510, w: 181,
     prompts: ['call/router-routes', 'call/router-ask', 'call/router-work', 'call/router-reply', 'call/router-calendar', 'call/router-promise-words', 'call/editor-place'],
     line: '通話のダンが任せた頼みを、どこへ回すか一瞬で選ぶ。' },
-  { id: 'editorTalk', name: 'エディターの「話す」', model: 'GPT-Live ＋ GPT-6 Astra', icon: 'editorTalk', x: 740, y: 688, w: 240,
+  { id: 'editorTalk', name: 'エディターの「話す」', model: 'GPT-Live ＋ GPT-6 Astra', icon: 'editorTalk', x: 1516, y: 256, w: 210,
     prompts: ['code/editor-live', 'code/editor-reasoning', 'code/editor-conversation'],
     line: 'Windows 版の画面のエディターで、指した所を声で直す。Mac の画面版エディターの「話す」はふつうの通話で、振り分けから作品の部屋の並行作業へ回る。' },
-  { id: 'lookup', name: '調べもの係', model: 'DeepSeek', icon: 'lookup', x: 440, y: 924, w: 160,
+  { id: 'lookup', name: '調べもの係', model: 'DeepSeek', icon: 'lookup', x: 1516, y: 439, w: 188,
     prompts: ['call/lookup-instructions'],
     line: '通話を止めずに、裏で調べる・記憶やメールを読む。' },
-  { id: 'stage', name: '画面係', model: 'GPT-5.4 mini', icon: 'stage', x: 615, y: 924, w: 170,
+  { id: 'stage', name: '画面係', model: 'GPT-5.4 mini', icon: 'stage', x: 1516, y: 564, w: 188,
     prompts: ['call-code/stage-instructions', 'call-code/stage-flow-message', 'call-code/stage-flow-doc', 'call-code/stage-flow-assist', 'call-code/stage-flow-media'],
     line: '通話中に見せる画面（写真・地図・下書き）を描く。' },
-  { id: 'backend', name: '判断役', model: 'GPT-6 Luna', icon: 'backend', x: 800, y: 924, w: 180,
+  { id: 'backend', name: '判断役', model: 'GPT-6 Luna', icon: 'backend', x: 1516, y: 682, w: 188,
     prompts: ['call/backend-instructions', 'call/backend-plain-rules', 'call/backend-background-rules', 'call/luna-rules', 'call-code/backend-tools', 'call-code/backend-background-lines', 'call/editor-place'],
     line: '迷う頼み・連絡・文書を、道具を使って判断し、下書きを書く（OpenAI のモデル）。' },
-  { id: 'parallel', name: '並行作業', model: '部屋の作業用モデル', icon: 'parallel', x: 355, y: 1096, w: 290, group: 'work', video: true,
+  { id: 'parallel', name: '並行作業', model: '部屋の作業用モデル', icon: 'parallel', x: 1852, y: 282, w: 228, group: 'work', video: true,
     prompts: ['work/parallel-job-rules', 'work/confirmation-rule', 'call/call-job-note', 'call/editor-call-note', 'work/editor-handoff', 'call/voice-task', 'call/make-origin-note'], same: 'chat',
     line: '頼んだ部屋の会話を引き継いだ別のダンが、時間のかかる制作・調べものをする。起こすのはチャットのダン（並行作業の道具）と、振り分け（作る・直す）と、エディターのタイムラインに置いたピン・ペン・枠の指示。' },
-  { id: 'codex', name: '別の部屋への頼み', model: 'Codex（GPT-6 Astra）', icon: 'codex', x: 30, y: 1096, w: 290, group: 'work',
+  { id: 'codex', name: '別の部屋への頼み', model: 'Codex（GPT-6 Astra）', icon: 'codex', x: 1852, y: 40, w: 228, group: 'work',
     prompts: ['work/codex-job-rules', 'work/confirmation-rule', 'work/relay-header'],
     line: 'チャットのダンが別の部屋に頼んだ作業。結果はその部屋に「〇〇からの報告」で届く。' },
-  { id: 'api', name: '手順の再生', model: 'DeepSeek', icon: 'api', x: 680, y: 1096, w: 290, group: 'work',
+  { id: 'api', name: '手順の再生', model: 'DeepSeek', icon: 'api', x: 1852, y: 680, w: 228, group: 'work',
     prompts: ['work/api-job-instructions', 'work/confirmation-rule', 'work/relay-header'],
     line: '判断役が起こす、一度やった手順の再生などの短い手続き。' },
 ];
 
 // 作業の部屋の枠（中の3つを囲む）
-export const WORK_FRAME = { x: 14, y: 1060, w: 972, h: 216, name: '作業の部屋',
-  line: '終わると、通話中ならその通話で声で、そうでなければ頼んだ部屋のチャットへ報告する。' };
+export const WORK_FRAME = { x: 1816, y: 6, w: 327, h: 756, name: '作業の部屋',
+  line: '終わると通話か、頼んだ部屋に結果が届く。' };
 
+// Connections run left to right. The line from the pin is the tap received by the phone.
 export const EDGES: ArchEdge[] = [
-  { from: 'owner', to: 'next' },
+  { from: 'owner', to: 'devices' },
+  { from: 'owner', to: 'pin' },
+  { from: 'owner', to: 'editor-ui' },
+  { from: 'editor-ui', to: 'next' },
+  { from: 'chat', to: 'reply', label: 'チャットに返す', a:'t', b:'t', bend:38 },
+  { from: 'editor', to: 'reply', label: '作品の会話に返す' },
+  { from: 'voice', to: 'reply', label: '声で返す', a:'b', b:'b', bend:220 },
+
+  { from: 'owner', to: 'audio', a: 'r', b: 't', bend: 115 },
+  { from: 'pin', to: 'audio', label: 'スマホで通話' },
+  { from: 'devices', to: 'next' },
   { from: 'next', to: 'gateway' },
-  { from: 'gateway', to: 'core', label: 'チャット', ax: 70 },
-  { from: 'gateway', to: 'sandbox', label: '通話・エディター・道具', ax: 220 },
-  { from: 'core', to: 'chat', label: '1通ごとに起こす' },
-  { from: 'owner', to: 'voice', a: 'l', b: 'l', dashed: true, label: '声はOpenAIへ直接', bend: 70 },
-  { from: 'sandbox', to: 'voice', label: '通話を作り、横で聞く', ax: 90 },
-  { from: 'sandbox', to: 'editor', ax: 440, label: '作品・タイムライン', at: 0.7 },
-  { from: 'core', to: 'editor', a: 'r', b: 'l', label: '作品の部屋の会話', bend: 60, at: 0.8 },
-  { from: 'sandbox', to: 'editorTalk', a: 'r', b: 'r', bend: 40 },
-  { from: 'voice', to: 'router', label: '任せる' },
+  { from: 'gateway', to: 'core' },
+  { from: 'gateway', to: 'sandbox' },
+  { from: 'core', to: 'chat' },
+  { from: 'core', to: 'editor' },
+  { from: 'sandbox', to: 'editor' },
+  { from: 'sandbox', to: 'editorTalk', a: 'b', b: 'b', bend: 124 },
+  { from: 'sandbox', to: 'voice', a: 'b', b: 't', label: '通話を準備' },
+  { from: 'audio', to: 'voice', label: '声' },
+  { from: 'voice', to: 'router' },
   { from: 'router', to: 'lookup', label: '調べる' },
   { from: 'router', to: 'stage', label: '見せる' },
-  { from: 'router', to: 'backend', label: '迷う・連絡・文書' },
-  { from: 'router', to: 'parallel', label: '作る・直す', ax: 40, bx: 90, bend: 110, at: 0.62 },
-  { from: 'chat', to: 'parallel', label: '並行作業', ax: 200, bx: 40, at: 0.55 },
-  { from: 'chat', to: 'codex', label: '別の部屋へ頼む', ax: 120, bx: 110, at: 0.6 },
-  { from: 'backend', to: 'api', label: '手順の再生', ax: 90, bx: 210 },
-];
+  { from: 'router', to: 'backend', label: '判断する', at: 0.72 },
+  { from: 'router', to: 'parallel', label: '制作を頼む', at: 0.34 },
+  { from: 'chat', to: 'parallel', label: '作業を任せる' },
+  { from: 'chat', to: 'codex', label: '別の部屋へ' },
+  { from: 'backend', to: 'api', label: '手順を再生' },
+].map(edge => ({a: 'r', b: 'l', ...edge} as ArchEdge));
 
 // ---- 動画を作る・直す時（構成図の「チャットのダン」「エディターのダンと制作」「並行作業」から降りる枝）----
 // 2026-11-23 本人「動画の作成や編集がチャットのダンや並行作業に届いて、その後にどういうスキルやコンポーネントがあって、それをどう
@@ -123,7 +148,7 @@ export const VIDEO_W = 1000;
 export const VIDEO_H = 1190;
 
 export const VIDEO_NODES: ArchNode[] = [
-  { id: 'v-owner', name: 'みきさん', model: 'チャット・エディター・通話', icon: 'owner', x: 360, y: 8, w: 280,
+  { id: 'v-owner', name: '動画制作', model: '依頼を受けた役割から制作へ', icon: 'editor-screen', x: 360, y: 8, w: 280,
     line: '動画を作って・直して、と頼む。頼む場所で、下の4つのどれに届くかが決まる。' },
   { id: 'v-chat', name: 'チャットのダン', model: '部屋のモデル', icon: 'chat', x: 50, y: 160, w: 215, same: 'chat',
     line: 'ふだんのチャットで頼んだ時。',
@@ -213,4 +238,16 @@ export const VIDEO_EDGES: ArchEdge[] = [
   { from: 'v-gate', to: 'v-show', a: 'r', b: 'l' },
   { from: 'v-show', to: 'v-learn', ax: 150, bx: 480, label: 'みきさんの指摘' },
   { from: 'v-learn', to: 'v-cases', a: 'l', b: 'l', dashed: true, bend: 34, label: '書き足す', at: 0.5 },
+];
+
+// 同じ平面上で制作の手順を役割の下に並べる。各箱の識別子は従来のリンクと共通。
+export const BOARD_NODES = [...NODES, ...VIDEO_NODES.map(node => ({
+  ...node, x: node.x + 1020, y: node.y + 975,
+}))];
+export const BOARD_EDGES: ArchEdge[] = [...EDGES, ...VIDEO_EDGES,
+  {from: 'chat', to: 'skills', a: 'b', b: 'l', dashed: true},
+  {from: 'parallel', to: 'skills', a: 'b', b: 'r', dashed: true},
+  {from: 'editor', to: 'skills', a: 'b', b: 't', dashed: true},
+  {from: 'skills', to: 'v-skills', a: 'b', b: 't', dashed: true},
+  {from: 'parallel', to: 'v-owner', a: 'b', b: 'r', dashed: true},
 ];

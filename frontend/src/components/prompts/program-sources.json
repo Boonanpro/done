@@ -1,0 +1,117 @@
+{
+  "devices": [
+    "frontend/src/components/layout/project-chat-panel.tsx",
+    "mobile/App.tsx"
+  ],
+  "pin": [
+    "mobile/App.tsx"
+  ],
+  "audio": [
+    "frontend/src/components/voice/voice-session.tsx",
+    "mobile/voice.tsx"
+  ],
+  "next": [
+    "frontend/next.config.ts"
+  ],
+  "gateway": [
+    "app/core/gateway.py"
+  ],
+  "core": [
+    "app/core/main.py"
+  ],
+  "sandbox": [
+    "app/sandbox/main.py"
+  ],
+  "chat": [
+    "app/api/chat_routes.py",
+    "app/agent/cli_runner.py",
+    "app/agent/codex_runner.py"
+  ],
+  "voice": [
+    "app/services/voice_live.py",
+    "app/api/voicelog_routes.py"
+  ],
+  "editor": [
+    "frontend/src/components/production/editor-dan-chat.tsx",
+    "app/services/editor_rooms.py"
+  ],
+  "router": [
+    "app/services/voice_router.py"
+  ],
+  "editorTalk": [
+    "app/api/editor_assistant_routes.py"
+  ],
+  "lookup": [
+    "app/services/voice_lookup.py"
+  ],
+  "stage": [
+    "app/services/voice_stage.py"
+  ],
+  "backend": [
+    "app/services/voice_responses.py"
+  ],
+  "parallel": [
+    "app/services/parallel_job_runner.py"
+  ],
+  "codex": [
+    "app/services/command_job_runner.py"
+  ],
+  "api": [
+    "app/services/api_job_runner.py"
+  ],
+  "v-chat": [
+    "app/api/chat_routes.py"
+  ],
+  "v-editor": [
+    "app/services/editor_rooms.py",
+    "app/services/editor_instructions.py"
+  ],
+  "v-parallel": [
+    "app/services/editor_instructions.py",
+    "app/services/voice_router.py",
+    "app/services/parallel_job_runner.py"
+  ],
+  "v-codex": [
+    "frontend/src/components/production/production-workspace.tsx",
+    "app/services/timeline_agent.py",
+    "app/services/editor_runtime.py"
+  ],
+  "v-rules": [
+    "app/agent/cli_runner.py"
+  ],
+  "v-skills": [
+    "app/agent/v2/tools.py"
+  ],
+  "v-parts": [
+    "scripts/production_library.py",
+    "app/timeline_mcp_server.py",
+    "docs/production-methods.json"
+  ],
+  "v-timeline": [
+    "app/timeline_mcp_server.py",
+    "app/services/timeline_commands.py",
+    "app/services/timeline_draft.py"
+  ],
+  "v-frames": [
+    "app/services/sequence_window.py",
+    "app/services/timeline_context.py",
+    "app/api/production_asset_routes.py"
+  ],
+  "v-gate": [
+    "scripts/hook_video_feedback_gate.py"
+  ],
+  "v-show": [
+    "scripts/production_library.py"
+  ],
+  "v-learn": [
+    "scripts/video_learning.py",
+    "app/services/video_learning.py"
+  ],
+  "editor-ui": [
+    "frontend/src/components/production/production-workspace.tsx"
+  ],
+  "reply": [
+    "app/services/conversation_circuit.py",
+    "frontend/src/components/prompts/request-playback.tsx"
+  ]
+}

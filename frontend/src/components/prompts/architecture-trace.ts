@@ -3,7 +3,7 @@ import type { CircuitStep } from './circuit-audio';
 
 export type Segment = { key: string; inferred: boolean; reverse: boolean };
 export type Trace = ReturnType<typeof architectureTrace> & {
-  activity?: string; inspect?: (node: string, index: number) => void;
+  reply?: string; activity?: string; inspect?: (node: string, index: number) => void;
 };
 const nodeIds = new Set(NODES.map(n => n.id));
 // These error labels identify the emitting component in conversation_circuit.py.
@@ -16,13 +16,15 @@ const edgeIds = new Set(EDGES.map(e => e.from + '/' + e.to));
 // Infrastructure between these endpoints belongs to the architecture. Its individual
 // hops have no timestamps in the event stream, so display those lines dashed.
 const entryPaths: Record<string, string[]> = {
-  chat: ['owner', 'next', 'gateway', 'core', 'chat'],
-  router: ['owner', 'voice', 'router'],
-  editor: ['owner', 'next', 'gateway', 'sandbox', 'editor'],
+  chat: ['owner', 'devices', 'next', 'gateway', 'core', 'chat'],
+  voice: ['owner', 'audio', 'voice'],
+  router: ['owner', 'audio', 'voice', 'router'],
+  editor: ['owner', 'editor-ui', 'next', 'gateway', 'core', 'editor'],
 };
 
 export function stepNode(step?: CircuitStep) {
   if (!step) return '';
+  if (['ダンの返事','ダンが話した言葉'].includes(step.label)) return 'reply';
   if (step.node === 'error') return errorSources[step.label] || '';
   return nodeIds.has(step.node) ? step.node : '';
 }

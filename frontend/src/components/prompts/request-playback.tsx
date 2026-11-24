@@ -102,22 +102,6 @@ export function RequestPlayback({steps, live, renderDiagram, onPrompt, onEdit}: 
     return () => cancelAnimationFrame(frame);
   },[advancing,current,next,index,last,speed,following]);
 
-  useLayoutEffect(() => {
-    const root = map.current;
-    const card = root?.querySelector<HTMLElement>('[data-trace-state="current"]');
-    if (!root || !card) return;
-    const frame = root.getBoundingClientRect(), rect = card.getBoundingClientRect();
-    if (rect.top < frame.top+10 || rect.bottom > frame.bottom-10) {
-      root.scrollTo({top:root.scrollTop + rect.top - frame.top - frame.height*0.4, behavior:'instant'});
-    }
-    const pan = card.closest<HTMLElement>('.overflow-x-auto');
-    if (pan) {
-      const port = pan.getBoundingClientRect();
-      if (rect.left < port.left || rect.right > port.right) {
-        pan.scrollLeft += rect.left + rect.width/2-port.left-port.width/2;
-      }
-    }
-  },[current]);
   useEffect(() => {
     const list = log.current, row = list?.children[index] as HTMLElement | undefined;
     if (list && row) list.scrollTop += row.getBoundingClientRect().top-list.getBoundingClientRect().top-list.clientHeight/3;
@@ -128,6 +112,14 @@ export function RequestPlayback({steps, live, renderDiagram, onPrompt, onEdit}: 
   const visits = steps.slice(0,index+1).filter(s=>stepNode(s)===selectedNode);
   const references = [...new Set(visits.flatMap(s=>[...(s.prompts || []), ...(s.prompt ? [s.prompt] : [])]))];
   const messages = [...new Set(visits.map(s=>s.handoff || (/渡す直前|渡った依頼文/.test(s.label) ? s.detail : '')).filter(Boolean))];
+  const conversation = steps.slice(0,index+1).flatMap(s => {
+    if (!s.detail) return [];
+    if (['本人から届いた言葉','本人の言葉','聞き取った言葉','振り分けに渡す言葉','部屋に届いた依頼'].includes(s.label))
+      return [{text:s.detail, owner:true}];
+    if (['ダンの返事','ダンが話した言葉'].includes(s.label))
+      return [{text:s.detail, owner:false}];
+    return [];
+  });
   const wait = gap(steps,index);
   function togglePlayback() {
     inspect('');
@@ -138,8 +130,8 @@ export function RequestPlayback({steps, live, renderDiagram, onPrompt, onEdit}: 
   }
   return <section aria-label="依頼の流れ" className="@container rounded-xl border border-stone-300 bg-white">
     <div className="grid min-w-0 @min-[790px]:grid-cols-[minmax(0,1fr)_230px]">
-      <div ref={map} data-request-map className="min-w-0 overflow-y-auto overscroll-contain" style={{height:'clamp(320px,56vh,640px)'}}>
-        {renderDiagram({...trace,activity:summary(step),inspect:inspectBox})}
+      <div ref={map} data-request-map className="min-w-0">
+        {renderDiagram({...trace,reply:conversation.filter(row => !row.owner).at(-1)?.text,activity:summary(step),inspect:inspectBox})}
       </div>
       <aside className="min-w-0 border-t border-stone-200 bg-stone-50 p-3 @min-[790px]:border-l @min-[790px]:border-t-0">
         <h3 className="mb-2 text-sm font-bold">作業の様子</h3>
@@ -162,6 +154,12 @@ export function RequestPlayback({steps, live, renderDiagram, onPrompt, onEdit}: 
       {live && <button aria-pressed={following} className={button} onClick={()=>{seek(last);inspect('');setFollowing(true);}}>{following?'最新を表示中':'最新に戻る'}</button>}
     </div>
     <div className="space-y-2 border-t p-3 text-sm">
+      {conversation.length > 0 && <section aria-label="この依頼の会話" className="space-y-2 rounded-lg bg-stone-50 p-3">
+        {conversation.map((message,i) => <div key={i} className={message.owner ? 'ml-auto max-w-[90%] text-right' : 'mr-auto max-w-[90%]'}>
+          <span className="block text-xs font-semibold text-stone-500">{message.owner ? 'みきさん' : 'ダン'}</span>
+          <p className={'inline-block max-w-full whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-left text-sm '+(message.owner ? 'bg-emerald-100' : 'border bg-white')}>{message.text}</p>
+        </div>)}
+      </section>}
       <p className="font-semibold text-emerald-950">{names[current] || step.label} · {summary(step)}</p>
       {wait>=10000 && <p className="text-xs text-amber-800">次の記録まで{sec(wait)}空いています。</p>}
       <details open={!!inspected || undefined} key={inspected+':'+index}>

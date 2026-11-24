@@ -6,20 +6,25 @@ ready: 'textarea, button:has(img[src^="/prompts/arch/"])'
 watches: [frontend/src/app/prompts/page.tsx, frontend/src/components/prompts/prompts-screen.tsx, frontend/src/components/prompts/prompts-chat.tsx, frontend/src/components/prompts/reader-skills.tsx, frontend/src/components/prompts/skill-library.tsx, frontend/src/components/prompts/line-diff.ts, frontend/src/components/prompts/architecture.ts, frontend/src/components/prompts/architecture-trace.ts, frontend/src/components/prompts/conversation-circuit.tsx, frontend/src/components/prompts/request-playback.tsx, frontend/src/app/prompts/circuit/page.tsx, frontend/src/lib/prompts-api.ts, app/api/prompts_screen.py, app/services/prompt_store.py, app/prompts/catalog.json]
 errors: [ログインが切れています, 失敗しました]
 speak: |
+  - 構成図は左にみきさんの姿、PCとスマホのチャット画面、胸元のダンピンがあり、右に依頼を受け取る担当が並びます。「全体を表示」で右端まで見渡せます。再生すると、記録のある依頼と返答を「この依頼の会話」で読めます。
   - 構成図の上の「今動いている依頼」で見たいチャット・通話・並行作業を押すと、その依頼だけの作業が箱の横と「作業の様子」に出ます。「前の会話を流し直す」で部屋と依頼を選び、図の下の「流れを再生」で再生・一時停止・コマ送り・速度変更ができます。光った箱を押すと、その段階で記録された指示文・渡した本文・秒数が開きます。「依頼を試す」で渡す直前までか実際に進めるかを選べます。
   - 構成図の緑の枝には、ダンがどんな依頼で読むスキルかが出ます。「すべて」でそのダンの頼み別の枝を開けます。通話で制作を頼んだ時は並行作業につながります。
-  - 画面上の「スキル」で全スキルの手順書と参考ページを検索し、編集・復元できます。
+  - 構成図の「スキルを探す」で全スキルの手順書と参考ページを検索し、編集・復元できます。
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: bce8826fedae4176
-described: 2f0b80dbec82bcb6
+fingerprint: 9abc3b6c4d9367be
+described: 86b29579ff22c3c7
 last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で追う操作は記載どおり"
 ---
 # ダンを動かしている指示文
 
 上に、みきさんの頼みが流れる順の構成図（上から下：みきさん→画面のサーバー→入口→会話の本体／道具と通話のサーバー→チャットのダン・通話のダン・エディター→振り分け→調べもの係・画面係・判断役→作業の部屋）。箱には何の場所かの小さな絵、中で動くモデル、読む指示文の数。箱を押すとその箱が読む指示文の一覧、押すと全文がそのまま出て、その場で書き直して保存できる。誰が読むか・いつ効くか・なぜある文か・元の場所・履歴は全文の下にたたんである。
 開発室のボード（artifact:dev-lead）の上の切り替え「部屋／指示文」の「指示文」でも同じ画面が出る（2026-11-17 本人「開発室の中に1要素として」）。
+
+構成図は1枚のボード。左のみきさん・PC・スマホ・エディター・胸元のピンから、実装を通って右端の「届いた返事」までをたどる。動画制作とスキルも同じボードにある。空白のドラッグで移動し、Ctrl＋ホイール・＋・−で拡大縮小する。「全体を表示」で全体に戻る。
+
+役割を押すと、指示文・その履歴・実装ファイルを開ける。実装の「直近の変更を見る」で差分を読む。「作業用の環境で試す」はコードの全文と元の版、試す条件を保存し、専用の作業場所で変更前後を試す依頼を右の会話へ送る。適用時は元の版と照合する。結果は同じ会話に戻る。
 
 ## 中にある物
 
@@ -34,8 +39,8 @@ last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で�
   - ダンが直している所は光る（2026-11-22 本人「編集してる時に編集してる場所を光らせて分かるようにして」）。ダンが scripts/prompts.py mark で直す文と行を知らせると（/prompts/working。画面は3秒ごとに聞く）、図の箱と一覧の札が紫に明滅し、その文が開いて（書きかけがある時は開かず、上に「ダンが「…」を直しています・開く」の帯）、全文のその行が紫に明滅して「ダンが◯行目を直しています」が出る。保存されると変わった行が緑に光る。直してから10分以内に開いた時も同じ。
   - ダンは scripts/prompts.py save で直す（部屋の説明に書いてある）。会話のダンが動いている間は数秒ごとに版の印（/prompts/sha）を見て、変わったら全文がその場で新しい版になり、上に「ダンが直しました：理由」・変わった所（消した行は赤い線、足した行は緑）・「元に戻す」が出る。書きかけがある時は消さずに「ダンの版を開く」を出す。
 - 構成図の箱に付いた緑の枝には、頼みの例と、それに使うスキルが出ます。例を押すと全文を開き、「すべて」を押すと、そのダンが読むスキルを頼みの種類ごとにたどれます。全文の上の「手順書・参考ページ」で案件ごとの方針に切り替えられます。
-- 構成図の「チャットのダン」「エディターのダンと制作」「並行作業」の緑の枝にある紫の札「動画を作る・直す時の中」（?place=video。2026-11-23 本人「動画の作成や編集がチャットのダンや並行作業に届いて、その後にどういうスキルやコンポーネントがあって、それをどう読み込んでいるからこうなっている。だからここを直せばいいんじゃないかってことが分かるページ」）を押すと、構成図のタブのまま、その中の図に降りる（上の「構成図全体」で戻る）。みきさん→頼みが届く4つ（チャットのダン・エディターのダンと制作・並行作業・「ダンに指示」の実行）→読む決まり（チャットのダンと同じ決まり／「ダンに指示」だけの制作の決まり）→手順書を選んで開く・Claude Code の本体の棚→案件の決まり→素材と部品・タイムラインの道具・コマを見る・書き出す→返事の前の関所→みきさんに見せる→指摘から手順書を育てる（案件の決まりへ戻る）。箱を押すと下に、その箱の動き方（コードで確かめた条件・無い物）・読む文（押すと全文を開いて直せる）・ここで動くプログラム（ファイルと何をするか、読むだけ）が出る。箱と矢印は architecture.ts の VIDEO_NODES・VIDEO_EDGES。
-- 画面上の「スキル」を押すと全スキルの一覧が出ます。名前や参考ページの題で検索し、スキルを開いて「手順書」か参考ページを選び、全文を編集して保存できます。「履歴」で過去の版を選び「この版に戻す」で復元できます。並行作業の「作業をほかのダンに頼む時」では、チャットと音声の編集依頼に共通する文を直せます。
+- 構成図の「チャットのダン」「エディターのダンと制作」「並行作業」の緑の枝にある紫の札「動画を作る・直す時の中」（?place=video。2026-11-23 本人「動画の作成や編集がチャットのダンや並行作業に届いて、その後にどういうスキルやコンポーネントがあって、それをどう読み込んでいるからこうなっている。だからここを直せばいいんじゃないかってことが分かるページ」）を押すと、構成図のタブのまま、その中の図に降りる（上の「構成図全体」で戻る）。みきさん→頼みが届く4つ（チャットのダン・エディターのダンと制作・並行作業・「ダンに指示」の実行）→読む決まり（チャットのダンと同じ決まり／「ダンに指示」だけの制作の決まり）→手順書を選んで開く・Claude Code の本体の棚→案件の決まり→素材と部品・タイムラインの道具・コマを見る・書き出す→返事の前の関所→みきさんに見せる→指摘から手順書を育てる（案件の決まりへ戻る）。箱を押すと下に、その箱の動き方（コードで確かめた条件・無い物）・読む文（押すと全文を開いて直せる）・ここで動くプログラム（ファイルと何をするか、変更内容を確認して試せる）が出る。箱と矢印は architecture.ts の VIDEO_NODES・VIDEO_EDGES。
+- 構成図の「スキルを探す」を押すと全スキルの一覧が出ます。名前や参考ページの題で検索し、スキルを開いて「手順書」か参考ページを選び、全文を編集して保存できます。「履歴」で過去の版を選び「この版に戻す」で復元できます。並行作業の「作業をほかのダンに頼む時」では、チャットと音声の編集依頼に共通する文を直せます。
 
 ## 行き方（みきさんから見て）
 
@@ -61,9 +66,9 @@ last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で�
 `python scripts/place_map.py stamp prompts` が書き直す。手で直さない。
 
 - 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/circuit/page.tsx`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/architecture-trace.ts`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/conversation-circuit.tsx`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/request-playback.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
-- ラベル: 「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「指示文の表示」、「動画を作る・直す時の構成図」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「スキル一覧」、「スキル・参考ページを検索」
+- ラベル: 「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「指示文の表示」、「動画を作る・直す時の構成図」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「この依頼の会話」、「スキル一覧」、「スキル・参考ページを検索」
 - 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」、「video-branch」、「node-facts」、「node-programs」
 - 見出し: 「プログラムの中にあった頃に直された日」、「ダンを動かしている指示文」、「作業の様子」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "6047951223", "app/prompts/catalog.json": "1bbb2e6ebb", "app/services/prompt_store.py": "750e86435b", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/architecture-trace.ts": "adb59d4b2e", "frontend/src/components/prompts/architecture.ts": "86441bd3fb", "frontend/src/components/prompts/conversation-circuit.tsx": "9ee082d8b9", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "ceb98a46cb", "frontend/src/components/prompts/prompts-screen.tsx": "b94472f622", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "2af02d9613", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "93f3485b6b"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "6047951223", "app/prompts/catalog.json": "411e89c51e", "app/services/prompt_store.py": "750e86435b", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/architecture-trace.ts": "ba264c2e8e", "frontend/src/components/prompts/architecture.ts": "26c30d56b2", "frontend/src/components/prompts/conversation-circuit.tsx": "9ee082d8b9", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "ceb98a46cb", "frontend/src/components/prompts/prompts-screen.tsx": "c31327d809", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "86b17adf35", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "93f3485b6b"} -->
 <!-- place_map:auto:end -->
