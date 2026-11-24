@@ -103,6 +103,7 @@ _PUBLIC_DIR_TO_OWNER: dict[str, Scope] = {
 _PUBLIC_SHARED_DIRS: frozenset[str] = frozenset({
     "models",  # shared 3D assets (e.g. garbage_truck) used by multiple artifacts
     "fonts",   # bundled OFL caption fonts, used by the production-tab caption renderer
+    "prompts", # pictures of Dan's own /prompts screen (the architecture board), not an artifact (2026-11-24)
 })
 
 # Top-level public files (no directory) that belong to specific prototypes.

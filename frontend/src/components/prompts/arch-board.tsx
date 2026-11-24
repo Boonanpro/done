@@ -216,6 +216,8 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
     const el = port.current;
     if (!el) return;
     const wheel = (ev: WheelEvent) => {
+      const box = (ev.target as Element).closest<HTMLElement>('[data-reply]');   // 返事の本文が長い時は、その中を読み進める
+      if (box && box.scrollHeight > box.clientHeight && !ev.ctrlKey) return;
       ev.preventDefault();
       const r = el.getBoundingClientRect();
       const dy = ev.deltaY * (ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? 400 : 1);
@@ -453,7 +455,7 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
                   </>}
                 </div>}
                 {n.id === 'reply' && <div data-reply className="absolute inset-x-0 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-[15px] leading-relaxed" style={{ top: b.h + 8 }}
-                  onWheel={e => e.stopPropagation()}>
+                >
                   {trace?.reply || '返事の記録がある依頼を選ぶと、ここに本文が出ます。'}
                 </div>}
                 {trace?.current === n.id && trace.activity && <span data-flow-bubble title={trace.activity}
