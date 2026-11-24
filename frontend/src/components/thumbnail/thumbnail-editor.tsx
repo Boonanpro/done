@@ -14,7 +14,7 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignStartHorizontal, AlignStartVertical,
   AlignHorizontalSpaceAround, AlignVerticalSpaceAround,
   ArrowLeft, ArrowDown, ArrowUp, Check, Copy, Download, Eye, EyeOff, ImagePlus, LayoutGrid, Loader2, Lock, MessageSquare,
-  Frame, MousePointer2, PenLine, Redo2, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
+  Frame, GripVertical, MousePointer2, PenLine, Redo2, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -22,7 +22,7 @@ import { PartPreview, ThumbCanvas, partBounds, partCenter, type PartBox } from '
 import { ThumbPatterns, type ThumbPatternActions, type ThumbPatternLink } from './thumb-patterns';
 import { useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
 import {
-  THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, mergeThumbDocs, newPartId, removeFinish,
+  THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, mergeThumbDocs, newPartId, removeFinish, reorderParts, stepParts,
   type ThumbDoc, type ThumbFinishJob, type ThumbFontId, type ThumbInstruction, type ThumbMark, type ThumbPart, type ThumbTextPart,
 } from './thumb-doc';
 
@@ -57,6 +57,31 @@ const r0 = (v: number) => Math.round(v);
 type JobState = { job_id: string; state: string; label: string; active: boolean; progress?: string | null; result?: string | null };
 
 // つかんで動かす・大きさを変えるのは、選んでいる部品の全部（1つでも複数でも同じ形）。回すのは1つの時だけ
+// 元に戻す・やり直すの1手（本人の1手の前後）。この窓の間は sessionStorage に控え、読み直しても消さない
+type UndoStep = { before: ThumbDoc; after: ThumbDoc };
+const UNDO_MAX = 60;
+function readUndo(key: string): { undo: UndoStep[]; redo: UndoStep[] } {
+  try {
+    const raw = typeof window !== 'undefined' ? window.sessionStorage.getItem(key) : null;
+    const j = raw ? JSON.parse(raw) : null;
+    if (j && Array.isArray(j.undo) && Array.isArray(j.redo)) return { undo: j.undo, redo: j.redo };
+  } catch { /* 控えが壊れていれば空から */ }
+  return { undo: [], redo: [] };
+}
+function writeUndo(key: string, undo: UndoStep[], redo: UndoStep[]) {
+  // 入りきらなければ古い手から落とす
+  for (let n = undo.length; n >= 0; n = n > 10 ? Math.floor(n / 2) : n - 1) {
+    try { window.sessionStorage.setItem(key, JSON.stringify({ undo: undo.slice(undo.length - n), redo: redo.slice(-n) })); return; } catch { /* 次は少なく */ }
+  }
+}
+// 字を打つ欄（ここでは Ctrl+Z などをその欄に任せる）。つまみ・色・チェック・ボタンは字を打つ欄ではない
+const TEXT_INPUTS = new Set(['', 'text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+function isTextField(el: Element | null | undefined): boolean {
+  if (!el || !(el instanceof HTMLElement)) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+  return el.tagName === 'INPUT' && TEXT_INPUTS.has(((el as HTMLInputElement).getAttribute('type') || '').toLowerCase());
+}
+
 type Drag =
   | { kind: 'move'; ids: string[]; start: [number, number]; origs: Record<string, ThumbPart>; before: ThumbDoc }
   | { kind: 'scale'; ids: string[]; anchor: [number, number]; startDist: number; origs: Record<string, ThumbPart>; before: ThumbDoc }
@@ -157,8 +182,16 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const [mode, setMode] = useState<'select' | 'pen'>('select');
   const [boxes, setBoxes] = useState<Record<string, PartBox>>({});
   // 元に戻す・やり直すは「本人の1手の前後」。今の形にその1手だけを当てる（あとから入ったダンの直しは巻き戻さない）
-  const undoStack = useRef<Array<{ before: ThumbDoc; after: ThumbDoc }>>([]);
-  const redoStack = useRef<Array<{ before: ThumbDoc; after: ThumbDoc }>>([]);
+  // 読み直しても・案を行き来しても消えないよう、この窓の間は sessionStorage に控える（2026-11-24 本人「control＋zで操作取り消せるようにして」）
+  const undoKey = `thumb-undo:${contentId}`;
+  const [savedUndo] = useState(() => readUndo(undoKey));
+  const undoStack = useRef<UndoStep[]>(savedUndo.undo);
+  const redoStack = useRef<UndoStep[]>(savedUndo.redo);
+  const keepUndoTimer = useRef<number | null>(null);
+  const keepUndo = useCallback(() => {
+    if (keepUndoTimer.current) window.clearTimeout(keepUndoTimer.current);
+    keepUndoTimer.current = window.setTimeout(() => writeUndo(undoKey, undoStack.current, redoStack.current), 300);
+  }, [undoKey]);
   const [, bump] = useState(0);
   const drag = useRef<Drag | null>(null);
   const press = useRef<{ at: [number, number]; pick: string | null } | null>(null);
@@ -192,6 +225,10 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const setPatternActions = useCallback((a: ThumbPatternActions | null) => { patternActions.current = a; }, []);
   // つかんでいる・描いている間（その間は作業台の広さを止め、コメントのボタンを隠す）
   const [gesture, setGesture] = useState<{ kind: 'pen' | 'part'; board: PartBox | null } | null>(null);
+  // 部品の一覧で引っぱって前後を入れ替えている間（下の onLayerPointer*）
+  const layerPress = useRef<{ id: string; x: number; y: number; grip: boolean; started: boolean } | null>(null);
+  const layerClickBlock = useRef(false);
+  const [layerDrag, setLayerDrag] = useState<{ ids: string[]; slot: number } | null>(null);
 
   // ── ダンの手を見せる（2026-11-24 本人「ダンが何かやる時は必ずその操作を見える化しなさい。動画タイムラインや台本ページと
   //    同じように」）。保存された形が前と違えば、変わった部品を前の形から今の形へ動かし、光と「ダン」の印を出す。
@@ -321,14 +358,15 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const prev = before || docRef.current;
     if (prev) {
       undoStack.current.push({ before: clone(prev), after: clone(next) });
-      if (undoStack.current.length > 100) undoStack.current.shift();
+      if (undoStack.current.length > UNDO_MAX) undoStack.current.shift();
       redoStack.current = [];
+      keepUndo();
     }
     setDoc(next);
     docRef.current = next;
     scheduleSave();
     bump((n) => n + 1);
-  }, [scheduleSave]);
+  }, [scheduleSave, keepUndo]);
 
   const updatePart = useCallback((id: string, patch: Partial<ThumbPart> | ((p: ThumbPart) => ThumbPart)) => {
     const d = docRef.current;
@@ -341,15 +379,15 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     if (!step || !docRef.current) return;
     redoStack.current.push(step);
     const next = mergeThumbDocs(step.after, step.before, docRef.current);
-    setDoc(next); docRef.current = next; scheduleSave(); bump((n) => n + 1);
-  }, [scheduleSave]);
+    setDoc(next); docRef.current = next; scheduleSave(); keepUndo(); bump((n) => n + 1);
+  }, [scheduleSave, keepUndo]);
   const redo = useCallback(() => {
     const step = redoStack.current.pop();
     if (!step || !docRef.current) return;
     undoStack.current.push(step);
     const next = mergeThumbDocs(step.before, step.after, docRef.current);
-    setDoc(next); docRef.current = next; scheduleSave(); bump((n) => n + 1);
-  }, [scheduleSave]);
+    setDoc(next); docRef.current = next; scheduleSave(); keepUndo(); bump((n) => n + 1);
+  }, [scheduleSave, keepUndo]);
 
   // ── 画面の大きさ ──
   const stageWrap = useRef<HTMLDivElement | null>(null);
@@ -815,8 +853,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   // ── キー ──
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
-      const el = ev.target as HTMLElement | null;
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return;
+      // 字を打つ欄の中だけは、その欄の操作に任せる（つまみ・色・ボタンの上では効かせる）
+      if (isTextField(ev.target as HTMLElement | null)) return;
       const mod = ev.ctrlKey || ev.metaKey;
       if (mod && ev.key.toLowerCase() === 'z') { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); return; }
       if (mod && ev.key.toLowerCase() === 'y') { ev.preventDefault(); redo(); return; }
@@ -836,6 +874,13 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       }
       if (!sels.length || !d) return;
       if (mod && ev.key.toLowerCase() === 'd') { ev.preventDefault(); duplicate(sels); return; }
+      // 前へ・後ろへ（Figma・Canva と同じ。Shift で一番前・一番後ろ）
+      if (mod && (ev.key === ']' || ev.key === '}' || ev.key === '[' || ev.key === '{')) {
+        ev.preventDefault();
+        const fwd = ev.key === ']' || ev.key === '}';
+        move(sels.map((p) => p.id), ev.shiftKey ? (fwd ? 'front' : 'back') : (fwd ? 'up' : 'down'));
+        return;
+      }
       if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); remove(sels.map((p) => p.id)); return; }
       if (ev.key === 'Escape') { setSelection([]); return; }
       const step = ev.shiftKey ? 10 : 1;
@@ -909,15 +954,19 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     const set = new Set(ids);
     commit({ ...d, parts: d.parts.map((p) => (set.has(p.id) ? ({ ...p, ...patch } as ThumbPart) : p)) });
   };
-  const move = (id: string, dir: 'up' | 'down' | 'front' | 'back') => {
+  const move = (ids: string | string[], dir: 'up' | 'down' | 'front' | 'back') => {
     const d = docRef.current;
     if (!d) return;
-    const parts = [...d.parts];
-    const i = parts.findIndex((p) => p.id === id);
-    if (i < 0) return;
-    const [p] = parts.splice(i, 1);
-    const j = dir === 'front' ? parts.length : dir === 'back' ? 0 : dir === 'up' ? Math.min(parts.length, i + 1) : Math.max(0, i - 1);
-    parts.splice(j, 0, p);
+    const parts = stepParts(d.parts, Array.isArray(ids) ? ids : [ids], dir);
+    if (parts.every((p, i) => p === d.parts[i])) return;
+    commit({ ...d, parts });
+  };
+  // 部品の一覧で引っぱって並べ替える（slot は一覧の何番目の前か）
+  const reorderTo = (ids: string[], slot: number) => {
+    const d = docRef.current;
+    if (!d) return;
+    const parts = reorderParts(d.parts, ids, slot);
+    if (parts.every((p, i) => p === d.parts[i])) return;
     commit({ ...d, parts });
   };
   const addText = () => {
@@ -1446,8 +1495,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
             <MessageSquare className="h-4 w-4" />
           </button>
         ) : null}
-        <button type="button" title="前へ" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'up')}><ArrowUp className="h-4 w-4" /></button>
-        <button type="button" title="後ろへ" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'down')}><ArrowDown className="h-4 w-4" /></button>
+        <button type="button" title="1つ前へ（⌘/Ctrl＋]、Shift も押すと一番前へ）" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'up')} data-thumb-forward><ArrowUp className="h-4 w-4" /></button>
+        <button type="button" title="1つ後ろへ（⌘/Ctrl＋[、Shift も押すと一番後ろへ）" className="rounded p-1 hover:bg-muted" onClick={() => move(sel.id, 'down')} data-thumb-backward><ArrowDown className="h-4 w-4" /></button>
         <button type="button" title="複製（Ctrl+D）" className="rounded p-1 hover:bg-muted" onClick={() => duplicate(sel)}><Copy className="h-4 w-4" /></button>
         <button type="button" title="消す（Delete）" className="rounded p-1 hover:bg-muted hover:text-destructive" onClick={() => remove(sel.id)}><Trash2 className="h-4 w-4" /></button>
       </div>
@@ -1471,6 +1520,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
                   setDoc(next); docRef.current = next; scheduleSave();
                   const top = undoStack.current[undoStack.current.length - 1];
                   if (top) top.after = clone(next);
+                  keepUndo();
                 }
               }}
               onBlur={() => { if (textRef.current) (textRef.current as unknown as { __editing?: boolean }).__editing = false; }}
@@ -1550,6 +1600,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
               <MessageSquare className="h-4 w-4" />
             </button>
           ) : null}
+          <button type="button" title="まとめて1つ前へ（⌘/Ctrl＋]）" className="rounded p-1 hover:bg-muted" onClick={() => move(ids, 'up')} data-thumb-forward><ArrowUp className="h-4 w-4" /></button>
+          <button type="button" title="まとめて1つ後ろへ（⌘/Ctrl＋[）" className="rounded p-1 hover:bg-muted" onClick={() => move(ids, 'down')} data-thumb-backward><ArrowDown className="h-4 w-4" /></button>
           <button type="button" title="まとめて複製（Ctrl+D）" className="rounded p-1 hover:bg-muted" onClick={() => duplicate(multi)}><Copy className="h-4 w-4" /></button>
           <button type="button" title="まとめて消す（Delete）" className="rounded p-1 hover:bg-muted hover:text-destructive" onClick={() => remove(ids)}><Trash2 className="h-4 w-4" /></button>
         </div>
@@ -1600,8 +1652,72 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     );
   })() : null;
 
+  // サムネや部品を押したら、字を打っていた欄（右の会話・文字の欄）から抜ける。サムネの上は押した時に既定の動きを
+  // 止めているので、そのままだと欄に入ったままになり、Ctrl+Z などがサムネに届かなかった（2026-11-24）
+  const releaseTextFocus = (ev: React.PointerEvent) => {
+    const a = document.activeElement as HTMLElement | null;
+    if (!a || !isTextField(a)) return;
+    const t = ev.target as HTMLElement | null;
+    if (t && (isTextField(t) || t.closest('label, [contenteditable="true"]'))) return;
+    a.blur();
+  };
+
+  // 部品の一覧で引っぱって前後を入れ替える（2026-11-24 本人「パーツ一覧で上下（前後）配置変えれるようにしろよ」）。
+  // マウスは行をそのまま引っぱる。指は左のつまみ（⋮⋮）から引っぱる（行の上は一覧を送るのに使う）
+  const layerSlotAt = (clientX: number, clientY: number, order: string[]): number => {
+    const row = (document.elementFromPoint(clientX, clientY) as HTMLElement | null)?.closest('[data-thumb-layer]') as HTMLElement | null;
+    const id = row?.getAttribute('data-thumb-layer');
+    if (row && id && order.includes(id)) {
+      const r = row.getBoundingClientRect();
+      return order.indexOf(id) + (clientY > r.top + r.height / 2 ? 1 : 0);
+    }
+    const rows = Array.from(document.querySelectorAll('[data-thumb-layer]')) as HTMLElement[];
+    if (!rows.length) return 0;
+    return clientY < rows[0].getBoundingClientRect().top ? 0 : order.length;
+  };
+  const onLayerPointerDown = (e: React.PointerEvent<HTMLLIElement>, id: string) => {
+    if (e.button !== 0) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-layer-toggle]')) return;
+    const grip = !!t.closest('[data-layer-grip]');
+    if (e.pointerType !== 'mouse' && !grip) return;
+    layerPress.current = { id, x: e.clientX, y: e.clientY, grip, started: false };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 取れなくても動く */ }
+    if (grip) e.preventDefault();
+  };
+  const onLayerPointerMove = (e: React.PointerEvent<HTMLLIElement>) => {
+    const pr = layerPress.current;
+    if (!pr || !doc) return;
+    if (!pr.started) {
+      if (Math.hypot(e.clientX - pr.x, e.clientY - pr.y) < 5) return;
+      pr.started = true;
+    }
+    const order = [...doc.parts].reverse().map((q) => q.id);
+    const ids = selection.includes(pr.id) ? order.filter((x) => selection.includes(x)) : [pr.id];
+    // 一覧の上下の端に来たら送る
+    const scroller = e.currentTarget.closest('[data-thumb-layers-scroll]') as HTMLElement | null;
+    if (scroller) {
+      const r = scroller.getBoundingClientRect();
+      if (e.clientY < r.top + 32) scroller.scrollTop -= 12;
+      else if (e.clientY > r.bottom - 32) scroller.scrollTop += 12;
+    }
+    setLayerDrag({ ids, slot: layerSlotAt(e.clientX, e.clientY, order) });
+  };
+  const onLayerPointerUp = () => {
+    const pr = layerPress.current;
+    layerPress.current = null;
+    const ld = layerDrag;
+    setLayerDrag(null);
+    if (!pr?.started || !ld) return;
+    layerClickBlock.current = true;
+    window.setTimeout(() => { layerClickBlock.current = false; }, 0);
+    reorderTo(ld.ids, ld.slot);
+    if (!selection.includes(pr.id)) setSelected(pr.id);
+  };
+
   // 部品の一覧での選び方（エクスプローラーや Figma と同じ）
   const onLayerClick = (e: React.MouseEvent, id: string) => {
+    if (layerClickBlock.current) return;
     setMode('select');
     const order = [...doc.parts].reverse().map((q) => q.id);
     if (e.shiftKey && listAnchor.current && order.includes(listAnchor.current)) {
@@ -1618,25 +1734,38 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     setSelected(id);
   };
 
+  const layerOrder = [...(viewDoc || doc).parts].reverse();
   const layers = (
     <div data-thumb-layers>
-      <div className="mb-1 text-[11px] font-semibold text-muted-foreground">部品（上が手前）</div>
+      <div className="mb-1 text-[11px] font-semibold text-muted-foreground">部品（上が手前・引っぱって前後を入れ替え）</div>
       <ul className="space-y-1">
-        {[...(viewDoc || doc).parts].reverse().map((p) => (
-          <li key={p.id} data-thumb-layer={p.id} data-selected={selection.includes(p.id) ? 'true' : undefined} className={`group flex items-center gap-1 rounded p-0.5 text-xs ${selection.includes(p.id) ? 'bg-sky-500/15 ring-2 ring-sky-500' : 'hover:bg-muted'}`}>
-            {/* 名前の文字ではなく、その部品だけの絵で見せる（名前はマウスを乗せた時だけ）。
-                ⌘/Ctrl で1つずつ足す・外す、Shift で前に押した所からここまでをまとめて選ぶ */}
-            <button type="button" title={`${partLabel(p)}（Shift・⌘/Ctrl で複数選べます）`} className={`min-w-0 flex-1 ${p.hidden ? 'opacity-40' : ''}`} onClick={(e) => onLayerClick(e, p.id)}>
-              <PartPreview doc={viewDoc || doc} part={p} box={boxOf(p)} className="h-14 w-full" />
-            </button>
-            <button type="button" title={p.hidden ? '出す' : '隠す'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { hidden: !p.hidden })}>
-              {p.hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-            </button>
-            <button type="button" title={p.locked ? '引きずって動かせるようにする' : '引きずっても動かないようにする（角で大きさは変えられる）'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { locked: !p.locked })}>
-              {p.locked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5 opacity-40" />}
-            </button>
-          </li>
-        ))}
+        {layerOrder.map((p, i) => {
+          const dragging = !!layerDrag && layerDrag.ids.includes(p.id);
+          const lineBefore = !!layerDrag && layerDrag.slot === i;
+          const lineAfter = !!layerDrag && i === layerOrder.length - 1 && layerDrag.slot === layerOrder.length;
+          return (
+            <li key={p.id} data-thumb-layer={p.id} data-selected={selection.includes(p.id) ? 'true' : undefined}
+              onPointerDown={(e) => onLayerPointerDown(e, p.id)} onPointerMove={onLayerPointerMove} onPointerUp={onLayerPointerUp} onPointerCancel={onLayerPointerUp}
+              className={`group relative flex select-none items-center gap-1 rounded p-0.5 text-xs ${selection.includes(p.id) ? 'bg-sky-500/15 ring-2 ring-sky-500' : 'hover:bg-muted'} ${dragging ? 'opacity-50' : ''} ${layerDrag ? 'cursor-grabbing' : ''}`}>
+              {lineBefore ? <span className="pointer-events-none absolute -top-[3px] left-0 right-0 h-[3px] rounded bg-sky-500" data-thumb-layer-drop /> : null}
+              {lineAfter ? <span className="pointer-events-none absolute -bottom-[3px] left-0 right-0 h-[3px] rounded bg-sky-500" data-thumb-layer-drop /> : null}
+              <span data-layer-grip title="引っぱって前後を入れ替える" className="flex h-14 w-4 shrink-0 cursor-grab items-center justify-center text-muted-foreground/60 hover:text-foreground" style={{ touchAction: 'none' }}>
+                <GripVertical className="h-3.5 w-3.5" />
+              </span>
+              {/* 名前の文字ではなく、その部品だけの絵で見せる（名前はマウスを乗せた時だけ）。
+                  ⌘/Ctrl で1つずつ足す・外す、Shift で前に押した所からここまでをまとめて選ぶ */}
+              <button type="button" title={`${partLabel(p)}（Shift・⌘/Ctrl で複数選べます。引っぱると前後を入れ替えます）`} className={`min-w-0 flex-1 ${p.hidden ? 'opacity-40' : ''}`} onClick={(e) => onLayerClick(e, p.id)}>
+                <PartPreview doc={viewDoc || doc} part={p} box={boxOf(p)} className="pointer-events-none h-14 w-full" />
+              </button>
+              <button type="button" data-layer-toggle title={p.hidden ? '出す' : '隠す'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { hidden: !p.hidden })}>
+                {p.hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+              </button>
+              <button type="button" data-layer-toggle title={p.locked ? '引きずって動かせるようにする' : '引きずっても動かないようにする（角で大きさは変えられる）'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { locked: !p.locked })}>
+                {p.locked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5 opacity-40" />}
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -1885,7 +2014,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
 
   if (compact) {
     return (
-      <div className="relative flex h-full min-h-0 flex-col bg-background" data-thumb-editor="phone">
+      <div className="relative flex h-full min-h-0 flex-col bg-background" data-thumb-editor="phone" onPointerDownCapture={releaseTextFocus}>
         <div className="flex shrink-0 items-center gap-2 px-2 py-1.5">
           <button type="button" onClick={onBack} className="rounded p-1.5 hover:bg-muted" title={backLabel || '戻る'} aria-label={backLabel || '戻る'} data-thumb-back><ArrowLeft className="h-5 w-5" /></button>
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</span>
@@ -1898,7 +2027,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
             {phoneChat(<button type="button" onClick={() => setPhoneChatOpen(false)} className="rounded p-1 hover:bg-muted" title="サムネの道具に戻る"><X className="h-4 w-4" /></button>)}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden p-3">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden p-3" data-thumb-layers-scroll>
             {tools}
             {finishCard}
             {penBar}
@@ -1923,7 +2052,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background" data-thumb-editor="pc">
+    <div className="flex h-full min-h-0 flex-col bg-background" data-thumb-editor="pc" onPointerDownCapture={releaseTextFocus}>
       <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
         <button type="button" onClick={onBack} className="flex items-center gap-1 rounded p-1.5 text-xs hover:bg-muted" title={backLabel || 'ライブラリへ戻る'} aria-label={backLabel || 'ライブラリへ戻る'} data-thumb-back><ArrowLeft className="h-4 w-4" />{backLabel ? <span>{backLabel}</span> : null}</button>
         <h1 className="min-w-0 max-w-[30%] truncate text-sm font-semibold">{title}</h1>
@@ -1935,7 +2064,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           <div className="min-h-0 flex-1 p-6 pb-3">{stage}</div>
           {strip ? <div className="shrink-0 border-t border-border bg-background/70">{strip}</div> : null}
         </div>
-        <aside className="w-72 shrink-0 space-y-4 overflow-y-auto border-l border-border p-3">
+        <aside className="w-72 shrink-0 space-y-4 overflow-y-auto border-l border-border p-3" data-thumb-layers-scroll>
           {finishCard}
           {penBar}
           {mode === 'select' ? props : null}
