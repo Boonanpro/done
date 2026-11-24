@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 READ_EVERY_S = .3      # the owner's words arrive as many small deltas: the editor's file is read at most this often
+PLAYING_CARRY_S = 3.0  # while playing, the playhead is carried on from the last report at most this far (the tab may have stopped telling)
 POINTER_FRESH_S = 6.0  # a spot the mouse left this long ago is no longer what he points at
 MOMENTS_PER_TURN = 4
 FRAMES = 2             # frames drawn for the work (the latest moments of the request)
@@ -51,7 +52,14 @@ def moment_of(state: dict[str, Any] | None, content_id: str, now: float | None =
     if not isinstance(state, dict) or str(state.get('content_id') or '') != content_id or state.get('editor') != 'editor':
         return None
     now = time.time() if now is None else now
-    out: dict[str, Any] = {'playhead': state.get('playhead'), 'playing': bool(state.get('playing')),
+    playhead = state.get('playhead')
+    if state.get('playing') and playhead is not None and state.get('at'):
+        # The editor tells the playhead every 0.5 s while playing: what it shows now is that plus the time since
+        try:
+            playhead = round(float(playhead) + min(max(0.0, now - float(state['at'])), PLAYING_CARRY_S), 2)
+        except (TypeError, ValueError):
+            pass
+    out: dict[str, Any] = {'playhead': playhead, 'playing': bool(state.get('playing')),
                            'selected': [str(s.get('id')) for s in (state.get('selected') or []) if isinstance(s, dict) and s.get('id')][:8]}
     p = state.get('pointer')
     if isinstance(p, dict) and (p.get('inside') or now - float(p.get('at') or 0) < POINTER_FRESH_S):

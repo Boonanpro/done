@@ -220,3 +220,14 @@ def test_the_room_of_a_request_is_where_he_finished_saying_it():
     d.add('user', 'これ直して')
     assert d.history[-1]['room'] == 'b'
     assert voice_router.work_room([{'role': 'user', 'text': 'x'}], 'call') == 'call'
+
+
+def test_playing_playhead_is_carried_on_from_the_last_report():
+    """While playing the editor tells the playhead every 0.5 s; Dan reads where it is now, not where it was told
+    (11/24 the owner: 「見えてる時もリアルタイムや正確ではなく、ちょっとズレてた」)."""
+    now = 1000.0
+    st = {'content_id': 'c1', 'editor': 'editor', 'playhead': 12.0, 'playing': True, 'at': now - 0.4, 'selected': []}
+    assert voice_editor.moment_of(st, 'c1', now)['playhead'] == 12.4
+    assert voice_editor.moment_of({**st, 'at': now - 60}, 'c1', now)['playhead'] == 15.0   # the tab stopped telling: at most 3 s
+    assert voice_editor.moment_of({**st, 'playing': False}, 'c1', now)['playhead'] == 12.0   # stopped: as told
+    assert voice_editor.moment_of({k: v for k, v in st.items() if k != 'at'}, 'c1', now)['playhead'] == 12.0

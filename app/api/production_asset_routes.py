@@ -9355,7 +9355,9 @@ def post_editor_state(data: EditorStateRequest, current_user: TokenData = Depend
     d = _room_dir(data.room_id)
     d.mkdir(parents=True, exist_ok=True)
     state = {"content_id": data.content_id or "", "editor": data.screen, "playhead": data.playhead,
-             "playing": data.playing, "selected": data.selected[:20], "source": "web"}
+             "playing": data.playing, "selected": data.selected[:20], "source": "web",
+             # when the playhead was this: while playing, the reader adds the time since (voice_editor.moment_of)
+             "at": round(time.time(), 2)}
     p = data.pointer if isinstance(data.pointer, dict) else None
     if p is not None:
         try:

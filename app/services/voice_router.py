@@ -471,7 +471,12 @@ class Router:
         if call is None or call.closed:
             return await self.luna(delegation_id, created)
         label = label_of(words)
-        call.start('この通話で本人が今頼んだこと（言葉のまま）: ' + words, label)
+        task = 'この通話で本人が今頼んだこと（言葉のまま）: ' + words
+        editor = getattr(self.dialogue, 'editor', None)
+        if editor is not None:   # 「今どこ見てる？」も答えられるよう、話した時のエディターの所を添える（voice_editor）
+            from app.services import voice_editor
+            task += chr(10) + await asyncio.to_thread(voice_editor.last_moment_text, self.dialogue.history, editor.asset_room_id, editor.content_id)
+        call.start(task, label)
         await self.reply(delegation_id, created, f'調べもの「{label}」を裏で調べ始めた。答えはまだ出ていない。', spoken=False)
 
     async def show(self, target, delegation_id, created):
