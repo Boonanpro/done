@@ -211,7 +211,7 @@ function Diagram({ skills, onSkills, counts, active, glow, onPick, trace }: { tr
                   <img src="/prompts/arch/chat-pc.webp" alt="PCのチャット画面" className="absolute left-[5px] top-0 h-[82px] w-[140px] rounded-t-md border-[5px] border-stone-800 object-cover" />
                   <span className="absolute left-0 top-[82px] h-[10px] w-[150px] rounded-b-xl border-b-[3px] border-stone-500 bg-stone-300" />
                 </span> : n.id === 'phone' ? <img src="/prompts/arch/chat-phone.webp" alt="スマホのチャット画面" className="h-[104px] w-[52px] rounded-[10px] border-[3px] border-stone-700 bg-black object-contain shadow-md" />
-                : n.cutout ? <img src={`/prompts/arch/${n.icon}.webp`} alt="" draggable={false} className={cn('min-h-0 object-contain drop-shadow-md', n.id === 'owner' ? 'h-[150px] w-[176px]' : 'h-[86px] w-[116px]')} />
+                : n.cutout ? <img src={`/prompts/arch/${n.icon}.webp`} alt="" draggable={false} className={cn('min-h-0 object-contain drop-shadow-md', n.id === 'owner' ? 'h-[166px] w-[184px]' : 'h-[86px] w-[116px]')} />
                 : <img src={`/prompts/arch/${n.icon}.webp`} alt="" className="h-[88px] w-[140px] min-h-0 rounded-md border-[3px] border-stone-700 object-cover" />}
                 <span className="text-sm font-bold">{n.name}</span>
               </button> : <button type="button" data-arch-node={n.id} data-trace-state={trace?.current === n.id ? 'current' : trace?.visits.has(n.id) ? 'visited' : undefined} onClick={() => { const i = trace?.visits.get(n.id); if (i != null) trace?.inspect?.(n.id, i); onPick(n.id); }}
