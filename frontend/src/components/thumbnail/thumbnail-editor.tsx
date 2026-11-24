@@ -307,7 +307,11 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
 
   const boxOf = useCallback((p: ThumbPart): PartBox => {
     if (p.type === 'image') return { x: p.x, y: p.y, w: p.w, h: p.h };
-    return boxes[p.id] || { x: p.x, y: p.y - p.size, w: p.size * Math.max(1, p.text.length), h: p.size * 1.2 };
+    if (boxes[p.id]) return boxes[p.id];
+    // 隠してあって測れない文字は、行の数と一番長い行から見積もる
+    const ls = String(p.text ?? '').split('\n');
+    const lh = p.line_height || p.size * 1.25;
+    return { x: p.x, y: p.y - p.size, w: p.size * Math.max(1, ...ls.map((l) => l.length)), h: p.size * 1.2 + lh * (ls.length - 1) };
   }, [boxes]);
 
   const toSvg = (ev: { clientX: number; clientY: number }): [number, number] => {
@@ -1092,7 +1096,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           <li key={p.id} data-thumb-layer={p.id} className={`group flex items-center gap-1 rounded p-0.5 text-xs ${p.id === selected ? 'bg-sky-500/15 ring-2 ring-sky-500' : 'hover:bg-muted'}`}>
             {/* 名前の文字ではなく、その部品だけの絵で見せる（名前はマウスを乗せた時だけ） */}
             <button type="button" title={partLabel(p)} className={`min-w-0 flex-1 ${p.hidden ? 'opacity-40' : ''}`} onClick={() => { setSelected(p.id); setMode('select'); }}>
-              <PartPreview doc={viewDoc || doc} part={p} box={boxOf(p)} className="h-11 w-full" />
+              <PartPreview doc={viewDoc || doc} part={p} box={boxOf(p)} className="h-14 w-full" />
             </button>
             <button type="button" title={p.hidden ? '出す' : '隠す'} className="rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => updatePart(p.id, { hidden: !p.hidden })}>
               {p.hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}

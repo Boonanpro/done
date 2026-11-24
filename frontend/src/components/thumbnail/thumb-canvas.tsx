@@ -239,11 +239,11 @@ export const ThumbCanvas = forwardRef<SVGSVGElement, Props>(function ThumbCanvas
 });
 
 /** 部品の見せる範囲: その部品の枠（回転も含む）をサムネの枠で切った所。枠の外に全部出ている時は部品の枠のまま */
-export function partView(doc: ThumbDoc, p: ThumbPart, box: PartBox): PartBox {
+export function partView(doc: ThumbDoc, p: ThumbPart, box: PartBox, full: PartBox = box): PartBox {
   let { x, y, w, h } = box;
   const rot = ((p.rotation || 0) * Math.PI) / 180;
   if (rot) {
-    const [cx, cy] = partCenter(p, box);
+    const [cx, cy] = partCenter(p, full);
     const pts = [[x, y], [x + w, y], [x, y + h], [x + w, y + h]].map(([px, py]) => [
       cx + (px - cx) * Math.cos(rot) - (py - cy) * Math.sin(rot),
       cy + (px - cx) * Math.sin(rot) + (py - cy) * Math.cos(rot),
@@ -260,13 +260,65 @@ export function partView(doc: ThumbDoc, p: ThumbPart, box: PartBox): PartBox {
 // 透けている所が分かる市松模様（部品の一覧の小さな絵の下地）
 const CHECKER = 'repeating-conic-gradient(rgba(255,255,255,0.14) 0% 25%, transparent 0% 50%) 50% / 10px 10px, #2a2a2a';
 
+// 絵の中で実際に見えている所（透けていない所）の範囲。切り抜いた人物の周りの透明な余白を除いて、小さな絵でも大きく見せる
+type Opaque = { x0: number; y0: number; x1: number; y1: number };
+const opaqueCache = new Map<string, Opaque | null | Promise<Opaque | null>>();
+function opaqueBounds(src: string): Promise<Opaque | null> {
+  const got = opaqueCache.get(src);
+  if (got !== undefined) return Promise.resolve(got);
+  const job = new Promise<Opaque | null>((resolve) => {
+    const im = new Image();
+    im.decoding = 'async';
+    im.onload = () => {
+      try {
+        const k = Math.min(1, 200 / Math.max(im.naturalWidth, im.naturalHeight, 1));
+        const w = Math.max(1, Math.round(im.naturalWidth * k)), h = Math.max(1, Math.round(im.naturalHeight * k));
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const g = cv.getContext('2d', { willReadFrequently: true });
+        if (!g) return resolve(null);
+        g.drawImage(im, 0, 0, w, h);
+        const a = g.getImageData(0, 0, w, h).data;
+        let x0 = w, y0 = h, x1 = -1, y1 = -1;
+        for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) {
+          if (a[(y * w + x) * 4 + 3] > 24) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        }
+        resolve(x1 < 0 ? null : { x0: x0 / w, y0: y0 / h, x1: (x1 + 1) / w, y1: (y1 + 1) / h });
+      } catch { resolve(null); }
+    };
+    im.onerror = () => resolve(null);
+    im.src = src;
+  });
+  opaqueCache.set(src, job);
+  void job.then((v) => opaqueCache.set(src, v));
+  return job;
+}
+
 /** 部品1つだけを、その部品の所だけ切り取って描く小さな絵（部品の一覧・右クリックの一覧・選んだ部品の欄）。
  *  2026-11-24 本人「どんなパーツかをテキストで表すんじゃなくて、全部にサムネをつけて。見ただけで分かるように」 */
 export function PartPreview({ doc, part, box, className }: { doc: ThumbDoc; part: ThumbPart; box: PartBox; className?: string }) {
+  const src = part.type === 'image' ? part.src : '';
+  const [opaque, setOpaque] = useState<Opaque | null>(() => {
+    const got = src ? opaqueCache.get(src) : undefined;
+    return got && !(got instanceof Promise) ? got : null;
+  });
+  useEffect(() => {
+    if (!src) return;
+    let live = true;
+    void opaqueBounds(src).then((v) => { if (live) setOpaque(v); });
+    return () => { live = false; };
+  }, [src]);
+  let shown = box;
+  if (part.type === 'image' && opaque) {
+    const fx0 = part.flip_x ? 1 - opaque.x1 : opaque.x0;
+    const fx1 = part.flip_x ? 1 - opaque.x0 : opaque.x1;
+    shown = { x: part.x + fx0 * part.w, y: part.y + opaque.y0 * part.h, w: (fx1 - fx0) * part.w, h: (opaque.y1 - opaque.y0) * part.h };
+  }
   const one: ThumbDoc = { ...doc, background: 'transparent', parts: [{ ...part, hidden: false, opacity: Math.max(0.35, part.opacity ?? 1) } as ThumbPart] };
   return (
     <span className={`pointer-events-none block overflow-hidden rounded-sm ${className || ''}`} style={{ background: CHECKER }} data-part-preview={part.id}>
-      <ThumbCanvas doc={one} view={partView(doc, part, box)} width="100%" style={{ width: '100%', height: '100%', aspectRatio: 'auto', background: 'transparent', overflow: 'hidden' }} />
+      <ThumbCanvas doc={one} boxes={{ [part.id]: box }} view={partView(doc, part, shown, box)} width="100%"
+        style={{ width: '100%', height: '100%', aspectRatio: 'auto', background: 'transparent', overflow: 'hidden' }} />
     </span>
   );
 }

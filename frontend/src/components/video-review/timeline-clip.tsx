@@ -309,7 +309,7 @@ function VolumeLine({ clipId, volume, fns, onLive }: {
   );
 }
 
-function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip, stripIndex = 0, narrow, selected, linkedSelected, touch, appear, vanish, title, peaksUrl, sourceStart = 0, sourceEnd = 0, volume = 1, fns }: Props) {
+function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip, narrow, selected, linkedSelected, touch, appear, vanish, title, peaksUrl, sourceStart = 0, sourceEnd = 0, volume = 1, fns }: Props) {
   const look = CLIP_KIND_STYLE[kind];
   const isAudio = kind === 'voice' || kind === 'bgm' || kind === 'se';
   const [liveVol, setLiveVol] = useState<number | null>(null);
@@ -368,8 +368,9 @@ function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip,
           <div className="pointer-events-none absolute inset-0 bg-repeat-x" data-image-tiles
             style={{ backgroundImage: `url(${thumb})`, backgroundSize: 'auto 100%' }} />
         ) : null}
-        {/* 絵が出ている時は名前の文字を出さない（名前はマウスを乗せた時の札に） */}
-        {(strip && aspect && widthPx >= 40) || showThumb ? null : (
+        {/* 絵が出ている時は名前の文字を出さない（名前はマウスを乗せた時の札に）。声は波形がその中身なので名前を出さない。
+            BGM・効果音は何の音かが絵で分からないので名前を残す */}
+        {(strip && aspect && widthPx >= 40) || showThumb || (kind === 'voice' && peaksUrl) ? null : (
           <span className={`truncate px-1 ${isAudio ? 'self-start pt-[1px] text-[9px] leading-tight drop-shadow-[0_1px_1px_rgba(0,0,0,0.6)]' : ''} ${look.dark && isAudio ? 'drop-shadow-none' : ''}`}>{label}</span>
         )}
       </div>
