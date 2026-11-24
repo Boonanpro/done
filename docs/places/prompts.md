@@ -6,15 +6,15 @@ ready: 'textarea, button:has(img[src^="/prompts/arch/"])'
 watches: [frontend/src/app/prompts/page.tsx, frontend/src/components/prompts/prompts-screen.tsx, frontend/src/components/prompts/prompts-chat.tsx, frontend/src/components/prompts/reader-skills.tsx, frontend/src/components/prompts/skill-library.tsx, frontend/src/components/prompts/line-diff.ts, frontend/src/components/prompts/architecture.ts, frontend/src/components/prompts/architecture-trace.ts, frontend/src/components/prompts/conversation-circuit.tsx, frontend/src/components/prompts/request-playback.tsx, frontend/src/app/prompts/circuit/page.tsx, frontend/src/lib/prompts-api.ts, app/api/prompts_screen.py, app/services/prompt_store.py, app/prompts/catalog.json]
 errors: [ログインが切れています, 失敗しました]
 speak: |
-  - 構成図は左にみきさんの姿、PCとスマホのチャット画面、胸元のダンピンがあり、右に依頼を受け取る担当が並びます。「全体を表示」で右端まで見渡せます。再生すると、記録のある依頼と返答を「この依頼の会話」で読めます。
+  - 構成図は左に切り抜いたみきさんの姿、その右にPC・スマホ・エディター・ダンピン（切り抜き）の4つの入口があり、PC・スマホ・エディターは「チャット」へ、4つ全部が「音声」へつながって、右に依頼を受け取る担当が並びます。「全体を表示」で右端まで見渡せます。再生すると、記録のある依頼と返答を「この依頼の会話」で読めます。
   - 構成図の上の「今動いている依頼」で見たいチャット・通話・並行作業を押すと、その依頼だけの作業が箱の横と「作業の様子」に出ます。「前の会話を流し直す」で部屋と依頼を選び、図の下の「流れを再生」で再生・一時停止・コマ送り・速度変更ができます。光った箱を押すと、その段階で記録された指示文・渡した本文・秒数が開きます。「依頼を試す」で渡す直前までか実際に進めるかを選べます。
   - 構成図の緑の枝には、ダンがどんな依頼で読むスキルかが出ます。「すべて」でそのダンの頼み別の枝を開けます。通話で制作を頼んだ時は並行作業につながります。
   - 構成図の「スキルを探す」で全スキルの手順書と参考ページを検索し、編集・復元できます。
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: 9abc3b6c4d9367be
-described: 86b29579ff22c3c7
+fingerprint: d6d03e6ffe51bf67
+described: f07a7bfa9a4e9194
 last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で追う操作は記載どおり"
 ---
 # ダンを動かしている指示文
@@ -66,9 +66,9 @@ last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で�
 `python scripts/place_map.py stamp prompts` が書き直す。手で直さない。
 
 - 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/circuit/page.tsx`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/architecture-trace.ts`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/conversation-circuit.tsx`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/request-playback.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
-- ラベル: 「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「指示文の表示」、「動画を作る・直す時の構成図」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「この依頼の会話」、「スキル一覧」、「スキル・参考ページを検索」
-- 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」、「video-branch」、「node-facts」、「node-programs」
+- ラベル: 「ダンに書く」、「止める」、「送る」、「作業中」、「構成図を縮小」、「構成図を拡大」、「閉じる」、「選んだ場所の中身」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「この依頼の会話」、「スキル一覧」、「スキル・参考ページを検索」
+- 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」、「node-facts」、「node-programs」
 - 見出し: 「プログラムの中にあった頃に直された日」、「ダンを動かしている指示文」、「作業の様子」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "6047951223", "app/prompts/catalog.json": "411e89c51e", "app/services/prompt_store.py": "750e86435b", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/architecture-trace.ts": "ba264c2e8e", "frontend/src/components/prompts/architecture.ts": "26c30d56b2", "frontend/src/components/prompts/conversation-circuit.tsx": "9ee082d8b9", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "ceb98a46cb", "frontend/src/components/prompts/prompts-screen.tsx": "c31327d809", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "86b17adf35", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "93f3485b6b"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "f3bf5950cb", "app/prompts/catalog.json": "411e89c51e", "app/services/prompt_store.py": "750e86435b", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/architecture-trace.ts": "258b49bdd5", "frontend/src/components/prompts/architecture.ts": "286a4b37ac", "frontend/src/components/prompts/conversation-circuit.tsx": "fb5529b4b6", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "ceb98a46cb", "frontend/src/components/prompts/prompts-screen.tsx": "fb6edc03e9", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "d084b2ce2a", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "93f3485b6b"} -->
 <!-- place_map:auto:end -->
