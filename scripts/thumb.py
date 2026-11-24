@@ -20,6 +20,9 @@
   python scripts/thumb.py render  <部屋> <作品> [--out a.png] [--width 1280]   今の形を PNG に（Read で見る）
   python scripts/thumb.py export  <部屋> <作品>                      1280×720 の書き出し
   python scripts/thumb.py undo    <部屋> <作品>                      1つ前の形へ戻す
+  python scripts/thumb.py busy    <部屋> <作品> <部品id,…> "何をしているか" [秒]   本人の画面のその部品に「ダン」の印と光を出す
+        thumb.py の set・repaint・finish などは自分で出す。自分の Python で絵を作り直す時は、始める前にこれを呼び、
+        保存したら busy <部屋> <作品> "" done で消す（2026-11-24 本人「ダンが何かやる時は必ずその操作を見える化しなさい」）
   python scripts/thumb.py refs    <部屋> <作品> add <絵のURL> "題" "チャンネル" | clear
         「一覧で見る」で横に並べるほかのサムネ（参考・競合・同じチャンネルの過去の動画）
   python scripts/thumb.py list    <部屋> <動画の作品>                  その動画のサムネ（1枚目が表のサムネ）
@@ -118,7 +121,32 @@ def main() -> None:
         print('隠しました（消してはいない）')
         return
     room, cid = a[1], a[2]
+    if cmd == 'busy':
+        # ダンがこれから触る部品をエディターに見せる（自分の Python で絵を作り直す時など、保存まで時間がかかる直しの前に）
+        ids = [x for x in (a[3] if len(a) > 3 else '').split(',') if x]
+        label = a[4] if len(a) > 4 else '直しています'
+        if label == 'done':
+            td.clear_activity(room, cid)
+        else:
+            td.set_activity(room, cid, ids, label, ttl=float(a[5]) if len(a) > 5 else 180)
+        print('ok')
+        return
     doc = td.get(room, cid)
+    # 本人の画面に、ダンが今どの部品を触っているかを出す（保存した直しは画面が前後を比べて動きで見せる）
+    _labels = {'set': '直しています', 'order': '重なりの順を変えています', 'delete': '消しています', 'repaint': '絵を描き直しています',
+               'finish': '仕上げています', 'unfinish': '仕上げを外しています', 'add-text': '文字を足しています'}
+    if cmd in _labels:
+        ids = [a[3]] if cmd in ('set', 'order', 'delete', 'repaint') and len(a) > 3 else \
+            [p['id'] for p in doc.get('parts', []) if p.get('type') == 'image' and not p.get('hidden')] if cmd == 'finish' else []
+        td.set_activity(room, cid, ids, _labels[cmd], ttl=600 if cmd in ('repaint', 'finish') else 6)
+    try:
+        _run(cmd, a, room, cid, doc)
+    finally:
+        if cmd in ('repaint', 'finish'):
+            td.clear_activity(room, cid)
+
+
+def _run(cmd, a, room, cid, doc):
     if cmd == 'show':
         print(show(doc))
     elif cmd == 'json':

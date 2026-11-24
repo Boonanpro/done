@@ -6,9 +6,11 @@
 // - 「＋」で白紙の案を足す。複製は Ctrl+D（部品を選んでいない時）と案の「…」の「複製する」
 //   （2026-11-24 本人「案を足すというテキストいらない。＋ボタンを押したら普通に白紙を。複製はCtrl+Dと…だけで良い」）
 // - 案の「…」で 表のサムネにする・複製・消す（消すのは控えに回すだけ。最後の1つは消せない）
+// - ダンが案を足した・直した・並べ替えた時は、その案に光と「ダン」の印を出す（2026-11-24 本人「下の一覧から新規追加するとか
+//   複製するとか画面外のものも全部、ダンが何かやる時は必ずその操作を見える化しなさい」）。2秒ごとに読み直す
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Copy, Loader2, MoreHorizontal, Plus, Star, Trash2 } from 'lucide-react';
+import { Copy, Loader2, MoreHorizontal, MousePointer2, Plus, Star, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { ThumbCanvas } from './thumb-canvas';
@@ -23,6 +25,8 @@ export type ThumbPatternLink = {
 };
 
 type Pattern = { id: string; title: string; doc: ThumbDoc };
+type DanMark = { kind: 'added' | 'edited' | 'moved'; until: number };
+const DAN_MARK_MS = 3500;
 
 function url(path: string, roomId: string) {
   return `/api/v1/production-assets/contents/${path}${path.includes('?') ? '&' : '?'}room_id=${encodeURIComponent(roomId)}`;
@@ -44,21 +48,50 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
   const [at, setAt] = useState<{ left: number; bottom: number }>({ left: 0, bottom: 0 });
   const place = (el: Element) => { const r = el.getBoundingClientRect(); setAt({ left: Math.max(8, Math.min(window.innerWidth - 184, r.right - 176)), bottom: window.innerHeight - r.top + 4 }); };
   const boxRef = useRef<HTMLDivElement | null>(null);
+  // ダンの手の印（案ごと）。この画面で本人が足した案には出さない
+  const [marks, setMarks] = useState<Record<string, DanMark>>({});
+  const mine = useRef(new Set<string>());
+  const seen = useRef<Map<string, { rev: number; k: number }> | null>(null);
 
   const load = useCallback(async () => {
     try {
       const res = await fetch(url(`${encodeURIComponent(link.videoId)}/thumbnail-patterns`, roomId), { credentials: 'include', cache: 'no-store' });
       if (!res.ok) return;
-      const j = (await res.json()) as { patterns: Array<{ id: string; title: string; doc: unknown }> };
-      setItems(j.patterns.map((p) => ({ id: p.id, title: p.title, doc: asThumbDoc(p.doc) })));
+      const j = (await res.json()) as { now?: number; patterns: Array<{ id: string; title: string; doc: unknown }> };
+      const next = j.patterns.map((p) => ({ id: p.id, title: p.title, doc: asThumbDoc(p.doc) }));
+      const prev = seen.current;
+      const now = j.now || Date.now() / 1000;
+      if (prev && typeof document !== 'undefined' && !document.hidden) {
+        const add: Record<string, DanMark> = {};
+        const until = Date.now() + DAN_MARK_MS;
+        next.forEach((p, k) => {
+          const by = p.doc.saved_by, at = p.doc.saved_at ? Date.parse(p.doc.saved_at) / 1000 : 0;
+          const fresh = by === 'dan' && at > 0 && now - at < 8;
+          const was = prev.get(p.id);
+          if (!was) { if (!mine.current.has(p.id) && (fresh || by === 'dan')) add[p.id] = { kind: 'added', until }; return; }
+          if ((p.doc.rev ?? 0) !== was.rev && fresh) add[p.id] = { kind: 'edited', until };
+          else if (was.k !== k && fresh) add[p.id] = { kind: 'moved', until };
+        });
+        // 本人の画面（帯の送り位置）は動かさない（2026-11-10 本人「自分のUIを奪われるのは避けたい」）
+        if (Object.keys(add).length) setMarks((m) => ({ ...m, ...add }));
+      }
+      seen.current = new Map(next.map((p, k) => [p.id, { rev: p.doc.rev ?? 0, k }]));
+      setItems(next);
     } catch { /* 次に */ }
   }, [roomId, link.videoId]);
 
   useEffect(() => {
     void load();
-    const t = window.setInterval(() => void load(), 5000);
+    const t = window.setInterval(() => void load(), 2000);
     return () => window.clearInterval(t);
   }, [load]);
+  useEffect(() => {
+    const live = Object.values(marks);
+    if (!live.length) return;
+    const t = window.setTimeout(() => setMarks((m) => Object.fromEntries(Object.entries(m).filter(([, v]) => v.until > Date.now()))),
+      Math.max(50, Math.min(...live.map((v) => v.until)) - Date.now()));
+    return () => window.clearTimeout(t);
+  }, [marks]);
 
   // 帯の外を押したら開いている小さな欄を閉じる
   useEffect(() => {
@@ -81,6 +114,7 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
       });
       if (!res.ok) throw new Error(await res.text());
       const made = (await res.json()) as { id: string; title?: string };
+      mine.current.add(made.id);
       await load();
       link.onChanged?.();
       link.onOpen(made);
@@ -146,14 +180,25 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
   const cardW = compact ? 112 : 132;
   return (
     <div ref={boxRef} className="flex shrink-0 items-end gap-2 overflow-x-auto px-3 py-2" data-thumb-patterns>
+      <style>{'@keyframes thumbDanIn{from{opacity:0;transform:translateY(8px) scale(.85)}to{opacity:1;transform:none}}'}</style>
       {items.map((p, k) => {
         const cur = p.id === currentId;
+        const dm = marks[p.id];
         return (
-          <div key={p.id} className="relative shrink-0" style={{ width: cardW }} data-thumb-pattern={p.id}>
+          <div key={p.id} className="relative shrink-0" style={{ width: cardW, animation: dm?.kind === 'added' ? 'thumbDanIn .45s cubic-bezier(.2,.8,.2,1)' : undefined }} data-thumb-pattern={p.id}>
             <button type="button" onClick={() => void open(p)} title={cur ? '今開いている案' : 'この案を開く'}
-              className={`block w-full overflow-hidden rounded-md ${cur ? 'ring-2 ring-sky-500' : 'ring-1 ring-border hover:ring-sky-300'}`}>
+              className={`block w-full overflow-hidden rounded-md ${cur ? 'ring-2 ring-sky-500' : 'ring-1 ring-border hover:ring-sky-300'}`}
+              style={dm ? { boxShadow: '0 0 0 2px #38bdf8, 0 0 14px 3px rgba(56,189,248,.65)' } : undefined}>
               <div className="pointer-events-none"><ThumbCanvas doc={cur ? liveDoc : p.doc} width="100%" /></div>
             </button>
+            {dm ? (
+              <div aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 z-10" data-dan-pattern-mark={dm.kind}>
+                <MousePointer2 className="h-5 w-5 fill-sky-400 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]" />
+                <span className="ml-3 mt-[-2px] block w-max rounded-full bg-sky-500 px-1.5 py-[1px] text-[10px] font-semibold leading-tight text-white shadow">
+                  ダン {dm.kind === 'added' ? '足しました' : dm.kind === 'moved' ? '並べ替えました' : '直しました'}
+                </span>
+              </div>
+            ) : null}
             <div className="mt-1 flex items-center gap-1 text-[11px]">
               {k === 0 ? <span className="flex items-center gap-0.5 rounded bg-amber-400/90 px-1 font-semibold text-black" title="表のサムネ（動画に使う案）"><Star className="h-2.5 w-2.5" />表</span> : null}
               <span className={`min-w-0 flex-1 truncate ${cur ? 'font-semibold' : 'text-muted-foreground'}`}>{p.title || `案${k + 1}`}</span>

@@ -53,6 +53,9 @@ export type ThumbDoc = {
   background?: string;
   parts: ThumbPart[];
   rev?: number;
+  // 誰がいつ保存したか（'dan' | 'owner'）。ダンの直しを画面で動きで見せるのに使う
+  saved_by?: string;
+  saved_at?: string;
   // 一覧で並べて見る時に横に並べるほかのサムネ（参考や同じチャンネルの過去の動画）
   references?: Array<{ src: string; title?: string; channel?: string }>;
   title?: string; // 一覧で並べた時に下に出す動画の題
@@ -68,6 +71,8 @@ export type ThumbInstruction = {
   created_at: string;
   /** コメントを付けた部品（部品を選んでコメントした時） */
   part_id?: string | null;
+  /** 複数の部品をまとめて選んでコメントした時の全部（part_id はその先頭） */
+  part_ids?: string[] | null;
   /** コメントの印を出す所（サムネの画素） */
   anchor?: [number, number] | null;
 };
@@ -178,4 +183,50 @@ export function applyFinish(doc: ThumbDoc, job: ThumbFinishJob): ThumbDoc {
     x: 0, y: 0, w: base.width, h: base.height, locked: true, finish: { job_id: job.job_id, sources: [...srcs] },
   });
   return { ...base, parts };
+}
+
+// ── 3者の重ね合わせ（2026-11-24 ダンが案件の絵の赤丸を消して保存した2秒後、開いていたエディターが手元の古い形で
+//    上書きして、ダンの直しが消えた）。base＝手元の形の元にした保存の形、ours＝手元の形、theirs＝今保存されている形。
+//    部品ごとに、手元で変えた部品は手元の形、変えていない部品は今保存されている形を使う。元に戻す・やり直すも
+//    これで「自分の1手の前後」だけを今の形に当てる（ダンの直しを巻き戻さない）。
+const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+function mergeList<T extends { id: string }>(base: T[], ours: T[], theirs: T[]): T[] {
+  const bm = new Map(base.map((x) => [x.id, x]));
+  const om = new Map(ours.map((x) => [x.id, x]));
+  const tm = new Map(theirs.map((x) => [x.id, x]));
+  const ids = new Set([...bm.keys(), ...om.keys(), ...tm.keys()]);
+  const pick = new Map<string, T>();
+  for (const id of ids) {
+    const o = om.get(id), b = bm.get(id), t = tm.get(id);
+    const v = same(o, b) ? t : o;   // 手元で変えて（足して・消して）いなければ、今保存されている方
+    if (v) pick.set(id, v);
+  }
+  // 並び: 手元で並びを変えていれば手元の並び、変えていなければ今保存されている並び。残りはもう一方の並びで足す
+  const common = (xs: T[], keep: Set<string>) => xs.map((x) => x.id).filter((id) => keep.has(id));
+  const both = new Set([...bm.keys()].filter((id) => om.has(id)));
+  const ownOrder = !same(common(base, both), common(ours, both));
+  const first = ownOrder ? ours : theirs, second = ownOrder ? theirs : ours;
+  const out: string[] = [];
+  for (const x of first) if (pick.has(x.id) && !out.includes(x.id)) out.push(x.id);
+  second.forEach((x, i) => {
+    if (!pick.has(x.id) || out.includes(x.id)) return;
+    // もう一方で足された物は、その並びの前の物のすぐ後ろへ
+    const prev = second.slice(0, i).reverse().find((y) => out.includes(y.id));
+    out.splice(prev ? out.indexOf(prev.id) + 1 : 0, 0, x.id);
+  });
+  return out.map((id) => pick.get(id)!);
+}
+
+export function mergeThumbDocs(base: ThumbDoc, ours: ThumbDoc, theirs: ThumbDoc): ThumbDoc {
+  const out: Record<string, unknown> = { ...theirs };
+  const keys = new Set([...Object.keys(base), ...Object.keys(ours), ...Object.keys(theirs)]);
+  const b = base as unknown as Record<string, unknown>, o = ours as unknown as Record<string, unknown>;
+  for (const k of keys) {
+    if (k === 'parts' || k === 'instructions' || k === 'rev' || k === 'saved_by' || k === 'saved_at') continue;
+    if (!same(o[k], b[k])) out[k] = o[k];
+  }
+  out.parts = mergeList(base.parts || [], ours.parts || [], theirs.parts || []);
+  out.instructions = mergeList(base.instructions || [], ours.instructions || [], theirs.instructions || []);
+  return out as unknown as ThumbDoc;
 }

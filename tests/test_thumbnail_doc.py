@@ -153,3 +153,35 @@ def test_keep_faces_without_faces_returns_the_ai_picture():
     b = Image.new('RGB', (320, 180), (200, 100, 50))
     out, log = td.keep_faces(a, b)
     assert log == [] and np.array_equal(np.asarray(out), np.asarray(b))
+
+
+def test_stale_owner_save_is_refused_not_overwriting_dan(room):
+    """2026-11-24: ダンが案件の絵を差し替えた2秒後、開いていたエディターが古い形で上書きしてダンの直しが消えた。
+    元にした rev を添えた保存は、その後にダンが保存していたら断られ、今の形が返る。"""
+    c = td.create(room, 'サムネ', _doc(room))
+    owner_view = td.get(room, c['id'])
+    base = owner_view['rev']
+    dan = td.get(room, c['id'])
+    dan['parts'][0]['opacity'] = 0.5
+    td.save(room, c['id'], dan, 'dan')
+    owner_view['parts'][1]['x'] = 140
+    with pytest.raises(td.StaleDoc) as e:
+        td.save(room, c['id'], owner_view, 'owner', base_rev=base)
+    assert e.value.current['parts'][0]['opacity'] == 0.5
+    assert td.get(room, c['id'])['parts'][0]['opacity'] == 0.5
+    # 今の rev を元にすれば通る
+    cur = td.get(room, c['id'])
+    cur['parts'][1]['x'] = 140
+    saved = td.save(room, c['id'], cur, 'owner', base_rev=cur['rev'])
+    assert saved['parts'][0]['opacity'] == 0.5 and saved['parts'][1]['x'] == 140
+
+
+def test_activity_expires(room):
+    c = td.create(room, 'サムネ', _doc(room))
+    td.set_activity(room, c['id'], ['bg'], '絵を描き直しています', ttl=30)
+    assert td.activity(room, c['id'])['parts'] == ['bg']
+    td.set_activity(room, c['id'], ['bg'], 'x', ttl=-1)
+    assert td.activity(room, c['id']) is None
+    td.set_activity(room, c['id'], ['bg'], 'x', ttl=30)
+    td.clear_activity(room, c['id'])
+    assert td.activity(room, c['id']) is None

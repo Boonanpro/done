@@ -269,6 +269,9 @@ def build_thumb_task(ann: dict[str, Any], content: dict[str, Any], asset_room_id
         f"- 絵の中身を変える頼み（顔の表情・物を足す・消す）は、その絵の部品の範囲だけを描き直す: "
         f"{tool} repaint {asset_room_id} {cid} <絵の部品id> --box x,y,w,h --prompt \"…\"（範囲の外は変わらない）",
         f"- 直した結果を見る: {tool} render {asset_room_id} {cid}（PNG の場所が出る。Read で開いて確かめる）",
+        f"- 上の道具を使わずに自分で絵を作り直す時は、始める前に {tool} busy {asset_room_id} {cid} <部品id> \"何をしているか\" で"
+        "本人の画面のその部品に「ダン」の印を出し、保存（thumbnail_doc.save, actor='dan'）の後に "
+        f"{tool} busy {asset_room_id} {cid} \"\" done で消す。保存したら {tool} show {asset_room_id} {cid} で自分の直しが残っているか確かめてから返事する。",
         "本人のエディターは保存した瞬間に読み直すので、数値の直しはすぐ本人の目の前で変わる。動かす・大きさ・色・文字の話は、"
         "描き直しを使わずに数値で直す（速く、ほかの所が変わらない）。指示の範囲の外は触らない。",
         "最後の返事は、本人に見せる言葉で1〜2文（何をどう直したか）。返事はエディターのこの指示の欄にだけ出て、チャットには出ない。",

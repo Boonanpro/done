@@ -66,8 +66,21 @@ def _history_path(room_id: str, content_id: str) -> Path:
     return d / 'history.jsonl'
 
 
-def save(room_id: str, content_id: str, doc: dict[str, Any], actor: str = 'owner') -> dict[str, Any]:
-    """サムネの部品を保存する。rev を1つ進め、前の形を履歴に残す（ダンの直しを本人が元に戻せるように）。"""
+class StaleDoc(Exception):
+    """保存しようとした形が、読んだ後にほかの人（ダン・別の画面）が保存した形より古い。"""
+
+    def __init__(self, current: dict[str, Any]):
+        super().__init__('サムネはほかの所で直されています')
+        self.current = current
+
+
+def save(room_id: str, content_id: str, doc: dict[str, Any], actor: str = 'owner',
+         base_rev: int | None = None) -> dict[str, Any]:
+    """サムネの部品を保存する。rev を1つ進め、前の形を履歴に残す（ダンの直しを本人が元に戻せるように）。
+
+    base_rev（その形の元にした rev）を渡すと、その後にほかの所で保存されていたら保存せず StaleDoc を投げる。
+    エディターは今の形を受け取って、自分の直しだけをその上に重ね直して保存し直す
+    （2026-11-24 ダンが案件の絵の赤丸を消して保存した2秒後、開いていたエディターが手元の古い形で上書きしていた）。"""
     from app.services.timeline_draft import ContentsLock
     par = _par()
     if not isinstance(doc, dict) or not isinstance(doc.get('parts'), list):
@@ -79,6 +92,8 @@ def save(room_id: str, content_id: str, doc: dict[str, Any], actor: str = 'owner
             raise ValueError('作品が見つかりません')
         tl = c.get('timeline') if isinstance(c.get('timeline'), dict) else {}
         before = tl.get('thumbnail') if isinstance(tl.get('thumbnail'), dict) else None
+        if base_rev is not None and int((before or {}).get('rev') or 0) != int(base_rev):
+            raise StaleDoc(before or {})
         rev = int((before or {}).get('rev') or 0) + 1
         doc = {**doc, 'rev': rev, 'saved_by': actor, 'saved_at': _now()}
         c['timeline'] = {**tl, 'thumbnail': doc}
@@ -98,6 +113,42 @@ def save(room_id: str, content_id: str, doc: dict[str, Any], actor: str = 'owner
     return doc
 
 
+# ── ダンが今触っている所（エディターの画面に「ダン」の印と光で出す）──────────────────────────────
+# 2026-11-24 本人「ダンが何かやる時は必ずその操作を見える化しなさい」。保存した直しは画面が前後を比べて動きで見せる。
+# 時間のかかる直し（描き直し・仕上げ）は保存の前から、どの部品を何のために触っているかをここに書いておく。
+
+def _activity_path(room_id: str, content_id: str) -> Path:
+    d = _par()._room_dir(room_id) / 'thumbnails' / content_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d / 'activity.json'
+
+
+def set_activity(room_id: str, content_id: str, part_ids: list[str] | None, label: str, ttl: float = 30) -> None:
+    try:
+        _activity_path(room_id, content_id).write_text(json.dumps(
+            {'parts': [str(p) for p in (part_ids or []) if p], 'label': label, 'at': time.time(), 'until': time.time() + ttl},
+            ensure_ascii=False), encoding='utf-8')
+    except OSError:
+        pass
+
+
+def clear_activity(room_id: str, content_id: str) -> None:
+    try:
+        _activity_path(room_id, content_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def activity(room_id: str, content_id: str) -> dict[str, Any] | None:
+    try:
+        a = json.loads(_activity_path(room_id, content_id).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(a, dict) or float(a.get('until') or 0) < time.time():
+        return None
+    return a
+
+
 def undo(room_id: str, content_id: str, actor: str = 'dan') -> dict[str, Any]:
     """1つ前に保存した形へ戻す。"""
     hp = _history_path(room_id, content_id)
@@ -113,7 +164,7 @@ def undo(room_id: str, content_id: str, actor: str = 'dan') -> dict[str, Any]:
 
 
 def create(room_id: str, title: str, doc: dict[str, Any], asset_ids: list[str] | None = None,
-           video_id: str | None = None) -> dict[str, Any]:
+           video_id: str | None = None, actor: str = 'dan') -> dict[str, Any]:
     """新しいサムネの作品。動画の作品（video_id）とひと組で作る。直す時は今の作品を save で直し、これは使わない
     （2026-11-21 本人「今あるサムネを直しているだけなのに、なんでサムネが増えていくんだ」）。"""
     from app.services.timeline_draft import ContentsLock
@@ -121,7 +172,7 @@ def create(room_id: str, title: str, doc: dict[str, Any], asset_ids: list[str] |
     now = _now()
     content = {
         'id': str(uuid.uuid4()), 'room_id': room_id, 'title': title, 'format': FORMAT, 'status': 'draft',
-        'asset_ids': list(asset_ids or []), 'timeline': {'thumbnail': {**doc, 'rev': 1}}, 'outputs': [],
+        'asset_ids': list(asset_ids or []), 'timeline': {'thumbnail': {**doc, 'rev': 1, 'saved_by': actor, 'saved_at': now}}, 'outputs': [],
         'created_at': now, 'updated_at': now,
     }
     if video_id:
@@ -195,7 +246,7 @@ def _normalize_order(rows: list[dict[str, Any]], video_id: str) -> list[dict[str
     return pats
 
 
-def add_pattern(room_id: str, video_id: str, from_id: str | None = None) -> dict[str, Any]:
+def add_pattern(room_id: str, video_id: str, from_id: str | None = None, actor: str = 'owner') -> dict[str, Any]:
     """動画に案を1つ足す。from_id があればその案の写し、無ければ白紙。足した案は一番後ろ。"""
     import copy
     from app.services.timeline_draft import ContentsLock
@@ -222,6 +273,8 @@ def add_pattern(room_id: str, video_id: str, from_id: str | None = None) -> dict
             doc = {'width': int(first.get('width') or 1920), 'height': int(first.get('height') or 1080),
                    'background': '#111111', 'parts': [], 'title': first.get('title') or video.get('title') or ''}
         doc['rev'] = 1
+        doc['saved_by'] = actor
+        doc['saved_at'] = now
         used = {str(c.get('title') or '') for c in pats}
         n = len(pats) + 1
         while f'案{n}' in used:
