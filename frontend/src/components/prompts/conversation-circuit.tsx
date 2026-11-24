@@ -138,8 +138,9 @@ export function ConversationCircuit({visible, controls, ...props}: MapActions & 
   }
   const selectedSteps=!origin && shown===history.selected && items.some(i=>i.id===shown) ? history.steps : [];
   const selectedItem=items.find(i=>i.id===shown);
-  return <div className="min-w-0 space-y-3">
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 bg-white p-3">
+  // ボードの時は上の帯だけ細く出し、残りを全部ボードに使う（2026-11-24 本人「表示領域を最大限でかく」）
+  return <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-1.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-stone-200 bg-white px-2 py-1">
         <h2 className="flex items-center gap-1.5 text-sm font-bold"><Radio size={15} className="text-emerald-700"/>今動いている依頼</h2>
         {liveError ? <span role="alert" className="text-xs text-rose-800">{liveError}</span> : !liveItems.length && <span className="text-xs text-stone-500">{loadedLive?'現在はありません':'確認中…'}</span>}
         {liveItems.map(item=><button key={item.room+item.id} disabled={busy} title={[(rooms.find(r=>r.id===item.room)?.title), item.state, item.title].filter(Boolean).join(' · ')}
@@ -156,7 +157,7 @@ export function ConversationCircuit({visible, controls, ...props}: MapActions & 
       {(section==='history' || section==='trial') && <label className="block space-y-1 text-sm font-semibold">会話の部屋<select disabled={busy} className={field} value={room} onChange={e=>changeRoom(e.target.value)}>
         {!available.length&&<option value="">部屋がありません</option>}{available.map(r=><option key={r.id} value={r.id}>{r.title}</option>)}</select></label>}
       {error && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-900">{error}</p>}
-      {section==='idle'?props.renderDiagram():section==='history' || section==='live'?<>
+      {section==='idle'?<div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-stone-200">{props.renderDiagram()}</div>:<div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain">{section==='history' || section==='live'?<>
         {origin && <p className="text-sm">依頼が届きました。受付の記録を待っています。</p>}
         {historyError && <p role="alert" className="text-sm text-rose-800">{historyError}</p>}
         {section==='history' && <div className="flex flex-wrap items-end gap-3">
@@ -195,6 +196,6 @@ export function ConversationCircuit({visible, controls, ...props}: MapActions & 
         </details>}
         <RequestPlayback {...props} key={room+trialView} live={busy || trialView==='actual'} steps={trialView === 'previous' ? baseline : trialView === 'actual' ? history.steps : steps}/>
         {selected.startsWith('voice/')&&!busy&&<button className={button} onClick={()=>{setKind('音声');setSection('history');}}>この音声から始まった作業を見る</button>}
-      </>}
+      </>}</div>}
   </div>;
 }
