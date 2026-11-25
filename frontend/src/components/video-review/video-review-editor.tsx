@@ -61,6 +61,8 @@ import { BlendSelect, SceneClipPanel } from './scene-clip-panel';
 import { TimelinePreview } from './timeline-preview';
 import { MotionPanel } from './motion-panel';
 import { isOneForm, motionAt, setKeyAt, sortedKeys, type MotionKey } from './placement';
+import { AdobeFontChoices } from './adobe-font-choices';
+import { isRetiredFont } from './adobe-fonts';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
 import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, riderIds, rippleDeleteMain, rippleMoveGroups, rippleTrim } from './ripple-edit';
@@ -6966,6 +6968,11 @@ export function VideoReviewEditor({
                                 この見た目を全テロップに適用
                               </Button>
                             </div>
+                            <details className="rounded border p-2">
+                              <summary className="cursor-pointer text-xs">太い見出し書体を見比べる</summary>
+                              <AdobeFontChoices headingsOnly text={selectedSequenceClip.text || ''} selected={String(st.font || '')}
+                                onSelect={font => setStyle({ font })}/>
+                            </details>
                             <div className="grid grid-cols-2 gap-2">
                               <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
                                 フォント
@@ -6974,7 +6981,7 @@ export function VideoReviewEditor({
                                   onChange={(e) => setStyle({ font: e.target.value as CaptionFontId })}
                                   className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
                                 >
-                                  {(Object.keys(CAPTION_FONTS) as CaptionFontId[]).map((id) => (
+                                  {(Object.keys(CAPTION_FONTS) as CaptionFontId[]).filter(id => !isRetiredFont(id) || id === st.font).map((id) => (
                                     <option key={id} value={id}>{CAPTION_FONTS[id].label}</option>
                                   ))}
                                 </select>

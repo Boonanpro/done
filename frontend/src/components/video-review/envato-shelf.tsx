@@ -3,11 +3,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import { ADOBE_FONT_CSS, ADOBE_FONTS } from './adobe-fonts';
+import { AdobeFontChoices } from './adobe-font-choices';
 import type { SequenceAsset } from './video-review-editor';
 
 type Field = {label: string; type: 'text' | 'number' | 'photos' | 'photo'; example: string | number | string[]};
 type Item = {id: string; name: string; group: string; sourceName: string; url: string; duration: number;
-  still: string; motion: string; fields: Field[]};
+  still: string; motion: string; font?: string; fields: Field[]};
 type Values = Record<string, string | string[] | number>;
 
 export function EnvatoShelf({assets, close, submit}: {
@@ -18,7 +19,7 @@ export function EnvatoShelf({assets, close, submit}: {
   const [error, setError] = useState('');
   const [group, setGroup] = useState('すべて');
   const [loaded, setLoaded] = useState(false);
-  const [font, setFont] = useState('');
+  const [font, setFont] = useState<keyof typeof ADOBE_FONTS | ''>('');
   const [confirming, setConfirming] = useState<Item>();
   const [removing, setRemoving] = useState(false);
   const [active, setActive] = useState('');
@@ -55,6 +56,7 @@ export function EnvatoShelf({assets, close, submit}: {
       setRemoving(false);
     }
   }
+  const defaultFont = Object.values(ADOBE_FONTS).find(f => f.face === chosen?.font);
   const photos = assets.filter(a => a.kind === 'image');
   return <dialog ref={dialog} onCancel={close} aria-label="Envatoの部品" className="m-auto w-[min(1120px,96vw)] max-w-none rounded-xl border border-border bg-background p-0 text-foreground shadow-2xl backdrop:bg-black/65">
     <style>{ADOBE_FONT_CSS}</style>
@@ -74,7 +76,7 @@ export function EnvatoShelf({assets, close, submit}: {
         e.preventDefault(); if (busy) return;
         setBusy(true);
         try {
-          const note = `Envatoの部品「${chosen.name}」（${chosen.id}）を、この指示の開始時刻に配置。作品ごとのEnvato登録を確認してplace_envato_componentを使う。${font ? `書体（font）は ${font} を指定。` : ''}差し替え欄（写真は素材ID） ${JSON.stringify(values)}`;
+          const note = `Envatoの部品「${chosen.name}」（${chosen.id}）を、この指示の開始時刻に配置。作品ごとのEnvato登録を確認してplace_envato_componentを使う。${font ? `書体（font）は ${ADOBE_FONTS[font].face} を指定。` : ''}差し替え欄（写真は素材ID） ${JSON.stringify(values)}`;
           if (await submit(note, chosen.name)) close();
         } finally { setBusy(false); }
       }}>
@@ -90,14 +92,9 @@ export function EnvatoShelf({assets, close, submit}: {
           </label>)}
           {chosen.fields.some(f => f.type === 'text') && <fieldset>
             <legend className="mb-2 text-sm font-semibold">書体</legend>
-            <div className="grid grid-cols-2 gap-2">
-              <label className="col-span-2 flex items-center gap-2 text-sm"><input type="radio" name="font" checked={!font} onChange={() => setFont('')}/>部品の標準書体</label>
-              {Object.values(ADOBE_FONTS).map(f => <label key={f.face} className={`cursor-pointer rounded border p-2 ${font === f.face ? 'border-primary' : ''}`}>
-                <span className="flex items-center gap-2 text-xs"><input type="radio" name="font" value={f.face} aria-label={f.label} checked={font === f.face} onChange={() => setFont(f.face)}/>{f.label}</span>
-                <span aria-hidden="true" className="mt-1 block break-words text-xl" style={{fontFamily: f.face, fontWeight: f.weight}}>
-                  {String(values[chosen.fields.find(x => x.type === 'text')!.label] || '映像と言葉')}</span>
-              </label>)}
-            </div>
+            <label className="mb-2 flex items-center gap-2 text-sm"><input type="radio" checked={!font} onChange={() => setFont('')}/>部品の標準書体{defaultFont && `（${defaultFont.label}）`}</label>
+            <AdobeFontChoices text={String(values[chosen.fields.find(f => f.type === 'text')!.label] || '')}
+              selected={font} onSelect={setFont}/>
           </fieldset>}
           {!photos.length && chosen.fields.some(f=>f.type.startsWith('photo')) && <p className="text-sm">作品に使う写真を素材に追加してください。</p>}
           <div className="flex gap-3"><button type="button" onClick={()=>setChosen(undefined)}>一覧に戻る</button>

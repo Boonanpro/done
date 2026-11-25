@@ -63,6 +63,14 @@ def payload_url(web_base: str, out_w: int, out_h: int, item: dict, time_val: flo
     return f"{web_base.rstrip('/')}/caption-frame?p={raw}"
 
 
+def wait_for_caption(page):
+    page.wait_for_selector("body[data-caption-ready='1'], body[data-caption-font-error]",
+                           state="attached", timeout=30000)
+    error = page.locator("body").get_attribute("data-caption-font-error")
+    if error:
+        raise RuntimeError(error)
+
+
 def render_scene(page, web_base: str, out_w: int, out_h: int, item: dict) -> None:
     """An editable scene clip: the same sandboxed frame the editor preview draws, one transparent
     PNG per output frame. Frame f is the scene at scene_t0 + f/fps (the frame's own time, the
@@ -130,11 +138,8 @@ def main() -> int:
                     seq.mkdir(parents=True, exist_ok=True)
                     page.goto(payload_url(web_base, out_w, out_h, item, start),
                               wait_until="domcontentloaded", timeout=30000)
-                    try:
-                        page.wait_for_selector("body[data-caption-ready='1']", timeout=9000)
-                        page.wait_for_function("() => typeof window.__renderCaptionAt === 'function'", timeout=4000)
-                    except Exception:
-                        pass
+                    wait_for_caption(page)
+                    page.wait_for_function("() => typeof window.__renderCaptionAt === 'function'", timeout=4000)
                     for f in range(n):
                         t = s0 + (f + 0.5) / fps  # sample mid-frame
                         try:
@@ -148,10 +153,7 @@ def main() -> int:
                     page.goto(payload_url(web_base, out_w, out_h, item, float(item.get("time") or 0.0)),
                               wait_until="domcontentloaded", timeout=30000)
                     _dbg("goto done")
-                    try:
-                        page.wait_for_selector("body[data-caption-ready='1']", timeout=9000)
-                    except Exception:
-                        pass
+                    wait_for_caption(page)
                     page.wait_for_timeout(120)
                     _dbg("ready; screenshotting")
                     Path(png).parent.mkdir(parents=True, exist_ok=True)

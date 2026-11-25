@@ -150,7 +150,7 @@ _STR = {"type": "string"}
 
 
 _CAPTION_STYLE = {'type':'object','additionalProperties':False,'properties':{
-    'font':{'type':'string','enum':list(tc.CAPTION_FONT_IDS),'description':'字幕フォントのID。noto-sans(源ノ角ゴシック。標準は極太900)/dela-gothic(極太)/zen-maru(角丸)/reggae/mplus-rounded(丸ポップ)/rocknroll/mincho(しっぽり明朝)/hiragino-w6・hiragino-w8(ヒラギノ角ゴ。普通の字幕を上品に)/toppan-mincho(凸版文久見出し明朝ExtraBold。赤箱に白明朝など)。省略でnoto-sans。'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
+    'font':{'type':'string','enum':list(tc.CAPTION_FONT_IDS),'description':'字幕フォントのID。noto-sans(源ノ角ゴシック。標準は極太900)/dela-gothic(極太)/zen-maru(角丸)/reggae/mplus-rounded(丸ポップ)/rocknroll/mincho(しっぽり明朝)/hiragino-w6・hiragino-w8(ヒラギノ角ゴ。普通の字幕を上品に)/toppan-mincho(凸版文久見出し明朝ExtraBold。赤箱に白明朝など)。Adobe Fontsの太い見出しはkozuka-heavy(小塚ゴシックH)、neokuro(ネオクロ)、ryo-display(りょうDisplay EB)、shuei-ymincho(秀英横太明朝B)、v7-maru(VDL V7丸ゴシックEB)。省略でnoto-sans。'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
     'color':{'type':'string'},'outlineColor':{'type':'string'},'outlineWidth':{'type':'number'},
     'maxWidth':{'type':'number','description':'画面幅に対する比率。'},
     'textAlign':{'type':'string','enum':['left','center','right']},

@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
+import { HEADING_FONTS, loadHeadingKit } from './adobe-fonts';
 import type { CSSProperties } from 'react';
 import {
   CAPTION_FONT_FACE_CSS,
@@ -243,6 +244,10 @@ export function CaptionLayer({
   fps?: number;
   hiddenCaptionIds?: string[];
 }) {
+  const usesHeadingFont = captions.some(c => c.design?.font && Object.hasOwn(HEADING_FONTS, c.design.font));
+  useEffect(() => {
+    if (usesHeadingFont) void loadHeadingKit().catch(() => {});
+  }, [usesHeadingFont]);
   // ALL active captions render, in payload (lane) order — later entries stack on top,
   // matching "every clip is visible; upper lanes in front". The old single-pick
   // (`a[a.length - 1]`, "last active wins") hid the subtitle lane whenever a

@@ -445,6 +445,7 @@ _CAPTION_SHADOW_KEYS = {"color": None, "blur": (0.0, 200.0), "dx": (-200.0, 200.
 # hiragino-w6/-w8/toppan-mincho are the owner's fonts (~/.dan/fonts, served by scene_fonts).
 CAPTION_FONT_IDS = ("noto-sans", "dela-gothic", "zen-maru", "reggae", "mplus-rounded", "rocknroll", "mincho",
                     "hiragino-w6", "hiragino-w8", "toppan-mincho",
+                    "kozuka-heavy", "neokuro", "ryo-display", "shuei-ymincho", "v7-maru",
                     "biz-udp", "zen-kaku", "klee", "kaisei", "yuji")
 
 
