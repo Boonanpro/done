@@ -147,6 +147,7 @@ def main() -> None:
 
 
 def _run(cmd, a, room, cid, doc):
+    from app.services import thumbnail_doc as td
     if cmd == 'show':
         print(show(doc))
     elif cmd == 'json':
