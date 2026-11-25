@@ -60,6 +60,7 @@ import { MotionPanel } from './motion-panel';
 import { isOneForm, motionAt, setKeyAt, sortedKeys, type MotionKey } from './placement';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
+import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, rippleDeleteMain, rippleMove, rippleTrim } from './ripple-edit';
 
 /** A form control whose value is a timeline setting (slider, number box, select, checkbox…), not
  *  free text. `typing` = only the ones still being typed into (number boxes). */
@@ -1132,6 +1133,17 @@ export function VideoReviewEditor({
   // Magnet: snap dragged clip edges to nearby clip edges / the playhead / ends. ON = stable,
   // gap-free editing; OFF = fully free movement (hold for fine adjustments).
   const [snapEnabled, setSnapEnabled] = useState(true);
+  // 詰める（リップル）: メインの段のクリップを縮める・伸ばす・消す・並べ替えると、後ろの全部の段を一緒に詰める・
+  // ずらす（ripple-edit.ts）。OFF は前と同じ上書き（隙間が残る）。引きずる間に Ctrl/⌘ を押すとその回だけ上書き。
+  const [rippleOn, setRippleOn] = useState(() => {
+    try { return typeof window === 'undefined' || window.localStorage.getItem('dan-editor-ripple') !== '0'; } catch { return true; }
+  });
+  useEffect(() => { try { window.localStorage.setItem('dan-editor-ripple', rippleOn ? '1' : '0'); } catch { /* ignore */ } }, [rippleOn]);
+  // 詰めて動かしている間: 動かすメインのクリップ（先頭）と相方、引きずり始めのモザイクなどの一覧
+  const rippleDragRef = useRef<{ ids: string[]; anns: ReviewAnnotation[] } | null>(null);
+  // 並べ替えで差し込む所（メインの段に黄色い線）
+  const [rippleMarker, setRippleMarker] = useState<number | null>(null);
+  const [gapMenu, setGapMenu] = useState<{ x: number; y: number; gap: [number, number] } | null>(null);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
   const [openNoteKey, setOpenNoteKey] = useState<string | null>(null);
   // 送った指示（ピン・ペン・枠・素材の枠）の進み具合と、置いた直後に言葉の欄へ入る印（sendInstruction の所に説明）
@@ -1192,6 +1204,8 @@ export function VideoReviewEditor({
     [editSequence]
   );
   const clipLanes = useMemo(() => computeClipLanes(editSequence?.tracks || []), [editSequence]);
+  // メインの段（映像のクリップがある一番下の映像の段）。詰める（リップル）はこの段のクリップに効く。
+  const mainLayer = useMemo(() => mainLayerOf(editSequence?.tracks || [], clipLanes), [editSequence, clipLanes]);
   // プレビューには、段の頭で切った段（非表示・消音）のクリップを渡さない
   // ダンの手を見せている間、プレビューは途中の形を追わずに、ダンが保存した最後の形を流す。
   // 途中の形はタイムラインの動きを見せるための物で、切ったクリップの後ろ半分が元のクリップと重なった形などが
@@ -2588,6 +2602,29 @@ export function VideoReviewEditor({
   const rippleDelete = useCallback(() => {
     const clipIds = selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : [];
     if (clipIds.length === 0) { deleteSelected(); return; }
+    // 詰める（リップル）が ON でメインの段のクリップを消す時は、全部の段を詰める（上の字幕・モザイクも一緒に消え、
+    // 後ろの字幕もずれない）。メイン以外の選んだクリップは、その段だけ詰める前のやり方。
+    if (rippleOn && mainLayer !== null && editSequence) {
+      const lanesNow = computeClipLanes(editSequence.tracks || []);
+      const allNow = (editSequence.tracks || []).flatMap((t) => t.clips || []);
+      const isMainId = (id: string) => { const l = lanesNow.get(String(id)); return l?.zone === 'visual' && l.layer === mainLayer; };
+      const want = new Set(clipIds);
+      if (linkAV) {
+        const linkIds = new Set(allNow.filter((c) => want.has(c.id) && c.link_id).map((c) => c.link_id));
+        allNow.forEach((c) => { if (c.link_id && linkIds.has(c.link_id)) want.add(c.id); });
+      }
+      const mainIds = Array.from(want).filter(isMainId);
+      if (mainIds.length > 0) {
+        const mainLinks = new Set(allNow.filter((c) => mainIds.includes(c.id) && c.link_id).map((c) => c.link_id));
+        const rest = new Set(Array.from(want).filter((id) => !isMainId(id) && !allNow.some((c) => c.id === id && c.link_id && mainLinks.has(c.link_id))));
+        const pruned = rest.size ? { ...editSequence, tracks: (editSequence.tracks || []).map((t) => ({ ...t, clips: (t.clips || []).filter((c) => !rest.has(c.id)) })) } : editSequence;
+        const res = rippleDeleteMain(pruned, annotations, mainIds);
+        setEditSequence(res.seq);
+        setAnnotations(res.anns);
+        clearSelection();
+        return;
+      }
+    }
     setEditSequence((current) => {
       if (!current) return current;
       const r = (v: number) => Number(v.toFixed(2));
@@ -2625,7 +2662,37 @@ export function VideoReviewEditor({
       return { ...current, duration: Number(nextDuration.toFixed(3)), tracks };
     });
     clearSelection();
-  }, [clearSelection, deleteSelected, linkAV, selectedSequenceClipId, selectedSequenceClipIds]);
+  }, [clearSelection, deleteSelected, linkAV, selectedSequenceClipId, selectedSequenceClipIds, rippleOn, mainLayer, editSequence, annotations]);
+
+  // Q / W（Premiere と同じ）: 赤線の所にあるメインのクリップの、頭から赤線まで（Q）・赤線から終わりまで（W）を切って詰める。
+  const rippleTrimToPlayhead = useCallback((which: 'start' | 'end') => {
+    if (!editSequence || mainLayer === null) return;
+    const t = liveTimeRef.current;
+    const lanesNow = computeClipLanes(editSequence.tracks || []);
+    const allNow = (editSequence.tracks || []).flatMap((tr) => tr.clips || []);
+    const head = allNow.find((c) => {
+      const l = lanesNow.get(String(c.id));
+      return l?.zone === 'visual' && l.layer === mainLayer && t > c.timeline_start + 0.05 && t < c.timeline_end - 0.05;
+    });
+    if (!head) { toast.message('赤線の所にメインのクリップがありません'); return; }
+    const ids = [head.id, ...(head.link_id ? allNow.filter((c) => c.id !== head.id && c.link_id === head.link_id).map((c) => c.id) : [])];
+    setPlaying(false);
+    const d = which === 'start' ? t - head.timeline_start : t - head.timeline_end;
+    const res = rippleTrim(editSequence, annotations, ids, which, d, lanesNow, mainLayer);
+    setEditSequence(res.seq);
+    setAnnotations(res.anns);
+    // Q は頭を詰めたので、赤線をつなぎ目（クリップの頭）へ戻す
+    if (which === 'start') seekTimeline(head.timeline_start);
+  }, [annotations, editSequence, mainLayer, seekTimeline]);
+
+  // メインの段の隙間を詰める（右クリックの「この隙間を詰める」「隙間を全部詰める」）
+  const closeGaps = useCallback((only?: [number, number]) => {
+    if (!editSequence || mainLayer === null) return;
+    const res = closeMainGaps(editSequence, annotations, computeClipLanes(editSequence.tracks || []), mainLayer, only);
+    if (res.closed <= 0) { toast.message('メインの段に隙間はありません'); return; }
+    setEditSequence(res.seq);
+    setAnnotations(res.anns);
+  }, [annotations, editSequence, mainLayer]);
 
   // Cut at the playhead: every targeted clip the playhead crosses becomes two clips that
   // join exactly at `t` with continuous source ranges (no frame gained/lost). With a
@@ -2838,8 +2905,17 @@ export function VideoReviewEditor({
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault();
-        if (event.shiftKey) rippleDelete(); // close the gap
+        // 詰める（リップル）が ON の時、メインのクリップは Delete だけでも詰めて消す（Final Cut・DaVinci のカットと同じ）
+        const selIds = selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : [];
+        const hasMain = rippleOn && mainLayer !== null && selIds.some((id) => { const l = clipLanes.get(String(id)); return l?.zone === 'visual' && l.layer === mainLayer; });
+        if (event.shiftKey || hasMain) rippleDelete(); // close the gap
         else deleteSelected();              // leave a gap
+        return;
+      }
+      // Q / W: 赤線の所のメインのクリップを、頭から赤線まで・赤線から終わりまで切って詰める（Premiere と同じ）
+      if (!modKey && !event.altKey && (event.key === 'q' || event.key === 'Q' || event.key === 'w' || event.key === 'W')) {
+        event.preventDefault();
+        rippleTrimToPlayhead(event.key.toLowerCase() === 'q' ? 'start' : 'end');
         return;
       }
       // Cut at the playhead — S (Premiere C/B style) or Ctrl/Cmd+B.
@@ -2869,7 +2945,7 @@ export function VideoReviewEditor({
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     return () => { window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); };
-  }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undo, togglePreviewFullscreen, contentDuration, maxTimelineZoom]);
+  }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, rippleTrimToPlayhead, rippleOn, mainLayer, clipLanes, selectedSequenceClipIds, selectedSequenceClipId, seekTimeline, splitAtPlayhead, timelineDuration, undo, togglePreviewFullscreen, contentDuration, maxTimelineZoom]);
 
   const markerPointRef = useRef<Point | null>(null);
   const handlePointerDown = useCallback(
@@ -4136,6 +4212,18 @@ export function VideoReviewEditor({
           }
         }
       }
+      // 詰める（リップル）: メインの段のクリップを1つだけつかんだ時。相方の音声をつかんでもメインの映像として扱う。
+      rippleDragRef.current = null;
+      if (rippleOn && mainLayer !== null && !altDupRef.current && dragSelectionRef.current.length <= 1) {
+        const all = (editSequence?.tracks || []).flatMap((t) => t.clips || []);
+        const isMainId = (id: string) => { const l = clipLanes.get(String(id)); return l?.zone === 'visual' && l.layer === mainLayer; };
+        let head: SequenceClip | undefined = isMainId(clip.id) ? clip : undefined;
+        if (!head && linkAV && clip.link_id) head = all.find((c) => c.id !== clip.id && c.link_id === clip.link_id && isMainId(c.id));
+        if (head) {
+          const partners = linkAV && head.link_id ? all.filter((c) => c.id !== head!.id && c.link_id === head!.link_id).map((c) => c.id) : [];
+          rippleDragRef.current = { ids: [head.id, ...partners], anns: annotations };
+        }
+      }
       setSequenceClipDrag({
         id: dragId,
         mode,
@@ -4159,7 +4247,7 @@ export function VideoReviewEditor({
         /* ignore */
       }
     },
-    [editSequence, clipLanes, selectSequenceClip, selectedSequenceClipIds, buildCopySource, placeClipCopies]
+    [editSequence, clipLanes, selectSequenceClip, selectedSequenceClipIds, buildCopySource, placeClipCopies, rippleOn, mainLayer, linkAV, annotations]
   );
 
   useEffect(() => {
@@ -4172,6 +4260,63 @@ export function VideoReviewEditor({
       if (!clip) return;
       if (altDupRef.current && Math.abs(event.clientX - sequenceClipDrag.startClientX) + Math.abs(event.clientY - sequenceClipDrag.startClientY) >= 3) altDupRef.current.moved = true;
       if (altDupRef.current && !altDupRef.current.moved) return;
+      // 詰める（リップル）: メインのクリップの端を動かすと後ろの全部の段が付いてくる。真ん中をつかんで横に動かすと、
+      // 抜いて詰め、一番近いつなぎ目に差し込む（並べ替え）。Ctrl/⌘ を押している間と、別の段へ動かした時は前の上書き。
+      const rip = rippleDragRef.current;
+      const ripSnap = dragSnapshotRef.current;
+      if (rip && ripSnap) {
+        let overwrite = event.ctrlKey || event.metaKey;
+        if (!overwrite && sequenceClipDrag.mode === 'move') {
+          const yIn = event.clientY - rect.top;
+          const geomR = dragLaneGeomRef.current || laneGeomRef.current;
+          const candR = geomR.find((g) => g.zone === sequenceClipDrag.zone && yIn >= g.top + 8 && yIn < g.bottom - 8);
+          if (candR && candR.layer !== sequenceClipDrag.originalLayer) overwrite = true;
+        }
+        const head = (ripSnap.tracks || []).flatMap((t) => t.clips || []).find((c) => c.id === rip.ids[0]);
+        if (head && !overwrite) {
+          const lanesSnap = computeClipLanes(ripSnap.tracks || []);
+          const ha = head.timeline_start, hb = head.timeline_end;
+          let res: { seq: EditSequence; anns: ReviewAnnotation[] };
+          if (sequenceClipDrag.mode === 'move') {
+            const pts = insertPoints(ripSnap, rip.ids, lanesSnap, mainLayer);
+            const rawStart = ha + delta;
+            let P = pts[0] ?? 0;
+            for (const p of pts) if (Math.abs(p - rawStart) < Math.abs(P - rawStart)) P = p;
+            res = rippleMove(ripSnap, rip.anns, rip.ids, P, lanesSnap, mainLayer);
+            setRippleMarker(P);
+          } else {
+            const hAsset = sequenceAssetMap.get(String(head.asset_id || ''));
+            const hImage = hAsset?.kind === 'image' || (head as { kind?: string }).kind === 'image';
+            const hVideo = !!head.asset_id && !hImage && Number(head.source_end || 0) > Number(head.source_start || 0) + 1e-6;
+            const hSpeed = Number(head.speed) > 0 ? Number(head.speed) : 1;
+            const hDur = Number(hAsset?.metadata?.duration) || Number(head.source_duration) || Number(head.source_end || 0);
+            // 吸い付く所: 赤線と、このクリップの上にある字幕などの端（後ろは動くので使わない）
+            const tg: number[] = snapEnabled ? [Number(currentTime.toFixed(3))] : [];
+            if (snapEnabled) for (const c of (ripSnap.tracks || []).flatMap((t) => t.clips || [])) {
+              if (rip.ids.includes(c.id)) continue;
+              for (const e of [c.timeline_start, c.timeline_end]) if (e > ha + 0.05 && e < hb - 0.05) tg.push(e);
+            }
+            const tol = (8 / rect.width) * timelineDuration;
+            const snapT = (t: number) => { let best = t; let bd = tol; for (const g of tg) { const dd = Math.abs(t - g); if (dd < bd) { bd = dd; best = g; } } return best; };
+            if (sequenceClipDrag.mode === 'end') {
+              const grow = hVideo ? Math.max(0, hDur - Number(head.source_end || 0)) / hSpeed : Number.POSITIVE_INFINITY;
+              const d = clamp(snapT(hb + delta) - hb, -(hb - ha - 0.1), grow);
+              res = rippleTrim(ripSnap, rip.anns, rip.ids, 'end', d, lanesSnap, mainLayer);
+            } else {
+              const grow = hVideo ? Number(head.source_start || 0) / hSpeed : hImage ? Number.POSITIVE_INFINITY : 0;
+              const d = clamp(snapT(ha + delta) - ha, -grow, hb - ha - 0.1);
+              res = rippleTrim(ripSnap, rip.anns, rip.ids, 'start', d, lanesSnap, mainLayer);
+            }
+          }
+          (rip as { applied?: boolean }).applied = true;
+          setEditSequence(res.seq);
+          setAnnotations(res.anns);
+          return;
+        }
+        // 上書きに切り替えた: 詰めた時に動かしたモザイクなどを戻してから前のやり方で動かす
+        if ((rip as { applied?: boolean }).applied) { (rip as { applied?: boolean }).applied = false; setAnnotations(rip.anns); }
+        setRippleMarker(null);
+      }
       // 端を引っ張ると中身（素材の時刻）も一緒に動く。伸ばせるのは素材のある所まで（Premiere と同じ）。
       // 絵（画像）と止め絵には素材の時刻が無いので、長さだけ変わる。
       const dragAsset = sequenceAssetMap.get(String(clip.asset_id || ''));
@@ -4300,6 +4445,8 @@ export function VideoReviewEditor({
         setSelectedSequenceClipId(dup.origIds[dup.origIds.length - 1] ?? null);
       }
       setSequenceClipDrag(null);
+      rippleDragRef.current = null;
+      setRippleMarker(null);
       dragSnapshotRef.current = null;
       dragSelectionRef.current = [];
       dragLayerRef.current = null;
@@ -4313,7 +4460,7 @@ export function VideoReviewEditor({
       window.removeEventListener('pointerup', clearDrag);
       window.removeEventListener('pointercancel', clearDrag);
     };
-  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove, snapEnabled, sequenceDuration, currentTime]);
+  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove, snapEnabled, sequenceDuration, currentTime, mainLayer, sequenceAssetMap]);
 
   // Rubber-band (marquee) select: while a right-drag is active, draw the rectangle and on
   // release select every clip bar (data-clip-id) whose on-screen box intersects it. A tiny
@@ -4394,8 +4541,18 @@ export function VideoReviewEditor({
 
   // タイムラインの段とクリップ。再生位置（currentTime）が変わっても作り直さない。
   // 押した時の処理は laneFns から最新の物を呼ぶので、ここは見た目の中身が変わった時だけ描き直す。
-  const laneFns = useRef({ handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag });
-  laneFns.current = { handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag };
+  // メインの段の何もない所を右クリック: 隙間なら「この隙間を詰める」、どこでも「隙間を全部詰める」
+  const openGapMenu = (event: React.MouseEvent, lane: { zone: string; layer: number }) => {
+    if (lane.zone !== 'visual' || lane.layer !== mainLayer || !editSequence) return;
+    event.preventDefault();
+    if (rightDragRef.current) return;
+    const t = dropTimeFromEvent(event.clientX);
+    if (t === null) return;
+    const gap = mainGapAt(editSequence, t, clipLanes, mainLayer);
+    setGapMenu({ x: event.clientX, y: event.clientY, gap: gap || [-1, -1] });
+  };
+  const laneFns = useRef({ handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag, openGapMenu });
+  laneFns.current = { handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag, openGapMenu };
   // 画面が0.25秒以上止まったら、直前に何をしていたかと一緒に記録する（本人の画面の「固まる」を後から直せるように）
   const freezeCtxRef = useRef({ clips: 0, zoom: 1, playing: false });
   freezeCtxRef.current = { clips: allSequenceClips.length, zoom: timelineZoom, playing };
@@ -4538,7 +4695,18 @@ export function VideoReviewEditor({
                             onPointerCancel={() => setTimelineDrag(null)}
                             onDragOver={(event) => laneFns.current.handleLaneDragOver(event, lane)}
                             onDrop={(event) => laneFns.current.handleLaneDrop(event, lane)}
+                            onContextMenu={(event) => {
+                              if (event.target !== event.currentTarget) return;
+                              laneFns.current.openGapMenu(event, lane);
+                            }}
                           >
+                            {rippleMarker !== null && lane.zone === 'visual' && lane.layer === mainLayer && timelineDuration ? (
+                              <div
+                                data-ripple-marker
+                                className="pointer-events-none absolute top-0 bottom-0 z-20 w-[3px] -translate-x-1/2 bg-yellow-300 shadow-[0_0_6px_rgba(253,224,71,0.9)]"
+                                style={{ left: `${(rippleMarker / timelineDuration) * 100}%` }}
+                              />
+                            ) : null}
                             <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
                             {/* 段の頭で切った段は、クリップの上に薄い幕をかけて分かるようにする（押す・動かすはそのままできる） */}
                             {laneSwitchedOff(laneSwitches, lane.key) ? (
@@ -4749,7 +4917,7 @@ export function VideoReviewEditor({
                           </div>
                         );
                       })
-  ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedClipSet, highlightedClipIds, danTouch, viewWin, trackPx, pxPerSec, instrJobs, laneSwitches]);
+  ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedClipSet, highlightedClipIds, danTouch, viewWin, trackPx, pxPerSec, instrJobs, laneSwitches, rippleMarker, mainLayer]);
 
 
   // ── スマホの形（2026-11-17 本人「縦持ちは横幅いっぱい・YouTube やショート動画の感覚で左右に動かして移動・
@@ -5501,6 +5669,8 @@ export function VideoReviewEditor({
               { label: '切り取り', key: 'Ctrl+X', run: () => { if (copySelectedClips()) deleteSelected(); } },
               { label: '複製（すぐ後ろに）', key: 'Ctrl+D', run: () => duplicateSelectedClips() },
               ...(hasClipClipboard ? [{ label: '再生位置に貼り付け', key: 'Ctrl+V', run: () => pasteClips() }] : []),
+              { label: '消して詰める', key: 'Shift+Delete', run: () => rippleDelete() },
+              { label: '消す（隙間を残す）', key: rippleOn && clipLanes.get(String(clipMenu.clip.id))?.layer === mainLayer && clipLanes.get(String(clipMenu.clip.id))?.zone === 'visual' ? '' : 'Delete', run: () => deleteSelected() },
             ].map((item) => (
               <button key={item.label} type="button" className="flex w-full items-center justify-between gap-4 px-3 py-1.5 text-left hover:bg-muted"
                 onClick={() => { setClipMenu(null); item.run(); }}>
@@ -5516,6 +5686,24 @@ export function VideoReviewEditor({
                 </button>
               </>
             ) : null}
+          </div>
+        </>
+      ) : null}
+      {gapMenu ? (
+        <>
+          <div className="fixed inset-0 z-50" onClick={() => setGapMenu(null)} onContextMenu={(e) => { e.preventDefault(); setGapMenu(null); }} />
+          <div data-gap-menu className="fixed z-[51] min-w-[200px] rounded-md border border-border bg-popover py-1 text-sm shadow-lg"
+            style={{ left: Math.min(gapMenu.x, window.innerWidth - 240), top: Math.min(gapMenu.y, window.innerHeight - 120) }}>
+            {gapMenu.gap[0] >= 0 ? (
+              <button type="button" className="flex w-full items-center justify-between gap-4 px-3 py-1.5 text-left hover:bg-muted"
+                onClick={() => { const g = gapMenu.gap; setGapMenu(null); closeGaps(g); }}>
+                <span>この隙間を詰める</span><span className="text-[11px] text-muted-foreground">{(gapMenu.gap[1] - gapMenu.gap[0]).toFixed(1)}秒</span>
+              </button>
+            ) : null}
+            <button type="button" className="flex w-full items-center px-3 py-1.5 text-left hover:bg-muted"
+              onClick={() => { setGapMenu(null); closeGaps(); }}>
+              メインの隙間を全部詰める
+            </button>
           </div>
         </>
       ) : null}
@@ -6500,6 +6688,18 @@ export function VideoReviewEditor({
                   onClick={() => setSnapEnabled((v) => !v)}
                 >
                   {snapEnabled ? '🧲 マグネット' : '🧲 OFF'}
+                </Button>
+                <Button
+                  variant={rippleOn ? 'default' : 'outline'}
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  data-ripple-toggle={rippleOn ? 'on' : 'off'}
+                  title={rippleOn
+                    ? '詰める ON：一番下の映像の段（メイン）のクリップを縮める・伸ばす・消すと、後ろの全部の段（字幕・BGM・モザイク）も一緒に詰まる。真ん中をつかんで横に動かすと、クリップの間に割り込んで並べ替え。引きずる間 Ctrl/⌘ を押すとその回だけ上書き。Q＝頭から赤線まで切って詰める／W＝赤線から終わりまで切って詰める。メインの何もない所を右クリックで隙間を詰める。クリックでOFF'
+                    : '詰める OFF：動かす・縮めると隙間が残り、重なった所は上書き。クリックでON'}
+                  onClick={() => setRippleOn((v) => !v)}
+                >
+                  {rippleOn ? '⇤ 詰める' : '⇤ 詰めない'}
                 </Button>
                 <Button
                   variant={linkAV ? 'default' : 'outline'}
