@@ -7,7 +7,10 @@
 どちらを使うかはエディターが自分で決める（frontend/src/components/video-review/media-route.ts）。
 
 - 通すのは、ログイン無しで配っている映像の読み込みだけ（制作の素材・確認用の動画）。ほかは 404。
-- 中身はサンドボックス（入口 8100）に中継する。どの素材をどう配るかの決まりは向こうの1か所のまま。
+- 中身はその時のサンドボックス（世代の写しの口）へ直接つなぐ。どの口へ行くかは入口（8100）と同じ決まり
+  （app/core/gateway.destination）を使う。入口を通すと、Mac が書き出しで忙しい時にもう1段の Python の
+  中継が飢えて、16MB の読みが 0.1〜0.2 秒余計にかかっていた（2026-11-26 測り）。直接の口がつながらない時
+  （世代の入れ替わりの途中など）は入口へ回す。どの素材をどう配るかの決まりは向こうの1か所のまま。
 - 証明書は Let's Encrypt（DNS の確かめを Cloudflare の鍵で行う）。残り30日を切ったら取り直して
   自分を終える（launchd が新しい証明書で起こし直す）。
 - Mac の LAN の住所が変わったら、名前の向き先（Cloudflare の A レコード）を直す。
@@ -58,9 +61,25 @@ PASS_RESPONSE = ('content-type', 'content-length', 'content-range', 'accept-rang
 EXPOSE = 'Content-Range, Content-Length, Accept-Ranges, ETag, Last-Modified, X-Content-Version'
 
 
-def upstream() -> str:
+def gateway_base() -> str:
     gen = (Path.home() / '.dan/generations/enabled').exists()
-    return os.environ.get('DAN_LAN_MEDIA_UPSTREAM') or f'http://127.0.0.1:{8100 if gen else 8000}'
+    return f'http://127.0.0.1:{8100 if gen else 8000}'
+
+
+def upstreams(path: str) -> list[str]:
+    """つなぐ先の順番。まずその時のサンドボックスへ直接、だめなら入口（8100）へ。"""
+    if os.environ.get('DAN_LAN_MEDIA_UPSTREAM'):
+        return [os.environ['DAN_LAN_MEDIA_UPSTREAM']]
+    gateway = gateway_base()
+    if not gateway.endswith(':8100'):
+        return [gateway]
+    try:
+        from app.core.gateway import destination
+        port = destination({'server': ('127.0.0.1', 8100)}, path)
+    except Exception as e:  # 世代の記録が読めない時は今までどおり入口へ
+        log('direct route unknown:', repr(e)[:200])
+        return [gateway]
+    return [f'http://127.0.0.1:{port}', gateway]
 
 
 def log(*parts):
@@ -83,6 +102,7 @@ async def app(scope, receive, send):
                 scope.setdefault('state', {})
                 app.client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5, pool=5), trust_env=False,
                                                limits=httpx.Limits(max_connections=64, max_keepalive_connections=32))
+                await anyio.to_thread.run_sync(upstreams, ALLOWED_PATHS[0])  # 決まりを先に読み込む（最初の読みを待たせない）
                 await send({'type': 'lifespan.startup.complete'})
             elif msg['type'] == 'lifespan.shutdown':
                 await app.client.aclose()
@@ -116,12 +136,16 @@ async def app(scope, receive, send):
     if method not in ('GET', 'HEAD') or path not in ALLOWED_PATHS:
         return await reply(404, b'not here')
 
-    url = upstream() + path + ('?' + scope['query_string'].decode() if scope['query_string'] else '')
+    query = '?' + scope['query_string'].decode() if scope['query_string'] else ''
     fwd = [(k, v) for k, v in headers.items() if k in PASS_REQUEST]
-    req = app.client.build_request(method, url, headers=fwd)
-    try:
-        res = await app.client.send(req, stream=True)
-    except httpx.HTTPError:
+    res = None
+    for base in await anyio.to_thread.run_sync(upstreams, path):
+        try:
+            res = await app.client.send(app.client.build_request(method, base + path + query, headers=fwd), stream=True)
+            break
+        except httpx.HTTPError:
+            continue
+    if res is None:
         return await reply(502, b'upstream unavailable')
     try:
         out = [(k.encode(), v.encode('latin-1')) for k, v in res.headers.items() if k.lower() in PASS_RESPONSE]
