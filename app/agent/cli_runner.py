@@ -2012,7 +2012,7 @@ async def attach_timeline_tools(room_id: str, mcp_config_path: str, system_promp
                     "For a rough cut with many ranges from one recording use append_clips (it lays them out in "
                     "visible one-minute steps). "
                     "Lanes are layers (video/audio only); blur and highlight frames are region clips "
-                    "(add_region / set_region); touch only what the user asked for; check with render_frame."
+                    "(add_region / set_region); change what the user asked for and adjust the neighbouring clips so the result still connects (timing, length, position, look, flow), leaving unrelated scenes alone; check with render_frame, including the frames just before and after each cut you touched."
                 )
                 try:
                     from app.services import timeline_live as _tl

@@ -18,6 +18,8 @@ export type ClipBoxFns = {
   openMenu: (event: React.MouseEvent, clipId: string) => void;
   focusClip: (clipId: string) => void;
   setVolume: (clipId: string, volume: number) => void;
+  /** 直し終わったコメントのチェックを押した時: そのクリップのコメントを解決済みにして印を消す */
+  resolveComment: (clipId: string) => void;
 };
 
 export type ClipKind = 'video' | 'image' | 'caption' | 'scene' | 'effect' | 'voice' | 'bgm' | 'se';
@@ -63,10 +65,22 @@ type Props = {
 
 export type ClipCommentState = 'active' | 'done' | 'failed';
 
-/** クリップの右上の吹き出し。コメントを送ったクリップに出る（作業中=黄の点滅・済み=緑・止まった=赤） */
-function CommentDot({ state }: { state: ClipCommentState }) {
-  const cls = state === 'active' ? 'animate-pulse bg-amber-400 text-black' : state === 'done' ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white';
-  const tip = state === 'active' ? 'コメントをダンが直しています' : state === 'done' ? 'コメントをダンが直しました' : 'コメントの作業が止まりました';
+/** クリップの右上の印。コメントを送ったクリップに出る（作業中=黄の点滅・止まった=赤）。直し終わると緑のチェックになり、
+ *  押すと解決済みになって消える（2026-11-25 本人「緑はチェックマークにしてクリックしたら解決済みになって消えるように」） */
+function CommentDot({ state, clipId, fns }: { state: ClipCommentState; clipId: string; fns: React.MutableRefObject<ClipBoxFns> }) {
+  if (state === 'done') {
+    return (
+      <button type="button" data-clip-comment="done" title="ダンが直しました。押すと解決済みにして印を消します"
+        className="absolute right-0.5 top-0.5 z-[3] flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-[10px] font-bold leading-none text-white shadow ring-1 ring-white/70 hover:bg-emerald-400"
+        onPointerDown={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+        onClick={(event) => { event.stopPropagation(); fns.current.resolveComment(clipId); }}>
+        ✓
+      </button>
+    );
+  }
+  const cls = state === 'active' ? 'animate-pulse bg-amber-400 text-black' : 'bg-red-500 text-white';
+  const tip = state === 'active' ? 'コメントをダンが直しています' : 'コメントの作業が止まりました';
   return (
     <span data-clip-comment={state} title={tip}
       className={`pointer-events-none absolute right-0.5 top-0.5 z-[2] flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-[8px] leading-none shadow ${cls}`}>
@@ -358,14 +372,14 @@ function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip,
         onDoubleClick={(event) => { event.stopPropagation(); fns.current.focusClip(clipId); }}
         onContextMenu={(event) => fns.current.openMenu(event, clipId)}
       >
-        {comment ? <CommentDot state={comment} /> : null}
+        {comment ? <CommentDot state={comment} clipId={clipId} fns={fns} /> : null}
       </div>
     );
   }
   const showThumb = !!thumb && widthPx >= 40;
   return (
     <div data-clip-id={clipId} data-clip-kind={kind} className={cls} style={style} title={title} onContextMenu={(event) => fns.current.openMenu(event, clipId)}>
-      {comment ? <CommentDot state={comment} /> : null}
+      {comment ? <CommentDot state={comment} clipId={clipId} fns={fns} /> : null}
       {isAudio && peaksUrl && sourceEnd > sourceStart ? (
         <Waveform url={peaksUrl} sourceStart={sourceStart} sourceEnd={sourceEnd} widthPx={widthPx} volume={vol} dark={look.dark} />
       ) : null}

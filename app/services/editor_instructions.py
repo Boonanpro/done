@@ -187,6 +187,33 @@ def clip_lines(room_id: str, content: dict[str, Any] | None, ann: dict[str, Any]
     return out
 
 
+def neighbor_lines(content: dict[str, Any] | None, start: float, end: float, skip: set[str] | None = None,
+                   margin: float = 3.0, limit: int = 14) -> list[str]:
+    """指示の場所の前後（margin 秒）にかかるクリップ。直した所が前後とつながっているかを作業が見られるように渡す
+    （2026-11-25 本人「クリップだけ変えても意味ないんよ。次のクリップとつながってないやん」）。"""
+    seq = ((content or {}).get('timeline') or {}).get('sequence') or {}
+    skip = skip or set()
+    rows: list[tuple[float, str]] = []
+    for tr in seq.get('tracks') or []:
+        for c in tr.get('clips') or []:
+            cid = str(c.get('id') or '')
+            if not cid or cid in skip:
+                continue
+            cs, ce = float(c.get('timeline_start') or 0), float(c.get('timeline_end') or 0)
+            if ce < start - margin or cs > end + margin:
+                continue
+            lane = c.get('visual_lane') if c.get('visual_lane') is not None else c.get('layer')
+            bits = [f"id={cid}", f"段={tr.get('type') or c.get('track') or '?'}" + (f"（{lane}）" if lane is not None else ''),
+                    f"{_fmt(cs)}〜{_fmt(ce)}"]
+            if c.get('text'):
+                bits.append(f"文字「{str(c.get('text'))[:50]}」")
+            elif c.get('label'):
+                bits.append(f"名前「{str(c.get('label'))[:40]}」")
+            rows.append((cs, '  - ' + ' / '.join(bits)))
+    rows.sort(key=lambda r: r[0])
+    return [r[1] for r in rows[:limit]]
+
+
 def earlier_clip_comments(content: dict[str, Any] | None, ann: dict[str, Any], user_id: str) -> list[str]:
     """同じクリップに前に送ったコメントとその結果（足りなかった分を直すため）。"""
     data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
@@ -206,7 +233,8 @@ def earlier_clip_comments(content: dict[str, Any] | None, ann: dict[str, Any], u
 
 
 def build_task(ann: dict[str, Any], content_title: str, image: str | None, previous: dict[str, Any] | None = None,
-               clips: list[str] | None = None, earlier: list[str] | None = None) -> str:
+               clips: list[str] | None = None, earlier: list[str] | None = None,
+               around: list[str] | None = None) -> str:
     kind = str(ann.get('kind') or '')
     data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
     start = float(ann.get('start') or 0)
@@ -232,6 +260,9 @@ def build_task(ann: dict[str, Any], content_title: str, image: str | None, previ
     if kind == 'note' and data.get('mode') == 'find':
         lines.append(f"- 本人の頼み: この区間（{end - start:.1f}秒）に置く映像を、言葉に合う実物の素材から探して取り込み、"
                      "この区間にぴったり置く（Envato などの素材集・本人の素材フォルダ。AIで作らない）。")
+    if around:
+        lines.append("- この場所の前後3秒にかかるクリップ（上下の段も含む。直した後、ここと切れ目なくつながっているかを見る）:")
+        lines += around
     lines.append(f"- 指示の言葉: 「{note}」" if note else "- 指示の言葉: （無し。印と場所から読み取る）")
     if image:
         if kind == 'clip':
@@ -244,8 +275,14 @@ def build_task(ann: dict[str, Any], content_title: str, image: str | None, previ
     lines += [
         "",
         "同じ作品では、本人が送ったほかの指示もそれぞれ並行で動いている（parallel_work の list で見られる）。"
-        "同じクリップを触る作業があれば、相手の結果を壊さないように直す。指示の範囲の外は触らない。",
-        "直したら render_frame・probe_audio で実物を確かめる。最後の返事は、本人に見せる言葉で1〜2文（何をどこに入れたか）。"
+        "同じクリップを触る作業があれば、相手の結果を壊さないように直す。",
+        "前後と全体: 本人が指した所だけを直して終えない（2026-11-25 本人「クリップだけ変えても意味ないんよ。次のクリップとつながってないやん」"
+        "「全体や周辺の編集も合わせて調整する必要がある」）。直した所の前後のクリップ（同じ段の次と前・上下の段で重なる物・"
+        "同じ場面の続きの文字や絵）が、時刻・長さ・位置・大きさ・文字の見た目・話の流れでつながるように合わせて直す。"
+        "同じ直しが要る所がほかにもあれば、そこも直す。変えないのは、指示とつながりの無い場面と、本人が手で直した形"
+        "（位置・大きさは戻さず、時刻だけ合わせる）。",
+        "直したら render_frame・probe_audio で実物を確かめる。直した所の中と、前後の切れ目の直前・直後のコマも見る。"
+        "最後の返事は、本人に見せる言葉で1〜2文（何をどこに入れたか。前後も合わせて直した時はそれも）。"
         "返事はエディターのこの指示の欄にだけ出て、チャットには出ない（本人がそう望んだ）。",
     ]
     if previous:
@@ -301,8 +338,15 @@ async def send(user_id: str, asset_room_id: str, content_id: str, ann: dict[str,
         asyncio.get_running_loop().run_in_executor(None, frame_with_marks, asset_room_id, content_id, dict(ann))
     clips = clip_lines(asset_room_id, content, ann) if ann.get('kind') == 'clip' else None
     earlier = earlier_clip_comments(content, ann, user_id) if ann.get('kind') == 'clip' else None
+    try:
+        _a0 = float(ann.get('start') or 0)
+        _a1 = float(ann.get('end') if ann.get('end') is not None else _a0)
+        _skip = {str(i) for i in ((ann.get('data') or {}).get('clip_ids') or [])} if isinstance(ann.get('data'), dict) else set()
+        around = neighbor_lines(content, _a0, _a1, _skip)
+    except Exception:  # noqa: BLE001
+        around = None
     task = build_task(ann, str(content.get('title') or content_id), str(dest) if dest else None, _previous(user_id, ann),
-                      clips=clips, earlier=earlier)
+                      clips=clips, earlier=earlier, around=around)
     job = await parallel_job_runner.start(room['room_id'], user_id, task, title=_title(ann), quiet=True)
     return {'job_id': job['id'], 'room_id': room['room_id'], 'state': job.get('state'), 'image': str(dest) if dest else None}
 

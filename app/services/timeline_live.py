@@ -224,7 +224,7 @@ def context_text(room_id: str, content_id: str | None = None) -> str:
                 f"{c.get('clip_id')}({c.get('kind')} lane{c.get('lane')})" for c in under[:10]))
     else:
         lines.append("- エディタは閉じている（最後に開いていたコンテンツを対象にする）")
-    lines.append("- 『ここ』『これ』『この字幕』は上の再生位置・選択を指す。mcp__timeline__* で編集し、触るのは指示された箇所だけ。")
+    lines.append("- 『ここ』『これ』『この字幕』は上の再生位置・選択を指す。mcp__timeline__* で編集する。指示された所を直し、前後のクリップとつながるように周りも合わせて直す（指示と関係のない場面は変えない）。")
     try:
         from app.services import timeline_authors
         cid = str(ctx.get("content_id") or "")
