@@ -51,6 +51,7 @@
                         var doc = text.value;
                         var oldName = layer.name;
                         doc.text = value; doc.font = job.font;
+                        if (spec.textColor) { doc.applyFill = true; doc.fillColor = spec.textColor; }
                         text.setValue(doc); layer.name = oldName;
                         if (text.value.font !== job.font) throw Error("指定書体を使えません: " + job.font);
                     }
@@ -63,7 +64,8 @@
         var wrap = p.items.addComp("Dan Component", width, height, 1, spec.duration, job.fps);
         var nested = wrap.layers.add(source);
         nested.startTime = -spec.start;
-        nested.property("ADBE Transform Group").property("ADBE Scale").setValue([100*width/source.width,100*width/source.width]);
+        var scale = 100 * width / source.width * (spec.scale || 1);
+        nested.property("ADBE Transform Group").property("ADBE Scale").setValue([scale, scale]);
         if (spec.position) nested.property("ADBE Transform Group").property("ADBE Position").setValue([width*spec.position[0],height*spec.position[1]]);
         if (spec.inputWhite) {
             p.bitsPerChannel = 16;

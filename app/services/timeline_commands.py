@@ -444,7 +444,8 @@ _CAPTION_SHADOW_KEYS = {"color": None, "blur": (0.0, 200.0), "dx": (-200.0, 200.
 # /caption-frame renderer and every exported frame came out as an error screen.
 # hiragino-w6/-w8/toppan-mincho are the owner's fonts (~/.dan/fonts, served by scene_fonts).
 CAPTION_FONT_IDS = ("noto-sans", "dela-gothic", "zen-maru", "reggae", "mplus-rounded", "rocknroll", "mincho",
-                    "hiragino-w6", "hiragino-w8", "toppan-mincho")
+                    "hiragino-w6", "hiragino-w8", "toppan-mincho",
+                    "biz-udp", "zen-kaku", "klee", "kaisei", "yuji")
 
 
 def _caption_sub_style(value: Any, keys: dict[str, tuple[float, float] | None]) -> dict[str, Any] | None:

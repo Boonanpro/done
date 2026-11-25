@@ -9,13 +9,16 @@ import tempfile
 import time
 from pathlib import Path
 
-SHELF = Path.home() / '.dan/workspace/envato-shelf'
+SHELF = Path(os.environ.get('DAN_ENVATO_SHELF') or Path.home() / '.dan/workspace/envato-shelf')
 SCRIPTS = Path(__file__).resolve().parents[2] / 'scripts/envato_shelf'
 AE = Path('/Applications/Adobe After Effects 2027')
 
 
 def catalog():
-    return json.loads((SHELF / 'catalog.json').read_text())
+    items = json.loads((SHELF / 'catalog.json').read_text())
+    removed = SHELF / 'removed'
+    hidden = {p.name for p in removed.iterdir()} if removed.is_dir() else set()
+    return [item for item in items if item['id'] not in hidden]
 
 
 def describe(item):
