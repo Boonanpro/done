@@ -98,6 +98,8 @@ export type SessionPayload = {
   annotations: ReviewAnnotation[];
   sequence?: EditSequence | null;
   updated_at?: string | null;
+  // どの版から直したか（サーバーが渡したタイムラインの _rev）。古い画面の保存でもダンの直しを消さない
+  base_rev?: string | null;
 };
 
 export type SequenceClip = {
@@ -491,7 +493,11 @@ function seqSig(seq: unknown): string {
   if (seq && typeof seq === 'object') {
     const hit = seqSigCache.get(seq);
     if (hit !== undefined) return hit;
-    const sig = JSON.stringify(canonicalize(seq));
+    // _rev はサーバーが付ける版の印で、中身ではない（同じ中身なら同じ印に）
+    const body = !Array.isArray(seq) && '_rev' in (seq as Record<string, unknown>)
+      ? Object.fromEntries(Object.entries(seq as Record<string, unknown>).filter(([k]) => k !== '_rev'))
+      : seq;
+    const sig = JSON.stringify(canonicalize(body));
     seqSigCache.set(seq, sig);
     return sig;
   }
@@ -1375,6 +1381,10 @@ export function VideoReviewEditor({
   // compare ignores key order / number reformat from the round-trip.
   const danReplayingRef = useRef(false);
   const lastSyncedSig = useRef<string>(seqSig(initialSequence));
+  // この画面が今の中身を作り始めた版（サーバーの _rev）。保存の時に送り、サーバーは版が進んでいれば
+  // 画面が知らない直しを残してクリップごとに重ねる（2026-11-25 寝ていたタブの保存がダンの直し72か所を消した）
+  const revOf = (seq: unknown) => (seq && typeof seq === 'object' ? ((seq as { _rev?: string })._rev ?? null) : null);
+  const baseRevRef = useRef<string | null>(revOf(initialSequence));
   // Annotations (blur boxes etc.) autosave separately — the sequence sig doesn't cover them, so
   // without this a drawn blur never reaches the backend/export. Echo-safe via seqSig.
   const lastSyncedAnnSig = useRef<string>(seqSig(initialAnnotations || []));
@@ -1398,9 +1408,12 @@ export function VideoReviewEditor({
     const sig = seqSig(initialSequence);
     // Dan's steps are being replayed; the replay itself ends on the saved value.
     if (danReplayingRef.current) return;
+    // サーバーの中身がこの画面の同期点と同じなら、その版を基にしてよい
+    if (sig === lastSyncedSig.current && revOf(initialSequence)) baseRevRef.current = revOf(initialSequence);
     // Skip if this is the current sync point OR any state we've held locally (a lagging poll echo).
     if (sig === lastSyncedSig.current || localSeqSigs.current.has(sig)) return;
     lastSyncedSig.current = sig;
+    baseRevRef.current = revOf(initialSequence);
     // genuine new baseline (Dan or another screen): keep the owner's undo history, close any
     // open burst first, and pre-sync histPrevRef so the change isn't recorded as an owner step.
     closeOwnBurst();
@@ -1440,6 +1453,7 @@ export function VideoReviewEditor({
     // owner's own undo history stays.
     const sig = seqSig(seq);
     lastSyncedSig.current = sig;
+    if (revOf(seq)) baseRevRef.current = revOf(seq);
     rememberLocalSig(localSeqSigs, sig);
     closeOwnBurst();
     histPrevRef.current = { annotations: annotationsRef.current, sequence: seq };
@@ -2106,7 +2120,7 @@ export function VideoReviewEditor({
         body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
-      await onSaveTimeline?.(payload);
+      await onSaveTimeline?.({ ...payload, base_rev: baseRevRef.current });
       toast.success('レビュー情報を保存しました');
     } catch (error) {
       toast.error('保存に失敗しました', { description: String(error).slice(0, 180) });
@@ -2127,7 +2141,7 @@ export function VideoReviewEditor({
     if (sig === lastSyncedSig.current) return; // unchanged since last sync/save -> nothing to save
     const timer = window.setTimeout(() => {
       lastSyncedSig.current = sig; // our save is now the known in-sync value (parent echoes skip)
-      void autoSaveRef.current.save?.(autoSaveRef.current.payload);
+      void autoSaveRef.current.save?.({ ...autoSaveRef.current.payload, base_rev: baseRevRef.current });
     }, 1200);
     return () => window.clearTimeout(timer);
   }, [editSequence]);
@@ -2138,7 +2152,7 @@ export function VideoReviewEditor({
     if (sig === lastSyncedAnnSig.current) return;
     const timer = window.setTimeout(() => {
       lastSyncedAnnSig.current = sig;
-      void autoSaveRef.current.save?.(autoSaveRef.current.payload);
+      void autoSaveRef.current.save?.({ ...autoSaveRef.current.payload, base_rev: baseRevRef.current });
     }, 1200);
     return () => window.clearTimeout(timer);
   }, [annotations]);

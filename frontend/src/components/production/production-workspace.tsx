@@ -598,7 +598,8 @@ export function ProductionWorkspace({
     if (!selectedContent) return;
     // Merge into the existing timeline so format / source_asset_ids / screen_blur (Dan-driven
     // blur) aren't dropped when only the sequence or annotations change.
-    const merged = { ...(selectedContent.timeline as Record<string, unknown>), ...timeline };
+    const { base_rev: baseRev, ...rest } = timeline;
+    const merged = { ...(selectedContent.timeline as Record<string, unknown>), ...rest };
     const res = await fetch(
       `/api/v1/production-assets/contents/${selectedContent.id}?room_id=${encodeURIComponent(roomId)}`,
       {
@@ -606,9 +607,15 @@ export function ProductionWorkspace({
         credentials: 'include',
         // みきさんの手の保存として記録する（クリップごとの「最後に動かした人」）
         headers: { 'Content-Type': 'application/json', 'X-Timeline-Actor': 'owner' },
-        body: JSON.stringify({ timeline: merged }),
+        body: JSON.stringify({ timeline: merged, base_rev: baseRev || undefined }),
       }
     );
+    if (res.status === 409) {
+      // 画面が直し始めた版がもう残っていない: 上書きせず最新を読み直す（ダンや別の画面の直しを消さない）
+      toast.message('タイムラインが別の所で直されていたので、最新に読み直しました');
+      await loadAll();
+      return;
+    }
     if (!res.ok) throw new Error(await res.text());
     const updated = await res.json();
     setSelectedContent(updated);
