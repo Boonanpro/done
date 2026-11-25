@@ -40,16 +40,18 @@ def since(room_id: str, floor: float) -> list[dict]:
         return []
     rows, kept = [], []
     cutoff = time.time() - KEEP_SECONDS
-    for line in path.read_text(encoding='utf-8').splitlines():
+    lines = path.read_text(encoding='utf-8').splitlines()
+    for line in lines:
         try:
             row = json.loads(line)
             at = datetime.fromisoformat(row['at']).timestamp()
         except (ValueError, KeyError, TypeError):
             continue
-        if at >= cutoff:
-            kept.append(line)
+        if at < cutoff:
+            continue
+        kept.append(line)
         if at >= floor:
             rows.append(row)
-    if len(kept) < len(path.read_text(encoding='utf-8').splitlines()):
+    if len(kept) < len(lines):
         path.write_text(''.join(k + '\n' for k in kept), encoding='utf-8')
     return rows
