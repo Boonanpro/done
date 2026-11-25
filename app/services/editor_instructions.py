@@ -338,13 +338,15 @@ async def send(user_id: str, asset_room_id: str, content_id: str, ann: dict[str,
         asyncio.get_running_loop().run_in_executor(None, frame_with_marks, asset_room_id, content_id, dict(ann))
     clips = clip_lines(asset_room_id, content, ann) if ann.get('kind') == 'clip' else None
     earlier = earlier_clip_comments(content, ann, user_id) if ann.get('kind') == 'clip' else None
-    try:
-        _a0 = float(ann.get('start') or 0)
-        _a1 = float(ann.get('end') if ann.get('end') is not None else _a0)
-        _skip = {str(i) for i in ((ann.get('data') or {}).get('clip_ids') or [])} if isinstance(ann.get('data'), dict) else set()
-        around = neighbor_lines(content, _a0, _a1, _skip)
-    except Exception:  # noqa: BLE001
-        around = None
+    # 選んだクリップへのコメントは clip_lines が同じ段の前後を渡す。ペン・枠などは前後の一覧が無かったので、ここで渡す
+    around = None
+    if ann.get('kind') != 'clip':
+        try:
+            _a0 = float(ann.get('start') or 0)
+            _a1 = float(ann.get('end') if ann.get('end') is not None else _a0)
+            around = neighbor_lines(content, _a0, _a1)
+        except Exception:  # noqa: BLE001
+            around = None
     task = build_task(ann, str(content.get('title') or content_id), str(dest) if dest else None, _previous(user_id, ann),
                       clips=clips, earlier=earlier, around=around)
     job = await parallel_job_runner.start(room['room_id'], user_id, task, title=_title(ann), quiet=True)
