@@ -1,4 +1,6 @@
 """Render a selected local Envato composition in an isolated After Effects instance."""
+import contextlib
+import fcntl
 import hashlib
 import json
 import math
@@ -12,6 +14,103 @@ from pathlib import Path
 SHELF = Path(os.environ.get('DAN_ENVATO_SHELF') or Path.home() / '.dan/workspace/envato-shelf')
 SCRIPTS = Path(__file__).resolve().parents[2] / 'scripts/envato_shelf'
 AE = Path('/Applications/Adobe After Effects 2027')
+# One After Effects render at a time on the Mac by default. Each aerendercore takes ~9GB and 6〜7 cores; three to five
+# at once (several jobs each running a pool of 3) filled the 32GB and the swap, and the screens on 3000 stopped
+# answering (2026-11-25). Renders also run at a low priority so the editor's media and the chat stay quick.
+SLOTS = max(1, int(os.environ.get('DAN_AE_SLOTS') or 1))
+NICE = 15
+
+
+def _ps():
+    out = subprocess.run(['ps', '-Ao', 'pid=,ppid=,command='], capture_output=True, text=True, timeout=10).stdout
+    rows = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit():
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    return rows
+
+
+def _kill(pid):
+    for sig in (15, 9):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return
+        for _ in range(20):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.25)
+
+
+def _cores_for(project):
+    """aerendercore is started by launchd, not as aerender's child: find it by the project it renders."""
+    return [pid for pid, _, cmd in _ps() if 'aerendercore' in cmd and str(project) in cmd]
+
+
+def sweep_orphans():
+    """Stop After Effects left behind by renders whose Python already ended: a render core for a scratch folder that is
+    gone, and private workers (-m -noui) that launchd adopted. Returns the stopped pids."""
+    stopped = []
+    for pid, ppid, cmd in _ps():
+        orphan_core = 'aerendercore' in cmd and str(SHELF / 'render-') in cmd and not any(
+            Path(tok).parent.exists() for tok in cmd.split() if tok.endswith('render.aep'))
+        orphan_worker = ppid == 1 and '/Contents/MacOS/After Effects -m -noui' in cmd
+        if orphan_core or orphan_worker:
+            _kill(pid)
+            stopped.append(pid)
+    return stopped
+
+
+@contextlib.contextmanager
+def _slot():
+    SHELF.mkdir(parents=True, exist_ok=True)
+    while True:
+        for i in range(SLOTS):
+            f = open(SHELF / f'.ae-slot-{i}', 'w')
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                f.close()
+                continue
+            try:
+                yield
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+                f.close()
+            return
+        time.sleep(2)
+
+
+def _low():
+    os.nice(NICE)
+
+
+def _aerender(project, timeout=1800):
+    proc = subprocess.Popen([AE/'aerender', '-project', project, '-rqindex', '1'],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=_low)
+    deadline, reniced = time.monotonic() + timeout, set()
+    try:
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired(proc.args, timeout)
+            for pid in _cores_for(project):
+                if pid not in reniced:
+                    subprocess.run(['renice', str(NICE), '-p', str(pid)], capture_output=True, timeout=5)
+                    reniced.add(pid)
+            time.sleep(2)
+        err = proc.stderr.read().decode(errors='replace') if proc.stderr else ''
+        if proc.returncode:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=err)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        # The render core outlives aerender when aerender is killed or its caller ends: stop it with the render.
+        for pid in _cores_for(project):
+            _kill(pid)
 
 
 def catalog():
@@ -86,7 +185,8 @@ def render(item, values, folder, *, font='SourceHanSansJP-Bold', text_scale=1.0,
     output = folder / (key.hexdigest() + '.mov')
     if output.is_file():
         return output
-    with tempfile.TemporaryDirectory(prefix='render-', dir=SHELF) as scratch:
+    sweep_orphans()
+    with _slot(), tempfile.TemporaryDirectory(prefix='render-', dir=SHELF) as scratch:
         root = Path(scratch)
         app = AE / 'Adobe After Effects 2027.app/Contents/MacOS/After Effects'
         binary = root / 'event'
@@ -95,7 +195,7 @@ def render(item, values, folder, *, font='SourceHanSansJP-Bold', text_scale=1.0,
         # would otherwise block startup before the worker can receive scripts.
         worker = subprocess.Popen([app, '-m', '-noui', '-ApplePersistenceIgnoreState', 'YES',
                                    '-NSQuitAlwaysKeepsWindows', 'NO'],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=_low)
         try:
             def event(code):
                 if worker.poll() is not None:
@@ -135,8 +235,7 @@ def render(item, values, folder, *, font='SourceHanSansJP-Bold', text_scale=1.0,
                     except subprocess.TimeoutExpired:
                         worker.kill()
                         worker.wait()
-        subprocess.run([AE/'aerender', '-project', root/'render.aep', '-rqindex', '1'],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=1800)
+        _aerender(root/'render.aep')
         path = root/'render.mov'
         check = subprocess.check_output([shutil.which('ffprobe') or '/opt/homebrew/bin/ffprobe', '-v', 'error',
             '-select_streams','v:0','-show_entries','stream=pix_fmt,duration,width','-of','json',path],text=True)

@@ -97,12 +97,23 @@ class CommandCenterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.local.call_args.kwargs['queue_owner'],'core')
         self.chat.send_message.assert_not_called()
 
-    async def test_report_returns_to_selected_project_with_source_link(self):
+    async def test_report_to_another_room_is_kept_for_its_dan_not_written_in_its_chat(self):
+        """「【…からの報告】」 flooded the asking room's chat (2026-11-25). It is kept for that room's Dan instead."""
+        import tempfile
+        from pathlib import Path
+        from app.services import room_reports
+        with tempfile.TemporaryDirectory() as d, patch.object(room_reports, 'ROOT', Path(d)):
+            result = await cc.execute({"action": "report", "project_id": "target", "task": "done"}, "hub-room", "owner")
+            self.assertTrue(result['reported'])
+            self.chat.send_message.assert_not_called()
+            rows = room_reports.since('target-room', 0)
+        self.assertEqual([(r['text'], r['source_room_id'], r['source_title']) for r in rows], [('done', 'hub', 'Hub')])
+
+    async def test_report_in_the_same_room_is_the_rooms_own_reply(self):
         self.chat.send_message.return_value = {"id": "report"}
-        result = await cc.execute({"action": "report", "project_id": "target", "task": "done"}, "hub-room", "owner")
-        self.assertTrue(result['reported'])
-        self.assertEqual(self.chat.send_message.call_args.args[:2], ('target-room', 'owner'))
-        self.assertIn('/chat/hub', self.chat.send_message.call_args.args[2])
+        self.projects.get_project.return_value = {"id": "hub", "room_id": "hub-room", "title": "Hub"}
+        await cc.execute({"action": "report", "project_id": "hub", "task": "done"}, "hub-room", "owner")
+        self.assertEqual(self.chat.send_message.call_args.args[:3], ('hub-room', 'owner', 'done'))
 
     async def test_local_work_uses_authenticated_room_and_durable_tracker(self):
         with patch('app.services.followups.create_watch', return_value={'scheduled': True, 'id': 'local-watch'}) as watch:
