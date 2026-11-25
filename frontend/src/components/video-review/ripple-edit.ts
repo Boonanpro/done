@@ -9,6 +9,7 @@
 // - 伸ばす（区間を足す）: 足した所より後ろから始まる物を後ろへずらす。またいでいる物はそのまま。
 // - 並べ替え: 動かすクリップを抜いて詰め、別のつなぎ目に差し込む。そのクリップの上にある字幕などは一緒に動く。
 // 長いBGMのように何本ものクリップにまたがる物は、並べ替えでは動かさない（全体の長さは変わらないので）。
+// 半分以上が動かすクリップの中にある物は、長くても乗っている物として一緒に動く（ridesOn）。
 
 export type RClip = {
   id: string;
@@ -44,6 +45,34 @@ export function isSpanning(c: RClip, lane?: RLane): boolean {
   const role = String(c.role || '');
   if (lane?.zone === 'audio' && (role === 'music' || role === 'bgm')) return true;
   return c.timeline_end - c.timeline_start > 20;
+}
+
+/** メインのクリップ [a, b] に乗っている物か（字幕・絵・モザイク・別に録った声）。自分の長さの半分以上が
+ *  そのクリップの中にあり、BGM ではない。長さは問わない（30秒のクリップに付けた30秒の声も乗っている物）。
+ *  2026-11-25 本人「コピペしたら音が出なくなる」: カメラの音は消してあり、聞こえる声は別に録った声の
+ *  クリップだったので、映像と声のつながりだけを写すと声が抜けていた。 */
+export function ridesOn(c: RClip, lane: RLane | undefined, a: number, b: number): boolean {
+  const role = String(c.role || '');
+  if (lane?.zone === 'audio' && (role === 'music' || role === 'bgm')) return false;
+  const ov = Math.max(0, Math.min(c.timeline_end, b) - Math.max(c.timeline_start, a));
+  return ov >= Math.max(EPS, (c.timeline_end - c.timeline_start) * 0.5);
+}
+
+/** 選んだメインのクリップに乗っている、ほかの段のクリップの id（写す・動かす時に一緒に連れて行く）。 */
+export function riderIds(seq: RSeq, ids: string[], lanes: Map<string, RLane>, mainLayer: number | null): string[] {
+  if (mainLayer === null) return [];
+  const idset = new Set(ids.map(String));
+  const all = (seq.tracks || []).flatMap((t) => t.clips || []);
+  const isMain = (c: RClip) => { const l = lanes.get(String(c.id)); return l?.zone === 'visual' && l.layer === mainLayer; };
+  const hosts = all.filter((c) => idset.has(String(c.id)) && isMain(c));
+  if (!hosts.length) return [];
+  const out: string[] = [];
+  for (const c of all) {
+    if (idset.has(String(c.id)) || isMain(c)) continue;
+    const lane = lanes.get(String(c.id));
+    if (hosts.some((h) => ridesOn(c, lane, h.timeline_start, h.timeline_end))) out.push(String(c.id));
+  }
+  return out;
 }
 
 /** メインの段: 映像のクリップがある一番下の映像の段。無ければ null。 */
@@ -230,7 +259,10 @@ export function rippleMove<S extends RSeq, A extends RAnn>(
     clips: (track.clips || []).map((c) => {
       if (idset.has(String(c.id))) return shiftClip(c, ride);
       if (isMain(c)) return shiftClip(c, mainShift.get(String(c.id)) || 0);
-      return shiftClip(c, shiftFor(c.timeline_start, c.timeline_end, isSpanning(c, lanes.get(String(c.id)))));
+      const lane = lanes.get(String(c.id));
+      // 乗っている物は長くても一緒に動く（30秒のクリップの声が置いて行かれていた）
+      if (ridesOn(c, lane, a, b)) return shiftClip(c, ride);
+      return shiftClip(c, shiftFor(c.timeline_start, c.timeline_end, isSpanning(c, lane)));
     }),
   }));
   const outAnns = anns.map((x) => shiftAnn(x, shiftFor(x.start, x.end ?? x.start + 0.5, false)) as A);

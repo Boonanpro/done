@@ -60,7 +60,7 @@ import { MotionPanel } from './motion-panel';
 import { isOneForm, motionAt, setKeyAt, sortedKeys, type MotionKey } from './placement';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
-import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, rippleDeleteMain, rippleMove, rippleTrim } from './ripple-edit';
+import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, riderIds, rippleDeleteMain, rippleMove, rippleTrim } from './ripple-edit';
 
 /** A form control whose value is a timeline setting (slider, number box, select, checkbox…), not
  *  free text. `typing` = only the ones still being typed into (number boxes). */
@@ -3912,7 +3912,7 @@ export function VideoReviewEditor({
   // A/V の組なら組ごとの新しい link_id を付ける。置く段は元の段のまま（Premiere・DaVinci と同じ）。
   // 置いた所で同じ段の別クリップと重なれば、動かした時と同じ上書き（commitMovedSet）で切り詰める。
   const [hasClipClipboard, setHasClipClipboard] = useState(false);
-  const clipClipboardRef = useRef<{ clips: Array<{ clip: SequenceClip; trackId: string; trackType: string; zone: 'visual' | 'audio'; layer: number }>; annotations: ReviewAnnotation[]; origin: number; end: number } | null>(null);
+  const clipClipboardRef = useRef<{ clips: Array<{ clip: SequenceClip; trackId: string; trackType: string; zone: 'visual' | 'audio'; layer: number; rider?: boolean }>; annotations: ReviewAnnotation[]; origin: number; end: number } | null>(null);
 
   // 選んでいる物（A/V リンクが入っていれば相方も）を、段の情報つきで集める。
   const buildCopySource = useCallback((clipIdList: string[], annIdList: string[]) => {
@@ -3925,9 +3925,18 @@ export function VideoReviewEditor({
       const linkIds = new Set(all.filter((x) => clipIdSet.has(x.clip.id) && x.clip.link_id).map((x) => x.clip.link_id));
       all.forEach((x) => { if (x.clip.link_id && linkIds.has(x.clip.link_id)) clipIdSet.add(x.clip.id); });
     }
+    // メインの映像を写す時は、その上に乗っている字幕・絵・モザイク・別に録った声も一緒に写す（Final Cut の
+    // つながったクリップと同じ）。カメラの音を消して声を別に入れた所で、写した方だけ声が抜けていた（2026-11-25）。
+    const riders = new Set<string>();
+    if (linkAV && clipIdSet.size > 0 && seq) {
+      for (const id of riderIds(seq, [...clipIdSet], lanes, mainLayerOf(seq.tracks || [], lanes))) {
+        riders.add(id);
+        clipIdSet.add(id);
+      }
+    }
     const clips = all.filter((x) => clipIdSet.has(x.clip.id)).map((x) => {
       const l = lanes.get(String(x.clip.id)) || { zone: (x.trackType === 'audio' ? 'audio' : 'visual') as 'visual' | 'audio', layer: Number(x.clip.layer ?? 0) };
-      return { ...x, clip: JSON.parse(JSON.stringify(x.clip)) as SequenceClip, zone: l.zone, layer: l.layer };
+      return { ...x, clip: JSON.parse(JSON.stringify(x.clip)) as SequenceClip, zone: l.zone, layer: l.layer, rider: riders.has(String(x.clip.id)) };
     });
     const anns = annotations.filter((a) => annIds.has(a.id)).map((a) => JSON.parse(JSON.stringify(a)) as ReviewAnnotation);
     const starts = [...clips.map((x) => x.clip.timeline_start), ...anns.map((a) => a.start)];
@@ -4204,8 +4213,9 @@ export function VideoReviewEditor({
             // 引きずる組は選んでいたクリップの写しだけにする。
             const origIds = [...dragSelectionRef.current];
             const picked = new Set(origIds);
+            // 乗っている物の写しも引きずる組に入れて、一緒に動かす
             dragSelectionRef.current = src.clips
-              .map((x, i) => (picked.has(x.clip.id) ? placed.clipIds[i] : null))
+              .map((x, i) => (picked.has(x.clip.id) || x.rider ? placed.clipIds[i] : null))
               .filter((x): x is string => !!x);
             dragSnapshotRef.current = placed.seq;
             altDupRef.current = { before: editSequence, origIds, moved: false };

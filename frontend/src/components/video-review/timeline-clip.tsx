@@ -271,11 +271,13 @@ function Waveform({ url, sourceStart, sourceEnd, widthPx, volume, dark }: {
     const g = c.getContext('2d');
     if (!g) return;
     g.clearRect(0, 0, cw, ch);
-    g.fillStyle = dark ? 'rgba(40,30,0,0.55)' : 'rgba(255,255,255,0.62)';
+    // 音量0（消してある音）でも波形は薄く出す。平らにすると、音が無いのか消してあるのか分からない（2026-11-25）
+    const muted = volume <= 0.02;
+    g.fillStyle = muted ? (dark ? 'rgba(40,30,0,0.22)' : 'rgba(255,255,255,0.28)') : dark ? 'rgba(40,30,0,0.55)' : 'rgba(255,255,255,0.62)';
     const a = sourceStart * PEAKS_PER_SEC;
     const span = Math.max(1, (sourceEnd - sourceStart) * PEAKS_PER_SEC);
     const mid = ch / 2;
-    const gain = Math.min(VOL_MAX, Math.max(0, volume));
+    const gain = muted ? 1 : Math.min(VOL_MAX, Math.max(0, volume));
     // 1本の線に入る山の数に合わせて、山を2つずつまとめた段から読む（長い音でも線の数だけの手間）
     const per = span / cw;
     const level = Math.max(0, Math.min(PEAK_LEVELS - 1, Math.floor(Math.log2(Math.max(1, per)))));
