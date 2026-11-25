@@ -83,3 +83,27 @@ export function openEditorWindow(roomId: string, contentId?: string | null): voi
   }
   win.focus();
 }
+
+/**
+ * 同じ部屋の作品を、今の窓とは別のエディターの窓で開く（ライブラリの作品の右クリック「新しい窓で開く」）。
+ * 窓の名前を毎回変えるので、同じ部屋のエディターを何枚でも並べられる
+ * （2026-11-25 本人「同じ部屋でも複数立ち上げを可能にしたい。タイムラインを右クリックで別タブで開くみたいな」）。
+ */
+export function openEditorInNewWindow(roomId: string, contentId: string): void {
+  const url = `/production-workspace?room_id=${encodeURIComponent(roomId)}&content_id=${encodeURIComponent(contentId)}`;
+  const name = `dan-editor-${roomId.slice(0, 8)}-${contentId.slice(0, 8)}-${Date.now().toString(36)}`;
+  const w = Math.max(1100, window.screen.availWidth || 1440);
+  const h = Math.max(700, window.screen.availHeight || 900);
+  const win = window.open('', name, `popup=yes,width=${w},height=${h},left=0,top=0`);
+  if (!win) {
+    window.open(url, '_blank');   // 窓を開けない環境では新しいタブで
+    return;
+  }
+  try {
+    win.document.open();
+    win.document.write(editorSplashHtml());
+    win.document.close();
+  } catch { /* 起動画面を書けなくても開く */ }
+  win.location.replace(url);
+  win.focus();
+}

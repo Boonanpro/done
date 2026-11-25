@@ -1693,10 +1693,47 @@ export function VideoReviewEditor({
   // 止まっている時は0.15秒まとめて、再生中は0.5秒ごとに必ず送る。前は再生中も「2秒変化が無ければ」送る形で、
   // 再生位置は0.125秒ごとに変わるので再生中は一度も届かず、ダンは再生前の位置を見ていた（2026-11-24）
   const editorStateSentRef = useRef(0);
+  // 同じ部屋のエディターを何枚も開いた時、ダンに今の様子を知らせるのは最後にみきさんが触った窓だけ
+  // （知らせる先は部屋ごとに1つの editor_state.json。裏の窓が上書きすると、ダンが見ていない方の作品を「ここ」と取る）。
+  // 触った窓が localStorage の印を取り、印が移ったらすぐ知らせ直す（2026-11-25 同じ部屋で複数の窓を開けるようにした）
+  const editorWindowIdRef = useRef('');
+  const [editorWindowTurn, setEditorWindowTurn] = useState(0);
+  useEffect(() => {
+    if (!roomId) return;
+    if (!editorWindowIdRef.current) editorWindowIdRef.current = Math.random().toString(36).slice(2);
+    const key = `dan-editor-active-${roomId}`;
+    let last = 0;
+    const claim = (notify: boolean) => {
+      const now = Date.now();
+      if (now - last < 800) return;
+      last = now;
+      try {
+        if (localStorage.getItem(key) === editorWindowIdRef.current) return;
+        localStorage.setItem(key, editorWindowIdRef.current);
+      } catch { return; }
+      if (notify) setEditorWindowTurn((n) => n + 1);
+    };
+    claim(false);   // 開いたばかりの窓が今の窓
+    const onTouch = () => claim(true);
+    window.addEventListener('focus', onTouch);
+    window.addEventListener('pointerdown', onTouch, true);
+    window.addEventListener('pointermove', onTouch, true);
+    window.addEventListener('keydown', onTouch, true);
+    return () => {
+      window.removeEventListener('focus', onTouch);
+      window.removeEventListener('pointerdown', onTouch, true);
+      window.removeEventListener('pointermove', onTouch, true);
+      window.removeEventListener('keydown', onTouch, true);
+    };
+  }, [roomId]);
   useEffect(() => {
     if (!roomId || !contentId) return;
     const wait = playing ? Math.max(0, 500 - (performance.now() - editorStateSentRef.current)) : 150;
     const timer = window.setTimeout(() => {
+      try {
+        const owner = localStorage.getItem(`dan-editor-active-${roomId}`);
+        if (owner && editorWindowIdRef.current && owner !== editorWindowIdRef.current) return;   // 別の窓が今の窓
+      } catch { /* 印を読めなければ今までどおり知らせる */ }
       editorStateSentRef.current = performance.now();
       const ids = new Set(selectedSequenceClipIds.length ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
       const selected: Array<Record<string, unknown>> = [];
@@ -1717,7 +1754,7 @@ export function VideoReviewEditor({
       }).catch(() => {});
     }, wait);
     return () => window.clearTimeout(timer);
-  }, [roomId, contentId, currentTime, playing, selectedSequenceClipId, selectedSequenceClipIds, editSequence, previewPoint]);
+  }, [roomId, contentId, currentTime, playing, selectedSequenceClipId, selectedSequenceClipIds, editSequence, previewPoint, editorWindowTurn]);
 
   useEffect(() => {
     if (!roomId || !contentId) return;
