@@ -7,4 +7,5 @@ type SitemapModule = {
 };
 
 export const ARTIFACT_SITEMAPS: Record<string, () => Promise<SitemapModule>> = {
+  "denki-knowledge": () => import("@/app/artifacts/denki-knowledge/sitemap"),
 };
