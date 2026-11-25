@@ -9,6 +9,8 @@ Finish videos after capture or generation. Prefer deterministic tools for exact 
 
 For presenter-led explainers, educational sales videos and LINE gift videos with real demos, also use `../talking-demo-editing/SKILL.md` for speech cleanup, demo readability and scene-boundary review. It contains project-specific references only for the matching project.
 
+タイトル・人物の名前帯・写真の動き・転換・数字の図解は、エディターの「Envatoの部品」（list_envato_components）の動く見本から選ぶ。場面に合う物が棚に無ければEnvato Elementsで探す。ダンがEnvatoで作品別の利用登録を確認し、place_envato_componentでAfter Effectsに作品の文字・写真を渡してタイムラインに置く。新しい日本語書体はAdobe Fontsから選び、案件の書体指定を優先する。
+
 ## Editing Policy
 
 Treat editing as preserving the user's intended message, not simply shortening the footage.

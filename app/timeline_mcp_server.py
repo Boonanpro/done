@@ -61,9 +61,9 @@ def _run_tool_thread(name,args):
         if not str(args.get('license_project') or '').strip():
             return _ok({'ok': False, 'error': 'EnvatoのLicensesで、この作品への登録を確認してください', 'url': item['url']})
         values = envato_shelf.resolve_values(item, args.get('values', {}), _assets())
-        path = envato_shelf.render(item, values, _room_dir() / 'envato-renders', font=args.get('font') or 'SourceHanSansJP-Bold')
+        path = envato_shelf.render(item, values, _room_dir() / 'envato-renders', font=args.get('font') or item.get('font', 'SourceHanSansJP-Bold'))
         # Only placement holds the content lock. A concurrent human edit is handled below.
-        args = {**args, '_render': str(path), '_title': item['name'], '_duration': item['duration'], '_source': item['url']}
+        args = {**args, '_render': str(path), '_title': item['name'], 'font': args.get('font') or item.get('font', 'SourceHanSansJP-Bold'), '_duration': item['duration'], '_source': item['url']}
     if name in _BACKGROUND_TOOLS:
         return asyncio.run(_dispatch(name,args))
     with _draft_lock, td.content_edit_lock(ROOM_ID, CONTENT_ID or _load().get('content_id', '')):

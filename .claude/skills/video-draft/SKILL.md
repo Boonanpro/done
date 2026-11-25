@@ -8,6 +8,8 @@ description: "Create a new video draft in the Dan editor; specific edits use tim
 **本体はエディタ。** 動画は ffmpeg で組まない。タイムラインのクリップとして組み、ユーザーが手で触れる形で出す。
 2026-09-04 の吉川特装の動画（v1〜v8 が全とっかえ→v9 で全部クリップ化）から確定した規律。
 
+タイトル・人物の名前帯・写真の動き・転換・数字の図解は、エディターの「Envatoの部品」（list_envato_components）の動く見本から選ぶ。場面に合う物が棚に無ければEnvato Elementsで探す。ダンがEnvatoで作品別の利用登録を確認し、place_envato_componentでAfter Effectsに作品の文字・写真を渡してタイムラインに置く。新しい日本語書体はAdobe Fontsから選び、案件の書体指定を優先する。
+
 ## 原則（ユーザー確定）
 
 1. ユーザーの意図とテイストを会話で掘り下げ、技術・スキル・プロンプトはAIが選ぶ。作品に応じて絵コンテ、Vコンテ、全レイヤー入りの下書きを使い、判断できる形で見せる。2026-09-05のユーザー訂正を優先する。

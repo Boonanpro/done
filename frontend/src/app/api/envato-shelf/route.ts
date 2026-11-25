@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { backendUrl } from '@/lib/backend-url';
 import { NextRequest, NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
@@ -9,7 +10,7 @@ export async function GET(request: NextRequest) {
   const authorization = token ? `Bearer ${token}` : request.headers.get('authorization');
   if (!authorization) return new Response(null, { status: 401 });
   const root = path.join(homedir(), '.dan/workspace/envato-shelf');
-  const backend = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+  const backend = backendUrl('core');
   try {
     const me = await fetch(`${backend}/api/v1/chat/me`, { headers: { authorization }, cache: 'no-store', signal: AbortSignal.timeout(10000) });
     if (!me.ok) return new Response(null, { status: me.status });
