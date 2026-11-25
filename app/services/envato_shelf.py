@@ -66,7 +66,7 @@ def render(item, values, folder, *, font='SourceHanSansJP-Bold'):
     output = folder / (key.hexdigest() + '.mov')
     if output.is_file():
         return output
-    with tempfile.TemporaryDirectory(dir=folder) as scratch:
+    with tempfile.TemporaryDirectory(prefix='render-', dir=SHELF) as scratch:
         root = Path(scratch)
         app = AE / 'Adobe After Effects 2027.app/Contents/MacOS/After Effects'
         binary = root / 'event'
