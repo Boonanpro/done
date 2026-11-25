@@ -62,6 +62,6 @@ def test_feed_endpoint(draft, monkeypatch):
         tool('move_clip', {'clip_id': 'b', 'new_start': 4})
         got = c.get(url, params={'room_id': 'room', 'after': opened['last']}).json()
         assert [e['changes'][0]['clip_id'] for e in got['entries']] == ['b']
-        assert got['sequence'] == live()
+        assert {k: v for k, v in got['sequence'].items() if k != '_rev'} == {k: v for k, v in live().items() if k != '_rev'}  # _rev: 版の印 (PR1127)
     finally:
         app.dependency_overrides.clear()
