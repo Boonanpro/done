@@ -47,6 +47,7 @@ import { startEditorFeel } from './editor-feel';
 import { TimelineRuler } from './timeline-ruler';
 import { FullscreenBar } from './fullscreen-bar';
 import { PhoneSeekBar, PhoneSwipeSurface, PhoneTime, PhoneTimeline, createPhoneScrub, type PhoneLane } from './phone-timeline';
+import { EnvatoShelf } from './envato-shelf';
 import { SfxPanel, SFX_DND_TYPE, type SfxItem } from './sfx-panel';
 
 import { Button } from '@/components/ui/button';
@@ -4010,6 +4011,8 @@ export function VideoReviewEditor({
   // ── 効果音を自分で入れる（2026-11-14 本人「使いたい効果音を全部消しちゃった状態では自分で追加する術がない」）──
   // 一覧の音をこの作品の素材にしてから（同じ名前があればそれを使う）、音の段に置く。段は、置く所が空いている
   // 効果音の段（無ければ声の段より上の空いた段、それも無ければ新しい段）。音量は同じ音の既存の置き方に合わせる。
+  const [envatoOpen, setEnvatoOpen] = useState(false);
+  useEffect(() => { if (new URLSearchParams(window.location.search).get('envato') === '1') setEnvatoOpen(true); }, []);
   const [sfxOpen, setSfxOpen] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
   const addSfx = useCallback(async (item: SfxItem, at: number, layerArg?: number) => {
@@ -7154,6 +7157,13 @@ export function VideoReviewEditor({
             />
 
             <div className={`relative flex shrink-0 flex-col border-t border-neutral-800 bg-background ${compact ? 'p-1.5' : 'p-3'}`} style={{ height: compact ? 150 : timelineHeight }}>
+              {envatoOpen && roomId && contentId && <EnvatoShelf assets={sequenceAssets || []} close={() => setEnvatoOpen(false)} submit={async (note, name) => {
+                const ann: ReviewAnnotation = {id: makeId(), kind: 'note', intent: 'generate', label: name, note, start: liveTimeRef.current, data: {}};
+                setAnnotations(prev => [...prev, ann]);
+                const sent = await sendInstruction(ann);
+                if (!sent) setAnnotations(prev => prev.filter(a => a.id !== ann.id));
+                return sent;
+              }} />}
               {sfxOpen && roomId ? <SfxPanel roomId={roomId} onAdd={(it) => void addSfx(it, liveTimeRef.current)} onClose={() => setSfxOpen(false)} /> : null}
               {compact ? <style>{'[data-editor-toolbar] > *:not([data-keep]) { display: none !important; }'}</style> : null}
               <div className="flex shrink-0 flex-wrap items-center gap-2" data-editor-toolbar>
@@ -7178,6 +7188,7 @@ export function VideoReviewEditor({
                 >
                   + 素材の枠
                 </Button>
+                {roomId && contentId && <Button data-keep variant="outline" size="sm" onClick={() => setEnvatoOpen(true)}>Envatoの部品</Button>}
                 <Button
                   variant={sfxOpen ? 'default' : 'outline'}
                   size="sm"
