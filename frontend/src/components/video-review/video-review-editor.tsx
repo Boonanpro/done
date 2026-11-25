@@ -1187,7 +1187,12 @@ export function VideoReviewEditor({
   );
   const clipLanes = useMemo(() => computeClipLanes(editSequence?.tracks || []), [editSequence]);
   // プレビューには、段の頭で切った段（非表示・消音）のクリップを渡さない
-  const previewSequence = useMemo(() => dropSwitchedOff(editSequence), [editSequence]);
+  // ダンの手を見せている間、プレビューは途中の形を追わずに、ダンが保存した最後の形を流す。
+  // 途中の形はタイムラインの動きを見せるための物で、切ったクリップの後ろ半分が元のクリップと重なった形などが
+  // 1秒に何度も入れ替わる。それをプレビューが追うと、再生中に絵がカクつき、音が二重に鳴っていた（2026-11-25）。
+  const [previewHold, setPreviewHold] = useState<EditSequence | null>(null);
+  const previewSource = previewHold ?? editSequence;
+  const previewSequence = useMemo(() => dropSwitchedOff(previewSource), [previewSource]);
   const laneSwitches = editSequence?.lane_switches;
   const toggleLaneSwitch = useCallback((key: string) => {
     const field = key.startsWith('visual-') ? 'hidden' : 'muted';
@@ -1530,6 +1535,7 @@ export function VideoReviewEditor({
         if (!finalSeq || !start || seqSig(start) !== lastSyncedSig.current) continue;
         danReplayingRef.current = true;
         setDanReplay(true);
+        setPreviewHold(finalSeq);
         const steps = buildDanSteps(batch.entries, start);
         const stepMs = steps.length > 14 ? Math.max(260, Math.round(9000 / steps.length)) : 700;
         const shown = clipStateMap(start);
@@ -1557,12 +1563,14 @@ export function VideoReviewEditor({
           await wait(stepMs);
         }
         adoptShown(finalSeq);
+        setPreviewHold(null);
         await wait(250);
         danReplayingRef.current = false;
       }
     } finally {
       danReplayingRef.current = false;
       feedRunningRef.current = false;
+      setPreviewHold(null);
       setDanReplay(false);
       setDanTouch({ ids: [], appear: [], vanish: [] });
       window.setTimeout(() => { if (!feedRunningRef.current) { danTargetRef.current = []; setDanCursor(null); } }, 900);

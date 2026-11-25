@@ -217,7 +217,7 @@ function coversFrame(vc: VisualClip, imageAssets: Map<string, string>): boolean 
 }
 
 // 確かめ用の数（?previewdiag=1 の試しの道具が読む）
-type PreviewStats = { stalls?: number; startWaits?: number[]; frozenMs?: number; avN?: number; avSum?: number; avMax?: number; avOver?: number; draws: number; holds: number; wrongDraws: number; lastWrong: number; audioGapMs: number; audioLateStarts: number; audioScheduled: number; audioMode: string };
+type PreviewStats = { stalls?: number; seqChanges?: number; startWaits?: number[]; frozenMs?: number; avN?: number; avSum?: number; avMax?: number; avOver?: number; draws: number; holds: number; wrongDraws: number; lastWrong: number; audioGapMs: number; audioLateStarts: number; audioScheduled: number; audioMode: string };
 function previewStats(): PreviewStats {
   const w = window as unknown as { __previewStats?: PreviewStats };
   if (!w.__previewStats) w.__previewStats = { draws: 0, holds: 0, wrongDraws: 0, lastWrong: -1, audioGapMs: 0, audioLateStarts: 0, audioScheduled: 0, audioMode: '' };
@@ -373,6 +373,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     return m;
   }, [videoAssets]);
 
+  // 作品の中身が何回入れ替わったか（確かめの道具が、再生中にダンの直しが届いた時の入れ替わりの回数を見る）
+  useEffect(() => { const st = previewStats(); st.seqChanges = (st.seqChanges || 0) + 1; }, [sequence]);
   const sequenceDuration = useMemo(() => {
     const tracks = sequence?.tracks || [];
     return Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)), Number(sequence?.duration || 0));
@@ -707,7 +709,28 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const stopAudioNodes = useCallback(() => {
     for (const v of audioNodesRef.current.values()) if (v) { try { v.node.stop(); } catch { /* noop */ } v.gain.disconnect(); }
     audioNodesRef.current.clear();
+    audioNodeSigRef.current.clear();
   }, []);
+  // 予約した音の部品が、どのクリップの形（素材・位置・範囲・速さ・大きさ）で作った物か。
+  // 再生中に作品が変わった時（ダンの直し・本人の直し）、形の変わったクリップ・消えたクリップの予約だけ止めて
+  // 今の形で予約し直す。前は古い予約が鳴り続け、切ったクリップの後ろ半分と元の音が重なって二重に聞こえた（2026-11-25）。
+  const audioNodeSigRef = useRef<Map<string, string>>(new Map());
+  const audioClipSig = (c: SequenceClip, gain: number) =>
+    `${c.asset_id}|${c.timeline_start}|${c.timeline_end}|${c.source_start}|${c.source_end}|${clipSpeed(c)}|${gain}`;
+  useEffect(() => {
+    const nodes = audioNodesRef.current;
+    const sigs = audioNodeSigRef.current;
+    if (!nodes.size) return;
+    const now = new Map<string, string>();
+    for (const { clip, gain } of audibleAudio) now.set(String(clip.id), audioClipSig(clip, gain));
+    for (const [k, v] of [...nodes]) {
+      const id = k.slice(0, k.lastIndexOf('|'));
+      if (now.get(id) === sigs.get(k)) continue;
+      if (v) { try { v.node.stop(); } catch { /* noop */ } try { v.gain.disconnect(); } catch { /* noop */ } }
+      nodes.delete(k);
+      sigs.delete(k);
+    }
+  }, [audibleAudio]);
 
   // 使っている素材だけ持つ
   useEffect(() => {
@@ -831,6 +854,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const LOOK = 0.5 * R; // タイムラインの秒（実時間で0.5秒先まで）
     const stats = previewStats();
     const nodes = audioNodesRef.current;
+    const sigs = audioNodeSigRef.current;
     let gap = false;
     for (const { clip: c, gain } of audibleAudio) {
       const ts = c.timeline_start, te = c.timeline_end;
@@ -838,6 +862,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (ts > t + LOOK) break;
       const src = mgr.get(srcByAssetId.get(String(c.asset_id || '')) || '');
       if (!src || gain <= 0) continue;
+      const sig = audioClipSig(c, gain);
       // クリップの速さ sp: タイムラインの1秒＝素材の sp 秒。鳴らす速さは Rc = R × sp
       const sp = clipSpeed(c);
       const Rc = R * sp;
@@ -865,7 +890,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (!buf) { if (t >= ts && b === Math.floor(srcNow / BL)) gap = true; break; }
         const a = Math.max(b * BL, ss);
         const z = Math.min((b + 1) * BL, srcEnd, b * BL + srcDur);
-        if (z <= a + 1e-4) { nodes.set(key, null); continue; }
+        if (z <= a + 1e-4) { sigs.set(key, sig); nodes.set(key, null); continue; }
         const tl = ts + (a - ss) / sp;
         const nominal = anchor.ctxT0 + (tl - anchor.t0) / R;
         let when = nominal;
@@ -874,7 +899,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const earliest = ctx.currentTime + 0.005;
         if (when < earliest) {
           const late = (earliest - when) * Rc;
-          if (late >= dur) { nodes.set(key, null); continue; }
+          if (late >= dur) { sigs.set(key, sig); nodes.set(key, null); continue; }
           if (late > 0.04 && tl > anchor.t0 + 0.05) stats.audioLateStarts += 1;
           when = earliest; off += late; dur -= late;
         }
@@ -886,7 +911,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         g.connect(mgr.master);
         node.start(when, off / Rc, dur / Rc);
         node.onended = () => { try { g.disconnect(); } catch { /* noop */ } };
-        nodes.set(key, { node, gain: g, t0: tl + (when - nominal) * R, t1: tl + (z - a) / sp });
+        sigs.set(key, sig); nodes.set(key, { node, gain: g, t0: tl + (when - nominal) * R, t1: tl + (z - a) / sp });
         stats.audioScheduled += 1;
       }
     }
