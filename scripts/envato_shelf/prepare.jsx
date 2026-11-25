@@ -51,7 +51,13 @@
                         var doc = text.value;
                         var oldName = layer.name;
                         doc.text = value; doc.font = job.font;
-                        if (spec.textColor) { doc.applyFill = true; doc.fillColor = spec.textColor; }
+                        if (job.textScale && job.textScale !== 1) doc.fontSize = doc.fontSize * job.textScale;
+                        var color = job.textColor || spec.textColor;
+                        if (color) { doc.applyFill = true; doc.fillColor = color; }
+                        if (job.textOutline) {
+                            doc.applyStroke = true; doc.strokeColor = job.textOutline;
+                            doc.strokeWidth = Math.max(2, doc.fontSize * 0.09); doc.strokeOverFill = false;
+                        }
                         text.setValue(doc); layer.name = oldName;
                         if (text.value.font !== job.font) throw Error("指定書体を使えません: " + job.font);
                     }

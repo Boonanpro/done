@@ -27,6 +27,21 @@ def describe(item):
             'fields': [{k: f[k] for k in ('label', 'type', 'example')} for f in item['fields']]}
 
 
+def _rgb(color):
+    text = str(color).strip().lstrip('#')
+    if len(text) != 6:
+        raise ValueError('文字の色は #rrggbb で指定してください')
+    return [round(int(text[i:i+2], 16) / 255, 4) for i in (0, 2, 4)]
+
+
+def resolve_style(size=None, color=None, outline=None):
+    """Text size multiplier (0.5-4), #rrggbb fill colour and outline colour for a component's text."""
+    scale = 1.0 if size in (None, '') else float(size)
+    if not 0.5 <= scale <= 4:
+        raise ValueError('文字の大きさは0.5〜4倍で指定してください')
+    return scale, (_rgb(color) if color else None), (_rgb(outline) if outline else None)
+
+
 def resolve_values(item, supplied, assets):
     expected = {field['label'] for field in item['fields']}
     if set(supplied) != expected:
@@ -57,11 +72,12 @@ def resolve_values(item, supplied, assets):
     return values
 
 
-def render(item, values, folder, *, font='SourceHanSansJP-Bold'):
+def render(item, values, folder, *, font='SourceHanSansJP-Bold', text_scale=1.0, text_color=None, text_outline=None):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     # Include photo content so edits to existing photos cannot return a stale render.
-    key = hashlib.sha256(json.dumps([item, values, font], sort_keys=True).encode())
+    style = [] if text_scale == 1 and not text_color and not text_outline else [text_scale, text_color, text_outline]
+    key = hashlib.sha256(json.dumps([item, values, font, *style], sort_keys=True).encode())
     key.update((SCRIPTS / 'prepare.jsx').read_bytes())
     for field, value in zip(item['fields'], values):
         if field['type'] in ('photo', 'photos'):
@@ -96,7 +112,7 @@ def render(item, values, folder, *, font='SourceHanSansJP-Bold'):
             else:
                 raise RuntimeError('書き出し用の After Effects を起動できません')
             event('app.beginSuppressDialogs(); app.open(new File('+json.dumps(item['source'])+'));')
-            job = dict(item=item, values=values, font=font, width=1920, fps=30, mode='render',
+            job = dict(item=item, values=values, font=font, textScale=text_scale, textColor=text_color, textOutline=text_outline, width=1920, fps=30, mode='render',
                        report=str(root/'status'), output=str(root/'render.mov'), project=str(root/'render.aep'),
                        repair=item['id'].split('-')[0] in {'lower','glitch','transition','carousel'})
             script = root / 'job.jsx'

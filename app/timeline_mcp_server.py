@@ -61,7 +61,9 @@ def _run_tool_thread(name,args):
         if not str(args.get('license_project') or '').strip():
             return _ok({'ok': False, 'error': 'EnvatoのLicensesで、この作品への登録を確認してください', 'url': item['url']})
         values = envato_shelf.resolve_values(item, args.get('values', {}), _assets())
-        path = envato_shelf.render(item, values, _room_dir() / 'envato-renders', font=args.get('font') or item.get('font', 'SourceHanSansJP-Bold'))
+        scale, color, outline = envato_shelf.resolve_style(args.get('text_size'), args.get('text_color'), args.get('text_outline'))
+        path = envato_shelf.render(item, values, _room_dir() / 'envato-renders', font=args.get('font') or item.get('font', 'SourceHanSansJP-Bold'),
+                                   text_scale=scale, text_color=color, text_outline=outline)
         # Only placement holds the content lock. A concurrent human edit is handled below.
         args = {**args, '_render': str(path), '_title': item['name'], 'font': args.get('font') or item.get('font', 'SourceHanSansJP-Bold'), '_duration': item['duration'], '_source': item['url']}
     if name in _BACKGROUND_TOOLS:
@@ -194,7 +196,7 @@ def tool_definitions() -> list[types.Tool]:
               {"clip_id": _STR, "limit": {"type": "integer"}}),
         _tool("timeline_outline", "タイムライン全体の構造（レーン/クリップ/時刻/種類）を読む。作業前に必ず一度読むこと。", {}),
         _tool('list_envato_components', 'Envatoの部品を用途と差し替え欄で探す。素材ページで現在の作品への利用登録を確かめる。', {'query': _STR}),
-        _tool('place_envato_component', '作品名でEnvatoの利用登録を確認した部品に文字・数字・作品内の写真素材IDを入れ、After Effectsで書き出して指定秒に置く。license_projectは実際に登録した作品名。fontは有効なAdobe FontsのPostScript名。', {'component': _STR, 'values': {'type':'object'}, 'at': _NUM, 'font': _STR, 'license_project': _STR}, ['component','values','at','license_project']),
+        _tool('place_envato_component', '作品名でEnvatoの利用登録を確認した部品に文字・数字・作品内の写真素材IDを入れ、After Effectsで書き出して指定秒に置く。license_projectは実際に登録した作品名。fontは有効なAdobe FontsのPostScript名。text_sizeは文字の大きさの倍率(0.5〜4、テンプレートの元の大きさが1)、text_colorは文字の色、text_outlineは文字の縁の色(どちらも#rrggbb)。', {'component': _STR, 'values': {'type':'object'}, 'at': _NUM, 'font': _STR, 'license_project': _STR, 'text_size': _NUM, 'text_color': _STR, 'text_outline': _STR}, ['component','values','at','license_project']),
         _tool("list_assets", "部屋のアセット一覧（asset_id/ファイル名/種類/長さ）。配置ツールに渡すasset_idはここで確認する。", {}),
         _tool("timeline_transcript", "動画の発話内容（文字起こし）をタイムライン時刻つきで読む。内容理解はこれを根拠にする。",
               {"t0": _NUM, "t1": _NUM}),
@@ -511,6 +513,7 @@ async def _dispatch(name: str, a: dict) -> list:
     if name == 'place_envato_component':
         at = float(a['at'])
         request = {k: a[k] for k in ('component','values','at','license_project')}
+        request.update({k: a[k] for k in ('text_size','text_color','text_outline') if a.get(k) not in (None, '')})
         request['font'] = a.get('font') or 'SourceHanSansJP-Bold'
         for track in seq.get('tracks', []):
             for clip in track.get('clips', []):
