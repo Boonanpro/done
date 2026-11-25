@@ -911,6 +911,14 @@ export function VideoReviewEditor({
   const stageRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+  // クリップ・モザイク・書きかけの枠を引きずる間に、タイムラインが横に流れた分（px）。端に寄せて流れた時
+  // （下の「端で流す」）も、ホイールで動かした時も、つかんだ物がカーソルの下に残るように、引きずった量に足す。
+  const dragScrollBaseRef = useRef<{ left: number; top: number } | null>(null);
+  const dragScrollDx = () => {
+    const sc = timelineScrollRef.current;
+    const base = dragScrollBaseRef.current;
+    return sc && base ? sc.scrollLeft - base.left : 0;
+  };
 
   // Desktop shell (WebView2) integration. When hosted in the native shell, the GES engine
   // composites the real video OVER this stage, so we skip the WebCodecs preview here (avoids the
@@ -3312,7 +3320,7 @@ export function VideoReviewEditor({
       if (!timelineDuration) return;
       const rect = timelineRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const delta = ((event.clientX - timelineDrag.startClientX) / rect.width) * timelineDuration;
+      const delta = ((event.clientX - timelineDrag.startClientX + dragScrollDx()) / rect.width) * timelineDuration;
       const length = Math.max(0.1, timelineDrag.originalEnd - timelineDrag.originalStart);
       if (timelineDrag.mode === 'move') {
         const nextStart = clamp(timelineDrag.originalStart + delta, 0, Math.max(0, timelineDuration - length));
@@ -3351,7 +3359,7 @@ export function VideoReviewEditor({
       if (!timelineDuration) return;
       const rect = timelineRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const delta = ((event.clientX - pendingTimelineDrag.startClientX) / rect.width) * timelineDuration;
+      const delta = ((event.clientX - pendingTimelineDrag.startClientX + dragScrollDx()) / rect.width) * timelineDuration;
       const length = Math.max(0.1, pendingTimelineDrag.originalEnd - pendingTimelineDrag.originalStart);
       if (pendingTimelineDrag.mode === 'move') {
         const nextStart = clamp(pendingTimelineDrag.originalStart + delta, 0, Math.max(0, timelineDuration - length));
@@ -4610,7 +4618,7 @@ export function VideoReviewEditor({
     const moveDrag = (event: PointerEvent) => {
       const rect = timelineRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const delta = ((event.clientX - sequenceClipDrag.startClientX) / rect.width) * timelineDuration;
+      const delta = ((event.clientX - sequenceClipDrag.startClientX + dragScrollDx()) / rect.width) * timelineDuration;
       const clip = allSequenceClips.find((item) => item.id === sequenceClipDrag.id);
       if (!clip) return;
       if (altDupRef.current && Math.abs(event.clientX - sequenceClipDrag.startClientX) + Math.abs(event.clientY - sequenceClipDrag.startClientY) >= 3) altDupRef.current.moved = true;
@@ -4961,6 +4969,65 @@ export function VideoReviewEditor({
       window.removeEventListener('pointercancel', up);
     };
   }, [marqueeActive]);
+
+  // 端で流す（2026-11-25 本人「クリップ掴んだ状態でタイムラインの左右端に移動したら左右に移動できるようにしろ」）:
+  // クリップ・モザイク・書きかけの枠を引きずる・端を伸ばす・囲んで選ぶ間、カーソルがタイムラインの左右（上下）の
+  // 端に近づくほど速く流す（Premiere・DaVinci と同じ）。流した後は同じ位置の pointermove をもう一度送り、
+  // つかんだ物を流れた先へ付いてこさせる（引きずった量には dragScrollDx が流れた分を足す）。
+  const anyTimelineDrag = !!sequenceClipDrag || !!timelineDrag || !!pendingTimelineDrag || marqueeActive;
+  useEffect(() => {
+    if (!anyTimelineDrag) return;
+    const sc = timelineScrollRef.current;
+    if (!sc) return;
+    dragScrollBaseRef.current = { left: sc.scrollLeft, top: sc.scrollTop };
+    let last: { x: number; y: number; ctrl: boolean; meta: boolean; alt: boolean; shift: boolean; buttons: number } | null = null;
+    const onMove = (event: PointerEvent) => {
+      if (!event.isTrusted) return;
+      last = { x: event.clientX, y: event.clientY, ctrl: event.ctrlKey, meta: event.metaKey, alt: event.altKey, shift: event.shiftKey, buttons: event.buttons };
+    };
+    window.addEventListener('pointermove', onMove, true);
+    const speed = (into: number, zone: number) => Math.min(60, 3 + (into / zone) * 30 + Math.max(0, into - zone) * 0.5);
+    let raf = 0;
+    const loop = () => {
+      raf = requestAnimationFrame(loop);
+      if (!last) return;
+      const r = sc.getBoundingClientRect();
+      const labelRight = laneLabelColRef.current?.getBoundingClientRect().right;
+      const left = labelRight && labelRight > r.left && labelRight < r.right ? labelRight : r.left;
+      const ZX = Math.min(56, Math.max(24, (r.right - left) * 0.08));
+      const ZY = Math.min(40, Math.max(16, r.height * 0.12));
+      let vx = 0;
+      let vy = 0;
+      if (last.x > r.right - ZX) vx = speed(last.x - (r.right - ZX), ZX);
+      else if (last.x < left + ZX) vx = -speed(left + ZX - last.x, ZX);
+      if (last.y > r.bottom - ZY) vy = speed(last.y - (r.bottom - ZY), ZY) * 0.5;
+      // 上は貼り付いた目盛りの下から（目盛りの分だけ下げて測る）
+      else if (last.y < r.top + 30 + ZY) vy = -speed(r.top + 30 + ZY - last.y, ZY) * 0.5;
+      if (!vx && !vy) return;
+      const bx = sc.scrollLeft;
+      const by = sc.scrollTop;
+      if (vx) sc.scrollLeft = clamp(bx + vx, 0, Math.max(0, sc.scrollWidth - sc.clientWidth));
+      if (vy) sc.scrollTop = clamp(by + vy, 0, Math.max(0, sc.scrollHeight - sc.clientHeight));
+      const dx = sc.scrollLeft - bx;
+      const dy = sc.scrollTop - by;
+      if (!dx && !dy) return;
+      // 囲んで選ぶ枠は画面の座標で持っているので、始めの角を中身と一緒に動かす
+      if (marqueeStartRef.current) {
+        marqueeStartRef.current = { x: marqueeStartRef.current.x - dx, y: marqueeStartRef.current.y - dy };
+        setMarquee((m) => (m ? { ...m, x0: m.x0 - dx, y0: m.y0 - dy } : m));
+      }
+      window.dispatchEvent(new PointerEvent('pointermove', {
+        clientX: last.x, clientY: last.y, ctrlKey: last.ctrl, metaKey: last.meta, altKey: last.alt, shiftKey: last.shift,
+        buttons: last.buttons, bubbles: true, pointerType: 'mouse',
+      }));
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('pointermove', onMove, true);
+      dragScrollBaseRef.current = null;
+    };
+  }, [anyTimelineDrag]);
 
   // 右の調整欄は、選んだ物・書きかけの指示・制作中の知らせがある時だけ出す（空の欄を常に置かない）
   const showInspector = !!sidePanelTop || !!pendingAnnotation || !!selected || !!selectedSequenceClip;
