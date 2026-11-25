@@ -498,6 +498,16 @@ function seqSig(seq: unknown): string {
   return JSON.stringify(canonicalize(seq ?? null));
 }
 
+// タイムラインで dt 秒進んだ時に、素材の中で何秒進むか。速さ（0.55 ならゆっくり）を掛け、止め絵は進まない。
+// 切る・止め絵を挟む・重ねて上書きする・つながった音声を合わせる時に使う（2026-11-25: 速さを掛けずに
+// 切ったので、0.55倍のクリップの後ろ半分が素材の終わりより先を指し、1分36秒の再生が毎回6秒止まった）。
+function sourceAdvance(c: { source_start?: number | null; source_end?: number | null; speed?: number | null }, dt: number): number {
+  const ss = Number(c.source_start || 0);
+  if (c.source_end != null && Number(c.source_end) <= ss) return 0;
+  const sp = Number(c.speed);
+  return dt * (Number.isFinite(sp) && sp > 0 ? sp : 1);
+}
+
 function makeId(): string {
   return `ann_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -1177,7 +1187,12 @@ export function VideoReviewEditor({
   );
   const clipLanes = useMemo(() => computeClipLanes(editSequence?.tracks || []), [editSequence]);
   // プレビューには、段の頭で切った段（非表示・消音）のクリップを渡さない
-  const previewSequence = useMemo(() => dropSwitchedOff(editSequence), [editSequence]);
+  // ダンの手を見せている間、プレビューは途中の形を追わずに、ダンが保存した最後の形を流す。
+  // 途中の形はタイムラインの動きを見せるための物で、切ったクリップの後ろ半分が元のクリップと重なった形などが
+  // 1秒に何度も入れ替わる。それをプレビューが追うと、再生中に絵がカクつき、音が二重に鳴っていた（2026-11-25）。
+  const [previewHold, setPreviewHold] = useState<EditSequence | null>(null);
+  const previewSource = previewHold ?? editSequence;
+  const previewSequence = useMemo(() => dropSwitchedOff(previewSource), [previewSource]);
   const laneSwitches = editSequence?.lane_switches;
   const toggleLaneSwitch = useCallback((key: string) => {
     const field = key.startsWith('visual-') ? 'hidden' : 'muted';
@@ -1520,6 +1535,7 @@ export function VideoReviewEditor({
         if (!finalSeq || !start || seqSig(start) !== lastSyncedSig.current) continue;
         danReplayingRef.current = true;
         setDanReplay(true);
+        setPreviewHold(finalSeq);
         const steps = buildDanSteps(batch.entries, start);
         const stepMs = steps.length > 14 ? Math.max(260, Math.round(9000 / steps.length)) : 700;
         const shown = clipStateMap(start);
@@ -1547,12 +1563,14 @@ export function VideoReviewEditor({
           await wait(stepMs);
         }
         adoptShown(finalSeq);
+        setPreviewHold(null);
         await wait(250);
         danReplayingRef.current = false;
       }
     } finally {
       danReplayingRef.current = false;
       feedRunningRef.current = false;
+      setPreviewHold(null);
       setDanReplay(false);
       setDanTouch({ ids: [], appear: [], vanish: [] });
       window.setTimeout(() => { if (!feedRunningRef.current) { danTargetRef.current = []; setDanCursor(null); } }, 900);
@@ -1915,7 +1933,7 @@ export function VideoReviewEditor({
   const insertFreezeRipple = useCallback((clicked: SequenceClip) => {
     if (!clicked.asset_id) return;
     const t = Number(Math.max(clicked.timeline_start + 0.05, Math.min(currentTime, clicked.timeline_end - 0.05)).toFixed(2));
-    const srcT = Number((Number(clicked.source_start || 0) + (t - clicked.timeline_start)).toFixed(3));
+    const srcT = Number((Number(clicked.source_start || 0) + sourceAdvance(clicked, t - clicked.timeline_start)).toFixed(3));
     const r = (v: number) => Number(v.toFixed(2));
     const F = FREEZE_DUR;
     setEditSequence((current) => {
@@ -1938,8 +1956,8 @@ export function VideoReviewEditor({
           const cs = c.timeline_start, ce = c.timeline_end;
           const isVid = Number.isFinite(c.source_end as number);
           if (cs < t - 1e-3 && ce > t + 1e-3) {
-            out.push({ ...c, timeline_end: r(t), ...(isVid ? { source_end: r(Number(c.source_start || 0) + (t - cs)) } : {}) });
-            out.push({ ...c, id: makeId(), timeline_start: r(t + F), timeline_end: r(ce + F), ...(isVid ? { source_start: r(Number(c.source_start || 0) + (t - cs)) } : {}) });
+            out.push({ ...c, timeline_end: r(t), ...(isVid ? { source_end: r(Number(c.source_start || 0) + sourceAdvance(c, t - cs)) } : {}) });
+            out.push({ ...c, id: makeId(), timeline_start: r(t + F), timeline_end: r(ce + F), ...(isVid ? { source_start: r(Number(c.source_start || 0) + sourceAdvance(c, t - cs)) } : {}) });
           } else if (cs >= t - 1e-3) {
             out.push({ ...c, timeline_start: r(cs + F), timeline_end: r(ce + F) });
           } else {
@@ -2618,9 +2636,9 @@ export function VideoReviewEditor({
             newLink = rightLink.get(c.link_id);
             if (!newLink) { newLink = `lk_${makeId()}`; rightLink.set(c.link_id, newLink); }
           }
-          out.push({ ...c, timeline_end: r(t), ...(isAV ? { source_end: r(Number(c.source_start || 0) + d) } : {}) });
+          out.push({ ...c, timeline_end: r(t), ...(isAV ? { source_end: r(Number(c.source_start || 0) + sourceAdvance(c, d)) } : {}) });
           out.push({ ...c, id: `${c.id}__s_${makeId()}`, timeline_start: r(t),
-            ...(isAV ? { source_start: r(Number(c.source_start || 0) + d) } : {}),
+            ...(isAV ? { source_start: r(Number(c.source_start || 0) + sourceAdvance(c, d)) } : {}),
             ...(newLink ? { link_id: newLink } : {}) });
         }
         return { ...track, clips: out };
@@ -3770,14 +3788,14 @@ export function VideoReviewEditor({
         if (t.as <= bs + 0.001 && t.ae >= be - 0.001) continue; // fully covered -> delete
         if (t.as <= bs + 0.001) {
           const d = t.ae - bs;
-          out.push({ ...c, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + d) } : {}) });
+          out.push({ ...c, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + sourceAdvance(c, d)) } : {}) });
         } else if (t.ae >= be - 0.001) {
           const d = be - t.as;
-          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_end || 0) - d) } : {}) });
+          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_end || 0) - sourceAdvance(c, d)) } : {}) });
         } else {
           const dl = t.as - bs, dr = t.ae - bs;
-          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_start || 0) + dl) } : {}) });
-          out.push({ ...c, id: `${c.id}__r`, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + dr) } : {}) });
+          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_start || 0) + sourceAdvance(c, dl)) } : {}) });
+          out.push({ ...c, id: `${c.id}__r`, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + sourceAdvance(c, dr)) } : {}) });
         }
       }
       return { ...track, clips: out };
@@ -3974,13 +3992,13 @@ export function VideoReviewEditor({
       if (fields.timeline_start !== undefined) {
         pf.timeline_start = r(partner.timeline_start + dStart);
         if (fields.source_start !== undefined && Number.isFinite(partner.source_start as number)) {
-          pf.source_start = r(Number(partner.source_start || 0) + dStart);
+          pf.source_start = r(Number(partner.source_start || 0) + sourceAdvance(partner, dStart));
         }
       }
       if (fields.timeline_end !== undefined) {
         pf.timeline_end = r(partner.timeline_end + dEnd);
         if (fields.source_end !== undefined && Number.isFinite(partner.source_end as number)) {
-          pf.source_end = r(Number(partner.source_end || 0) + dEnd);
+          pf.source_end = r(Number(partner.source_end || 0) + sourceAdvance(partner, dEnd));
         }
       }
       // Collision avoidance: the partner follows the drag automatically (you didn't grab it), so
