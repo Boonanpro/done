@@ -218,3 +218,37 @@ def test_clip_comment_frame_is_saved_without_marks(tmp_path):
     out = tmp_path / 'o.png'
     assert _draw_marks(src, out, {'kind': 'clip', 'data': {'clip_ids': ['x']}})
     assert Image.open(out).getpixel((5, 5)) == (10, 20, 30)
+
+
+@pytest.mark.parametrize('ids, neighbors', [
+    (['b'], {'a', 'c'}),
+    (['c', 'b'], {'a', 'd'}),
+    (['a', 'd'], {'b', 'c'}),
+])
+def test_clip_comment_handoff_includes_cut_context(asset_root, monkeypatch, ids, neighbors):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.services import editor_instructions as ei, editor_rooms, parallel_job_runner
+    clips = [
+        {'id': key, 'timeline_start': i * 2, 'timeline_end': i * 2 + 2, 'text': key}
+        for i, key in enumerate('abcd')
+    ]
+    # On disk the clips need not be in time order. An unrelated lane can overlap them.
+    seq = {'tracks': [{'type': 'caption', 'clips': clips[::-1]},
+                      {'type': 'audio', 'clips': [{'id': 'bg', 'timeline_start': 0, 'timeline_end': 9}]}]}
+    _room(asset_root, 'lib', [], [{'id': 'movie', 'timeline': {'sequence': seq}}])
+    start = AsyncMock(return_value={'id': 'j1'})
+    monkeypatch.setattr(parallel_job_runner, 'start', start)
+    monkeypatch.setattr(editor_rooms, 'ensure_room', AsyncMock(return_value={'room_id': 'ed'}))
+    monkeypatch.setattr(ei, 'frame_path', lambda *args: None)
+    note = 'この字幕だけ直して' if len(ids) == 1 else '説明に合わせて'
+    asyncio.run(ei.send('owner', 'lib', 'movie', {'kind': 'clip', 'note': note, 'data': {'clip_ids': ids}}))
+    task = start.await_args.args[2]
+    targets, context = task.split('- 同じ段で選択の前後にあるクリップ')
+    import re
+    assert set(re.findall(r'id=(\w+)', targets)) == set(ids)
+    assert set(re.findall(r'id=(\w+)', context)) == neighbors
+    assert note in task
+    from app.services import prompt_store
+    assert prompt_store.text('work/editor-clip-comment') in task

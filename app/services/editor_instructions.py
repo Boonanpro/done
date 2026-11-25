@@ -134,28 +134,39 @@ def frame_with_marks(room_id: str, content_id: str, ann: dict[str, Any]) -> str 
 
 
 def clip_lines(room_id: str, content: dict[str, Any] | None, ann: dict[str, Any]) -> list[str]:
-    """クリップへのコメントで選ばれていたクリップの中身（id・段・種類・名前・区間・素材）。"""
+    """選んだクリップと、同じ段で前後につながるクリップを区別して渡す。"""
     data = ann.get('data') if isinstance(ann.get('data'), dict) else {}
     ids = [str(i) for i in (data.get('clip_ids') or []) if i]
     if not ids:
         return []
     seq = ((content or {}).get('timeline') or {}).get('sequence') or {}
-    found: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    selected = set(ids)
+    neighbors: dict[str, None] = {}
+    found = {}
     for tr in seq.get('tracks') or []:
+        lanes = {}
         for c in tr.get('clips') or []:
-            if str(c.get('id')) in ids:
-                found[str(c.get('id'))] = (tr, c)
+            if not c.get('id'):
+                continue
+            cid = str(c['id'])
+            found[cid] = (tr, c)
+            lane = c.get('visual_lane')
+            lanes.setdefault(c.get('layer', 0) if lane is None else lane, []).append(c)
+        for lane_clips in lanes.values():
+            lane_clips.sort(key=lambda c: float(c.get('timeline_start') or 0))
+            for left, right in zip(lane_clips, lane_clips[1:]):
+                l_id, r_id = str(left['id']), str(right['id'])
+                if (l_id in selected) != (r_id in selected):
+                    neighbors[r_id if l_id in selected else l_id] = None
     names: dict[str, str] = {}
     try:
         from app.api import production_asset_routes as par
         names = {str(a.get('id')): str(a.get('filename') or a.get('label') or '') for a in par._read_assets(room_id)}
     except Exception:  # noqa: BLE001
         pass
-    out = []
-    for cid in ids:
+    def describe(cid: str) -> str:
         if cid not in found:
-            out.append(f"  - {cid}（今のタイムラインに見当たらない。消されたか、ほかの作業が作り直した）")
-            continue
+            return f"  - {cid}（今のタイムラインに見当たらない。消されたか、ほかの作業が作り直した）"
         tr, c = found[cid]
         bits = [f"id={cid}", f"段={tr.get('type') or c.get('track') or '?'}"
                 + (f"（{c.get('visual_lane') if c.get('visual_lane') is not None else c.get('layer')}）" if (c.get('visual_lane') is not None or c.get('layer') is not None) else '')]
@@ -167,7 +178,12 @@ def clip_lines(room_id: str, content: dict[str, Any] | None, ann: dict[str, Any]
         if c.get('asset_id'):
             nm = names.get(str(c.get('asset_id')), '')
             bits.append(f"素材 {c.get('asset_id')}{f'（{nm}）' if nm else ''} の {float(c.get('source_start') or 0):.2f}〜{float(c.get('source_end') or 0):.2f}秒")
-        out.append('  - ' + ' / '.join(bits))
+        return '  - ' + ' / '.join(bits)
+
+    out = [describe(cid) for cid in ids]
+    if neighbors:
+        out.append('- 同じ段で選択の前後にあるクリップ（つながりを確認するための情報）:')
+        out.extend(describe(cid) for cid in neighbors)
     return out
 
 
@@ -206,8 +222,9 @@ def build_task(ann: dict[str, Any], content_title: str, image: str | None, previ
     if shape:
         lines.append(f"- 画面の場所: {shape}")
     if kind == 'clip':
-        lines.append("- 本人がタイムラインで選んでコメントしたクリップ（「これ」「このクリップ」「この文字」はこのクリップ。"
-                     "直すのはまずこのクリップで、ほかのクリップは指示がそれを求める時だけ触る）:")
+        from app.services import prompt_store
+        lines.append(prompt_store.text('work/editor-clip-comment'))
+        lines.append("- 本人がタイムラインで選んでコメントしたクリップ:")
         lines += clips or ['  - （クリップの記録なし）']
         if earlier:
             lines.append("- 同じクリップに前に送ったコメントと、その時の結果（今回はその続き。前の直しを消さずに足りない所を直す）:")
