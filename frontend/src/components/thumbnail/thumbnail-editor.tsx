@@ -13,13 +13,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import {
   AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignStartHorizontal, AlignStartVertical,
   AlignHorizontalSpaceAround, AlignVerticalSpaceAround,
-  ArrowLeft, ArrowDown, ArrowUp, Check, Copy, Download, Eye, EyeOff, ImagePlus, LayoutGrid, Loader2, Lock, MessageSquare,
+  ArrowLeft, ArrowDown, ArrowUp, Check, Copy, Download, Eye, EyeOff, ImagePlus, LayoutGrid, Columns3, Loader2, Lock, MessageSquare,
   Frame, GripVertical, MousePointer2, PenLine, Redo2, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Type, Undo2, Unlock, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { PartPreview, ThumbCanvas, partBounds, partCenter, type PartBox } from './thumb-canvas';
 import { ThumbPatterns, type ThumbPatternActions, type ThumbPatternLink } from './thumb-patterns';
+import { ThumbLineup } from './thumb-lineup';
 import { useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
 import {
   THUMB_FONTS, applyFinish, asThumbDoc, finishPart, loadThumbFonts, mergeThumbDocs, newPartId, removeFinish, reorderParts, stepParts,
@@ -218,6 +219,17 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const [jobs, setJobs] = useState<Record<string, JobState>>({});
   const [showInstr, setShowInstr] = useState<string | null>(null);
   const [listView, setListView] = useState(false);
+  // 案を大きく並べて題とメモを書く表示（動画ごとに開いたままを覚える。2026-11-25 本人「同時に並べてサムネとタイトルを決めたい」）
+  const lineupKey = patterns ? `thumb-lineup:${patterns.videoId}` : null;
+  const [lineup, setLineupState] = useState(() => {
+    if (!lineupKey || typeof window === 'undefined') return false;
+    try { return window.localStorage.getItem(lineupKey) === '1'; } catch { return false; }
+  });
+  const setLineup = useCallback((on: boolean) => {
+    setLineupState(on);
+    if (!lineupKey) return;
+    try { if (on) window.localStorage.setItem(lineupKey, '1'); else window.localStorage.removeItem(lineupKey); } catch { /* 覚えられないだけ */ }
+  }, [lineupKey]);
   const [exporting, setExporting] = useState(false);
   const [phoneChatOpen, setPhoneChatOpen] = useState(false);
   const [stageW, setStageW] = useState(800);
@@ -1589,6 +1601,11 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         title="文字より奥の絵（背景・人物）を、並べた形のまま光と影を整えた1枚にする" data-thumb-finish>
         {finishRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}{finishRunning ? '仕上げ中' : '仕上げ'}
       </button>
+      {patterns ? (
+        <button type="button" className={toolBtn(lineup)} onClick={() => setLineup(!lineup)} title={lineup ? '1枚を直す画面に戻る' : '案を大きく並べて、絵の下で題とメモを書いて決める'} data-thumb-lineup-toggle>
+          <Columns3 className="h-3.5 w-3.5" />{lineup ? '並べるのをやめる' : '並べる'}
+        </button>
+      ) : null}
       <button type="button" className={toolBtn(listView)} onClick={() => setListView((v) => !v)} title="YouTube の一覧の大きさで見る" data-thumb-list>
         <LayoutGrid className="h-3.5 w-3.5" />{compact ? '一覧' : '一覧で見る'}
       </button>
@@ -2184,6 +2201,17 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       beforeSwitch={async () => { if (saveTimer.current) window.clearTimeout(saveTimer.current); await flush(); }} />
   ) : null;
 
+  const lineupView = lineup && patterns ? (
+    <ThumbLineup roomId={roomId} videoId={patterns.videoId} currentId={contentId} liveDoc={doc} compact={compact}
+      onOpen={async (p) => {
+        setLineup(false);
+        if (p.id === contentId) return;
+        if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        await flush();
+        patterns.onOpen(p);
+      }} />
+  ) : null;
+
   const listPanel = listView ? <ThumbListView doc={doc} title={title} onClose={() => setListView(false)} compact={compact} /> : null;
 
   const savingText = saving === 'saving' ? '保存中…' : saving === 'error' ? '保存できていません' : '';
@@ -2196,9 +2224,18 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</span>
           <span className="text-[11px] text-muted-foreground">{savingText}</span>
         </div>
+        {lineupView && !phoneChatOpen ? (
+          <>
+            <div className="shrink-0 px-2 pb-1">{tools}</div>
+            <div className="min-h-0 flex-1 border-t border-border">{lineupView}</div>
+          </>
+        ) : (
+          <>
         <div className="shrink-0">{stage}</div>
         {strip ? <div className="shrink-0 border-b border-border">{strip}</div> : null}
-        {phoneChatOpen && phoneChat ? (
+          </>
+        )}
+        {lineupView && !phoneChatOpen ? null : phoneChatOpen && phoneChat ? (
           <div className="min-h-0 flex-1 border-t border-border">
             {phoneChat(<button type="button" onClick={() => setPhoneChatOpen(false)} className="rounded p-1 hover:bg-muted" title="サムネの道具に戻る"><X className="h-4 w-4" /></button>)}
           </div>
@@ -2236,6 +2273,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         <span className="text-[11px] text-muted-foreground">{savingText}</span>
       </header>
       <div className="flex min-h-0 flex-1">
+        {lineupView ? <div className="min-h-0 min-w-0 flex-1 bg-muted/40">{lineupView}</div> : (
+        <>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-muted/40">
           <div className="min-h-0 flex-1 p-6 pb-3">{stage}</div>
           {strip ? <div className="shrink-0 border-t border-border bg-background/70">{strip}</div> : null}
@@ -2247,6 +2286,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           {instrList}
           {layers}
         </aside>
+        </>
+        )}
       </div>
       {listPanel}
       {comparePanel}

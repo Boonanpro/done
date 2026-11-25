@@ -59,6 +59,7 @@ export type ThumbDoc = {
   // 一覧で並べて見る時に横に並べるほかのサムネ（参考や同じチャンネルの過去の動画）
   references?: Array<{ src: string; title?: string; channel?: string }>;
   title?: string; // 一覧で並べた時に下に出す動画の題
+  plan_note?: string; // 「並べる」で絵の下に書く企画のメモ（企画の一言・冒頭5秒など）
   // 本人がペンで書き込んで送った指示（結果は指示の欄にだけ出す）
   instructions?: ThumbInstruction[];
 };

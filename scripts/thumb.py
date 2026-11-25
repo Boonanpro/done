@@ -25,6 +25,8 @@
         保存したら busy <部屋> <作品> "" done で消す（2026-11-24 本人「ダンが何かやる時は必ずその操作を見える化しなさい」）
   python scripts/thumb.py refs    <部屋> <作品> add <絵のURL> "題" "チャンネル" | clear
         「一覧で見る」で横に並べるほかのサムネ（参考・競合・同じチャンネルの過去の動画）
+  python scripts/thumb.py meta    <部屋> <作品> [title="…"] [note="…"]   題（YouTube に出す題）とメモ（企画の一言・冒頭）を読む・書く
+        エディターの「並べる」で各案の絵の下に出る欄。部品には触らない
   python scripts/thumb.py list    <部屋> <動画の作品>                  その動画のサムネ（1枚目が表のサムネ）
   python scripts/thumb.py create  <部屋> "題" <doc.json> --video <動画の作品>
         別の案を頼まれた時だけ、同じ動画のサムネを1枚足す。直す時は今のサムネを set/repaint で直し、作り直さない
@@ -121,6 +123,19 @@ def main() -> None:
         print('隠しました（消してはいない）')
         return
     room, cid = a[1], a[2]
+    if cmd == 'meta':
+        fields = {}
+        for kv in a[3:]:
+            if '=' not in kv:
+                sys.exit(f"key=値 の形で: {kv}")
+            k, v = kv.split('=', 1)
+            fields[{'note': 'plan_note'}.get(k, k)] = v.replace('\\n', '\n')
+        doc = td.set_meta(room, cid, fields, 'dan') if fields else td.get(room, cid)
+        print(f"題: {doc.get('title') or ''}")
+        print(f"メモ: {doc.get('plan_note') or ''}")
+        if fields:
+            print(f"保存しました rev {doc.get('rev')}")
+        return
     if cmd == 'busy':
         # ダンがこれから触る部品をエディターに見せる（自分の Python で絵を作り直す時など、保存まで時間がかかる直しの前に）
         ids = [x for x in (a[3] if len(a) > 3 else '').split(',') if x]

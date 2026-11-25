@@ -9627,6 +9627,24 @@ def save_thumbnail_doc(content_id: str, data: ThumbnailSaveRequest, room_id: str
     return {"rev": doc["rev"]}
 
 
+class ThumbnailMetaRequest(BaseModel):
+    title: str | None = None
+    plan_note: str | None = None
+
+
+@router.patch("/contents/{content_id}/thumbnail/meta")
+def save_thumbnail_meta(content_id: str, data: ThumbnailMetaRequest, room_id: str = Query(...),
+                        current_user: TokenData = Depends(get_current_user)):
+    """「並べて決める」の題とメモの欄。部品はそのままで、この2つだけを書く。"""
+    _room_dir(room_id)
+    from app.services import thumbnail_doc
+    try:
+        doc = thumbnail_doc.set_meta(room_id, content_id, {"title": data.title, "plan_note": data.plan_note}, "owner")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"rev": doc.get("rev"), "title": doc.get("title") or "", "plan_note": doc.get("plan_note") or ""}
+
+
 @router.post("/contents/{content_id}/thumbnails")
 def create_video_thumbnail(content_id: str, room_id: str = Query(...), current_user: TokenData = Depends(get_current_user)):
     """動画の作品にサムネを1枚足す（まだ無い時のエディターの「サムネを作る」）。もうあれば、その1枚目を返す

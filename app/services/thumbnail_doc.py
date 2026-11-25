@@ -113,6 +113,29 @@ def save(room_id: str, content_id: str, doc: dict[str, Any], actor: str = 'owner
     return doc
 
 
+META_KEYS = ('title', 'plan_note')
+
+
+def set_meta(room_id: str, content_id: str, fields: dict[str, Any], actor: str = 'owner') -> dict[str, Any]:
+    """題（YouTube に出す題）とメモ（企画の一言・冒頭など）だけを今の形に書く。部品には触らないので、
+    ダンや開いているエディターの直しと消し合わない（2026-11-25 本人「画像枠の下にテキスト文字を入力したり編集できる項目ほしい。
+    同時に並べてサムネとタイトルを決めたい」）。変わらなければ保存しない。"""
+    patch = {k: str(v) for k, v in (fields or {}).items() if k in META_KEYS and v is not None}
+    if not patch:
+        raise ValueError('title か plan_note を渡してください')
+    for _ in range(6):
+        cur = get(room_id, content_id)
+        if not isinstance(cur.get('parts'), list):
+            cur = {**cur, 'parts': []}
+        if all(str(cur.get(k) or '') == v for k, v in patch.items()):
+            return cur
+        try:
+            return save(room_id, content_id, {**cur, **patch}, actor, base_rev=int(cur.get('rev') or 0))
+        except StaleDoc:
+            continue
+    raise ValueError('ほかの保存が続いていて書けませんでした')
+
+
 # ── ダンが今触っている所（エディターの画面に「ダン」の印と光で出す）──────────────────────────────
 # 2026-11-24 本人「ダンが何かやる時は必ずその操作を見える化しなさい」。保存した直しは画面が前後を比べて動きで見せる。
 # 時間のかかる直し（描き直し・仕上げ）は保存の前から、どの部品を何のために触っているかをここに書いておく。

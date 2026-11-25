@@ -185,3 +185,22 @@ def test_activity_expires(room):
     td.set_activity(room, c['id'], ['bg'], 'x', ttl=30)
     td.clear_activity(room, c['id'])
     assert td.activity(room, c['id']) is None
+
+
+def test_meta_writes_only_title_and_note_without_touching_parts(room):
+    """「並べる」の題とメモの欄: 部品には触らず、ダンが直した部品も消さない。開いている直す画面の古い rev の保存は 409 で重ね直す。"""
+    c = td.create(room, 'サムネ', _doc(room))
+    stale_rev = td.get(room, c['id'])['rev']
+    d = td.get(room, c['id'])
+    d['parts'][1]['text'] = 'ダンの直し'
+    td.save(room, c['id'], d, 'dan')
+    out = td.set_meta(room, c['id'], {'title': 'AIに丸投げした有料note', 'plan_note': '冒頭5秒は売上画面'}, 'owner')
+    now = td.get(room, c['id'])
+    assert now['title'] == 'AIに丸投げした有料note' and now['plan_note'] == '冒頭5秒は売上画面'
+    assert now['parts'][1]['text'] == 'ダンの直し' and out['rev'] == now['rev'] == stale_rev + 2
+    # 同じ中身なら保存しない
+    assert td.set_meta(room, c['id'], {'title': 'AIに丸投げした有料note'})['rev'] == now['rev']
+    with pytest.raises(ValueError):
+        td.set_meta(room, c['id'], {'parts': []})
+    with pytest.raises(td.StaleDoc):
+        td.save(room, c['id'], {**d, 'title': '古い'}, 'owner', base_rev=stale_rev)
