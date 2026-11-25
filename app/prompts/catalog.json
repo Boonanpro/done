@@ -980,6 +980,16 @@
    "kind": "skill"
   },
   {
+   "id": "work/editor-clip-comment",
+   "title": "クリップへのコメントで前後をどう直すか",
+   "place": "editor",
+   "reader": "タイムラインのコメントを受けたダン",
+   "when": "選んだクリップへのコメントを編集担当に渡す時",
+   "source": "app/services/editor_instructions.py の build_task",
+   "kind": "text",
+   "why": "選んだ場面と、その話を引き継ぐ前後の編集を一緒に整える。"
+  },
+  {
    "id": "work/editor-handoff",
    "title": "作業をほかのダンに頼む時",
    "place": "editor",
