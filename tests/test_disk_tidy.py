@@ -191,6 +191,6 @@ def test_browser_caches_only_idle_profiles_and_keep_logins(dt, tmp_path, monkeyp
 def test_generated_build_files_do_not_pin_worktrees(dt):
     """自動で作り直されるファイル（成果物の CSS の読み先など）だけが残っている作業場所は、片付けの邪魔をしない。"""
     for rel in ('frontend/src/app/artifact-sources.css', 'frontend/.next/cache/x', 'frontend/next-env.d.ts'):
-        assert dt.IGNORED_OK.match(rel), rel
-    assert not dt.IGNORED_OK.match('frontend/src/app/page.tsx')
-    assert not dt.IGNORED_OK.match('notes.md')
+        assert dt[0].IGNORED_OK.match(rel), rel
+    assert not dt[0].IGNORED_OK.match('frontend/src/app/page.tsx')
+    assert not dt[0].IGNORED_OK.match('notes.md')
