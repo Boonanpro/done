@@ -173,8 +173,17 @@ function clipSpeed(clip: SequenceClip): number {
   const s = Number(clip.speed);
   return Number.isFinite(s) && s > 0 ? s : 1;
 }
+// 素材の映像の長さ（読み込んだ目次から。素材の住所ごと）と、素材→住所。
+// 範囲が素材の終わりより先を指すクリップ（壊れた切り方の跡など）は、最後の絵で止めて見せる。
+// 素材に無い時刻の絵を待つと、再生を押すたびに6秒止まっていた（2026-11-25 X固定ポスト 1:36）。
+const MEDIA_END_BY_SRC = new Map<string, number>();
+const SRC_BY_ASSET = new Map<string, string>();
 function clipSourceTime(clip: SequenceClip, t: number): number {
-  return Number(clip.source_start || 0) + (isFrozen(clip) ? 0 : (t - clip.timeline_start) * clipSpeed(clip));
+  const raw = Number(clip.source_start || 0) + (isFrozen(clip) ? 0 : (t - clip.timeline_start) * clipSpeed(clip));
+  const src = SRC_BY_ASSET.get(String(clip.asset_id || ''));
+  const end = src ? MEDIA_END_BY_SRC.get(src) : undefined;
+  if (end && end > 0.1 && raw > end - 0.05) return end - 0.05;
+  return raw < 0 ? 0 : raw;
 }
 
 // この段の映像が画面を全部ふさぐか（ふさぐなら、それより下の段は見えない）。
@@ -358,7 +367,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const m = new Map<string, string>();
     for (const a of videoAssets) {
       const s = assetSrc(a);
-      if (s) m.set(a.id, s);
+      if (s) { m.set(a.id, s); SRC_BY_ASSET.set(a.id, s); }
       if (a.alpha === 'stacked') ALPHA_ASSET_IDS.add(a.id); else ALPHA_ASSET_IDS.delete(a.id);
     }
     return m;
@@ -555,7 +564,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const fs = framesRef.current.get(src); // kick off decoder init
       if (fs && !attachedReadyRef.current.has(src)) {
         attachedReadyRef.current.add(src);
-        fs.ready.then(() => { readyUrlsRef.current.add(src); setReadyTick((v) => v + 1); countReady(); }).catch(() => { readyUrlsRef.current.add(src); countReady(); });
+        fs.ready.then(() => { if (fs.duration > 0) MEDIA_END_BY_SRC.set(src, fs.duration); readyUrlsRef.current.add(src); setReadyTick((v) => v + 1); countReady(); }).catch(() => { readyUrlsRef.current.add(src); countReady(); });
       }
     }
     for (const u of [...attachedReadyRef.current]) if (!wanted.has(u)) attachedReadyRef.current.delete(u);

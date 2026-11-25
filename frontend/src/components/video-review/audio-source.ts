@@ -344,6 +344,8 @@ export class AssetAudioSource {
   hasAt(s: number): boolean {
     if (this.failed || this.silent || this.whole) return true;
     if (!this.samples.length) return false;
+    // 素材の終わりより先は無音（待っても読めない。待つと再生を押すたびに6秒止まる）
+    if (this.duration > 0 && s >= this.duration - 0.02) return true;
     return this.blocks.has(Math.floor(Math.max(0, s) / BLOCK_SEC));
   }
 
