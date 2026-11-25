@@ -252,3 +252,19 @@ def test_clip_comment_handoff_includes_cut_context(asset_root, monkeypatch, ids,
     assert note in task
     from app.services import prompt_store
     assert prompt_store.text('work/editor-clip-comment') in task
+
+
+def test_pen_instruction_lists_clips_around_and_asks_to_connect():
+    """ペン・枠の指示にも前後3秒のクリップ（上下の段も）を渡し、指した所だけで終えないよう頼む（2026-11-25 本人）。"""
+    from app.services import editor_instructions as ei
+    seq = {'tracks': [
+        {'type': 'video', 'clips': [{'id': 'v1', 'timeline_start': 0, 'timeline_end': 5},
+                                    {'id': 'v2', 'timeline_start': 5, 'timeline_end': 9},
+                                    {'id': 'far', 'timeline_start': 30, 'timeline_end': 35}]},
+        {'type': 'caption', 'clips': [{'id': 'c1', 'timeline_start': 4, 'timeline_end': 6, 'text': '逆'}]}]}
+    around = ei.neighbor_lines({'timeline': {'sequence': seq}}, 4.5, 5.5)
+    ids = [line.split('id=')[1].split(' ')[0] for line in around]
+    assert ids == ['v1', 'c1', 'v2']
+    task = ei.build_task({'kind': 'pen', 'start': 4.5, 'end': 5.5, 'note': 'ここ'}, 'T', None, around=around)
+    assert '前後3秒にかかるクリップ' in task and '指示の範囲の外は触らない' not in task
+    assert '前後と全体' in task and '前後の切れ目の直前・直後' in task
