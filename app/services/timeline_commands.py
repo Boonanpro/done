@@ -810,7 +810,7 @@ def set_clip_props(seq: dict[str, Any], assets: dict, *, clip_id: str, props: di
     asset_id (+source_start)      swap the picture, timing unchanged
     source_start                  slide the source window, timing unchanged
     """
-    _, _, clip = _find_clip(seq, clip_id)
+    _, track, clip = _find_clip(seq, clip_id)
     if clip is None:
         return {"ok": False, "error": f"clip not found: {clip_id}"}
     if not isinstance(props, dict) or not props:
@@ -842,7 +842,13 @@ def set_clip_props(seq: dict[str, Any], assets: dict, *, clip_id: str, props: di
         a = _asset(assets, str(props["asset_id"]))
         if a is None:
             return {"ok": False, "error": f"asset not found: {props['asset_id']}"}
-        if _asset_is_audio(a) != _asset_is_audio(_asset(assets, str(clip.get("asset_id")))):
+        on_audio_lane = isinstance(track, dict) and track.get("type") == "audio"
+        if on_audio_lane:
+            # The sound of a picture clip (camera audio linked to its video) may be replaced by
+            # a processed voice file; the link to the picture stays (2026-11-25).
+            if _asset_is_image(a):
+                return {"ok": False, "error": "audio lane clips need an audio or video asset"}
+        elif _asset_is_audio(a) != _asset_is_audio(_asset(assets, str(clip.get("asset_id")))):
             return {"ok": False, "error": "cannot swap between audio and visual assets"}
         clip["asset_id"] = str(props["asset_id"])
         if _asset_is_image(a):
