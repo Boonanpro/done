@@ -1,11 +1,12 @@
 ﻿'use client';
 
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
-import { ArrowLeft, ChevronDown, ChevronRight, Clapperboard, Film, Folder, FolderOpen, Image as ImageIcon, Loader2, Music, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronRight, Clapperboard, Film, Folder, FolderOpen, Image as ImageIcon, Loader2, Music, Pencil, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { aiDurationFor, aiModelFor } from '@/lib/ai-video-models';
+import { openEditorInNewWindow } from '@/lib/open-editor-window';
 import { type EditSequence, type ReviewAnnotation, type SessionPayload, VideoReviewEditor } from '@/components/video-review/video-review-editor';
 import { ThumbnailEditor } from '@/components/thumbnail/thumbnail-editor';
 
@@ -186,6 +187,9 @@ export function ProductionWorkspace({
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [previewAsset, setPreviewAsset] = useState<ProductionAsset | null>(null);
   const [creating, setCreating] = useState(false);
+  const [renamingId, setRenamingId] = useState<string | null>(null); // ライブラリで名前を変えている作品
+  const [renameText, setRenameText] = useState('');
+  const [cardMenu, setCardMenu] = useState<{ content: ProductionContent; x: number; y: number } | null>(null); // 作品の右クリック
   const videoAssets = useMemo(() => selectedSourceAssets.filter((asset) => asset.kind === 'video'), [selectedSourceAssets]);
   const primaryVideo = videoAssets.find((asset) => asset.id === activeVideoAssetId) || videoAssets[0] || null;
 
@@ -714,6 +718,28 @@ export function ProductionWorkspace({
     toast.success('制作物を削除しました');
   };
 
+  // ライブラリで作品の名前を変える（2026-11-25 本人「ライブラリからタイムラインごとに名前変えれるようにしてほしい」）
+  const renameContent = async (content: ProductionContent, title: string) => {
+    const next = title.trim();
+    setRenamingId(null);
+    if (!next || next === content.title) return;
+    const res = await fetch(
+      `/api/v1/production-assets/contents/${encodeURIComponent(content.id)}?room_id=${encodeURIComponent(roomId)}`,
+      {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: next }),
+      }
+    );
+    if (!res.ok) {
+      toast.error('名前を変えられませんでした');
+      return;
+    }
+    const saved = (await res.json()) as ProductionContent;
+    setContents((prev) => prev.map((item) => (item.id === content.id ? { ...item, title: saved.title, updated_at: saved.updated_at } : item)));
+  };
+
   // 部品で持つサムネ（背景・人物・文字・矢印が別々）。同じ制作の窓の中で、右の「ダンと制作」と一緒に開く
   // 動画にサムネを1枚足して開く（もうあればその1枚を開く）
   const createThumbFor = async (video: ProductionContent) => {
@@ -1014,66 +1040,19 @@ export function ProductionWorkspace({
     .filter((c) => !(isThumbContent(c) && (c.video_id || c.archived)))
     .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
 
-  // ライブラリ: 左に作品と素材のフォルダ、真ん中に大きく「ダンと制作」（2026-11-12 本人「左のサイドバーに
-  // プロジェクト一覧と素材フォルダ、真ん中にチャットをどでかく、それだけでいい」）。素材を足すのも作品を作るのも会話で頼む。
+  // ライブラリ: 左に素材のフォルダ、右に作品の一覧（名前を変える・消すもここ）。作品は1か所だけに出す
+  // （2026-11-25 本人「サイドバーと右側で役割が重複してるから1つにまとめてほしい。2つもいらない」）。
   return (
     <div className="flex h-full min-h-0 bg-background">
-      <aside className={`${compact ? 'hidden' : 'flex'} w-[280px] shrink-0 flex-col border-r border-border bg-muted/20`} aria-label="作品と素材">
+      <aside className={`${compact ? 'hidden' : 'flex'} w-[280px] shrink-0 flex-col border-r border-border bg-muted/20`} aria-label="素材">
         <div className="flex shrink-0 items-center gap-2 px-4 py-3">
           <Clapperboard className="h-4 w-4 text-primary" />
-          <span className="flex-1 text-sm font-semibold">ダン 制作</span>
+          <span className="flex-1 text-sm font-semibold">素材</span>
           <button type="button" onClick={() => void loadAll()} title="読み直す" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
             <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
           </button>
         </div>
-        <div className="shrink-0 px-3 pb-2">
-          <Button className="w-full" size="sm" onClick={() => void createContent()} disabled={creating}>
-            {creating ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Plus className="mr-1 h-4 w-4" />}
-            新規作成
-          </Button>
-        </div>
         <div className="min-h-0 flex-1 overflow-y-auto pb-4">
-          <div className="px-4 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">作品</div>
-          {sortedContents.length === 0 ? (
-            <p className="px-4 py-2 text-xs text-muted-foreground">まだありません。「新規作成」から始めます。</p>
-          ) : (
-            <ul className="px-2" aria-label="作品">
-              {sortedContents.map((content) => {
-                return (
-                  <li key={content.id} className="group relative">
-                    <button
-                      type="button"
-                      onClick={() => openContent(content)}
-                      className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left hover:bg-muted"
-                    >
-                      <span className="flex h-9 w-14 shrink-0 items-center justify-center overflow-hidden rounded bg-muted">
-                        <ContentCover roomId={roomId} content={content} fallback={<Film className="h-4 w-4 text-muted-foreground" />} />
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13px] font-medium">{content.title}</span>
-                        <span className="block text-[11px] text-muted-foreground">
-                          {content.format === 'thumbnail' ? 'サムネ' : content.format}・{new Date(content.updated_at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}
-                          {content.status === 'running' ? '・作成中' : ''}
-                        </span>
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      title="この作品を消す"
-                      onClick={() => {
-                        if (window.confirm(`作品「${content.title}」を消しますか？`)) void deleteContent(content);
-                      }}
-                      className="absolute right-1.5 top-1/2 hidden -translate-y-1/2 rounded p-1 text-muted-foreground hover:bg-background hover:text-destructive group-hover:block"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-
-          <div className="px-4 pb-1 pt-4 text-[11px] font-semibold text-muted-foreground">素材</div>
           {folders.length === 0 ? (
             <p className="px-4 py-2 text-xs text-muted-foreground">まだありません。作品の画面の「ダンと制作」に貼るか、集めてと頼むと入ります。</p>
           ) : (
@@ -1138,13 +1117,27 @@ export function ProductionWorkspace({
             <span className="text-[11px] text-muted-foreground">タイムラインを開いて、ダンと話しながら作ります</span>
           </button>
           {sortedContents.map((content) => {
+            const renaming = renamingId === content.id;
             return (
-              <button
+              <div
                 key={content.id}
-                type="button"
-                onClick={() => openContent(content)}
-                className="group overflow-hidden rounded-lg border border-border text-left hover:border-primary"
+                className="group relative overflow-hidden rounded-lg border border-border text-left hover:border-primary"
                 data-content-card={content.id}
+                onContextMenu={(event) => {
+                  if (renaming) return;
+                  event.preventDefault();
+                  setCardMenu({ content, x: event.clientX, y: event.clientY });
+                }}
+              >
+              <button
+                type="button"
+                onClick={(event) => {
+                  // Ctrl/⌘ を押しながら押すと別の窓で開く
+                  if (event.metaKey || event.ctrlKey) { event.preventDefault(); openEditorInNewWindow(roomId, content.id); return; }
+                  openContent(content);
+                }}
+                onAuxClick={(event) => { if (event.button === 1) { event.preventDefault(); openEditorInNewWindow(roomId, content.id); } }}
+                className="block w-full text-left"
               >
                 <span className="relative flex aspect-video items-center justify-center overflow-hidden bg-muted">
                   <ContentCover roomId={roomId} content={content} fallback={<Film className="h-6 w-6 text-muted-foreground" />} />
@@ -1175,15 +1168,100 @@ export function ProductionWorkspace({
                     </span>
                   ) : null}
                 </span>
-                <span className="block truncate px-2.5 pt-2 text-[13px] font-medium">{content.title}</span>
-                <span className="block px-2.5 pb-2 text-[11px] text-muted-foreground">
-                  {content.format === 'thumbnail' ? 'サムネ' : content.format}・{new Date(content.updated_at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}
-                </span>
               </button>
+              {renaming ? (
+                <form
+                  className="px-2 pt-1.5"
+                  onSubmit={(event) => { event.preventDefault(); void renameContent(content, renameText); }}
+                >
+                  <input
+                    autoFocus
+                    aria-label="作品の名前"
+                    value={renameText}
+                    onChange={(event) => setRenameText(event.target.value)}
+                    onFocus={(event) => event.currentTarget.select()}
+                    onBlur={() => void renameContent(content, renameText)}
+                    onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); setRenamingId(null); } }}
+                    className="w-full rounded border border-primary bg-background px-1.5 py-0.5 text-[13px] font-medium outline-none"
+                  />
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => openContent(content)}
+                  onDoubleClick={(event) => { event.preventDefault(); setRenameText(content.title); setRenamingId(content.id); }}
+                  className="block w-full truncate px-2.5 pt-2 text-left text-[13px] font-medium"
+                  data-content-title={content.id}
+                >
+                  {content.title}
+                </button>
+              )}
+              <span className="block px-2.5 pb-2 text-[11px] text-muted-foreground">
+                {content.format === 'thumbnail' ? 'サムネ' : content.format}・{new Date(content.updated_at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}
+                {content.status === 'running' ? '・作成中' : ''}
+              </span>
+              {/* 名前を変える・消す（マウスを乗せると出る。スマホの幅では常に出す） */}
+              <span className={`absolute right-1.5 top-1.5 z-10 flex gap-1 transition-opacity ${compact ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`}>
+                <button
+                  type="button"
+                  title="名前を変える"
+                  data-content-rename={content.id}
+                  onClick={() => { setRenameText(content.title); setRenamingId(content.id); }}
+                  className="rounded-md bg-black/65 p-1.5 text-white hover:bg-black/85"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  title="この作品を消す"
+                  data-content-delete={content.id}
+                  onClick={() => {
+                    if (window.confirm(`作品「${content.title}」を消しますか？\nタイムラインごと消えます。素材は消えません。`)) void deleteContent(content);
+                  }}
+                  className="rounded-md bg-black/65 p-1.5 text-white hover:bg-red-600"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </span>
+              </div>
             );
           })}
         </div>
       </main>
+
+      {cardMenu ? (
+        <div
+          className="fixed inset-0 z-50"
+          onClick={() => setCardMenu(null)}
+          onContextMenu={(event) => { event.preventDefault(); setCardMenu(null); }}
+        >
+          <div
+            role="menu"
+            aria-label="作品の操作"
+            data-content-menu={cardMenu.content.id}
+            className="absolute min-w-[200px] overflow-hidden rounded-md border border-border bg-popover py-1 text-[13px] shadow-xl"
+            style={{ left: Math.min(cardMenu.x, window.innerWidth - 210), top: Math.min(cardMenu.y, window.innerHeight - 170) }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {([
+              ['開く', () => openContent(cardMenu.content)],
+              ['新しい窓で開く', () => openEditorInNewWindow(roomId, cardMenu.content.id)],
+              ['名前を変える', () => { setRenameText(cardMenu.content.title); setRenamingId(cardMenu.content.id); }],
+              ['消す', () => { const c = cardMenu.content; if (window.confirm(`作品「${c.title}」を消しますか？\nタイムラインごと消えます。素材は消えません。`)) void deleteContent(c); }],
+            ] as Array<[string, () => void]>).map(([label, run]) => (
+              <button
+                key={label}
+                type="button"
+                role="menuitem"
+                onClick={() => { setCardMenu(null); run(); }}
+                className={`block w-full px-3 py-1.5 text-left hover:bg-muted ${label === '消す' ? 'text-destructive' : ''}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {previewAsset ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-8" onClick={() => setPreviewAsset(null)}>
