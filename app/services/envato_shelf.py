@@ -23,6 +23,7 @@ def catalog():
 
 def describe(item):
     return {**{k: item[k] for k in ('id', 'group', 'name', 'duration', 'url', 'sourceName')},
+            'font': item.get('font', 'SourceHanSansJP-Bold'),
             'fields': [{k: f[k] for k in ('label', 'type', 'example')} for f in item['fields']]}
 
 
