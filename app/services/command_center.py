@@ -257,9 +257,15 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
         # Work asked in this same room (a call in a project chat) reports as the room's own reply: the 「…からの報告」 heading
         # and the link to 「作業の部屋」 pointed at the room the owner was already in (2026-09-27).
         same_room = target_room == room_id
-        message = await chat.send_message(target_room, user_id,
-            task if same_room else f"【{source['title']}からの報告】\n{task}\n\n[作業の部屋](/chat/{source['id']})",
-            sender_type="ai", message_id=report_message_id)
+        if not same_room:
+            # A report from another room is not written into that room's chat (「【…からの報告】」 flooded it, 2026-11-25).
+            # The room's Dan reads it with its next turn and tells the owner only what matters (room_reports).
+            from app.services import room_reports
+            await asyncio.to_thread(room_reports.add, target_room, source_title=source.get('title') or '',
+                                    source_room_id=source.get('id') or '', text=task)
+            return {"reported": True, "kept_for_room_dan": True, "project": summary(target),
+                    "note": "相手の部屋の会話には書かず、その部屋のダンが次に読む報告として残しました。"}
+        message = await chat.send_message(target_room, user_id, task, sender_type="ai", message_id=report_message_id)
         return {"reported": True, "message_id": message["id"], "project": summary(target)}
     if target_room == room_id and action != 'work':
         raise ValueError("今の部屋の作業は自分の作業モードで実行してください")

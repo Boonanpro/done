@@ -363,6 +363,22 @@ def _quiet_job_reports(room_id: str, since) -> list:
     return [line for _, line in sorted(found)]
 
 
+def _room_reports(room_id: str, since) -> list:
+    """Reports from work in other rooms since the last turn (room_reports). They are not in the chat, so this is how
+    the room's Dan learns them; it tells the owner only what the owner needs."""
+    from app.services import room_reports
+    try:
+        floor = parse_datetime(since).timestamp() if since else time.time() - 86400
+    except ValueError:
+        floor = time.time() - 86400
+    try:
+        rows = room_reports.since(room_id, floor)
+    except (OSError, ValueError):
+        return []
+    return [f"チャットに出していない別の部屋からの報告（{r.get('source_title') or ''}、作業の部屋 /chat/{r.get('source_room_id') or ''}）。"
+            f"本人に要る所だけ自分の言葉で伝える: {(r.get('text') or '')[:1500]}" for r in rows]
+
+
 def _fetch_unseen_voice_digest(room_id: str) -> str:
     """直近のダン（チャットのターン）の返事より後に部屋へ入った、ダンがまだ読んでいない出来事をまとめる。
     音声会話（🎙）と、作業の報告（ターン外で部屋に書かれたダンの行）。
@@ -411,6 +427,7 @@ def _fetch_unseen_voice_digest(room_id: str) -> str:
                 lines.append(f"作業の報告（部屋に届いた分）: {c[:1200]}")
         since = msgs[last_turn_idx].get("created_at") if last_turn_idx >= 0 else None
         lines += _quiet_job_reports(room_id, since)
+        lines += _room_reports(room_id, since)
         if not lines:
             return ""
         digest = "\n".join(lines)
