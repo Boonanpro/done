@@ -2429,11 +2429,24 @@ export function VideoReviewEditor({
   const clipCommentState = useMemo(() => {
     const m = new Map<string, ClipCommentState>();
     for (const [id, list] of clipCommentsByClip) {
-      const jobs = list.map((a) => instrJobOf(a, instrJobs)).filter((j): j is InstrJob => !!j);
+      // 解決済みにしたコメントは印に数えない（チェックを押すと消える）
+      const jobs = list.filter((a) => !(a.data as { resolved?: boolean } | undefined)?.resolved)
+        .map((a) => instrJobOf(a, instrJobs)).filter((j): j is InstrJob => !!j);
       if (!jobs.length) continue;
       m.set(id, jobs.some((j) => j.active) ? 'active' : jobs[jobs.length - 1].state === 'completed' ? 'done' : 'failed');
     }
     return m;
+  }, [clipCommentsByClip, instrJobs]);
+  // 緑のチェックを押した時: そのクリップの、もう作業の終わったコメントを解決済みにする（記録と結果は残し、印と欄から外す）
+  const resolveClipComments = useCallback((clipId: string) => {
+    const ids = new Set((clipCommentsByClip.get(clipId) || [])
+      .filter((a) => !instrJobOf(a, instrJobs)?.active)
+      .map((a) => a.id));
+    if (!ids.size) return;
+    const at = new Date().toISOString();
+    setAnnotations((prev) => prev.map((a) => (ids.has(a.id)
+      ? { ...a, data: { ...(a.data || {}), resolved: true, resolved_at: at } }
+      : a)));
   }, [clipCommentsByClip, instrJobs]);
   const sendClipComment = useCallback(async (clipIds: string[], text: string): Promise<boolean> => {
     const note = text.trim();
@@ -4445,8 +4458,9 @@ export function VideoReviewEditor({
   }, [timelineLanes]);
   const laneClipLookupRef = useRef(laneClipLookup);
   laneClipLookupRef.current = laneClipLookup;
-  const clipFns = useRef<ClipBoxFns>({ startDrag: () => {}, openMenu: () => {}, focusClip: () => {}, setVolume: () => {} });
+  const clipFns = useRef<ClipBoxFns>({ startDrag: () => {}, openMenu: () => {}, focusClip: () => {}, setVolume: () => {}, resolveComment: () => {} });
   clipFns.current = {
+    resolveComment: (id) => resolveClipComments(id),
     startDrag: (event, id, mode) => {
       const hit = laneClipLookup.get(id);
       if (hit) startSequenceClipDrag(event, hit.clip, mode);
@@ -5850,6 +5864,7 @@ export function VideoReviewEditor({
                     const text = clipCommentDraft.key === key ? clipCommentDraft.text : '';
                     const seen = new Set<string>();
                     const history = ids.flatMap((id) => clipCommentsByClip.get(id) || [])
+                      .filter((a) => !(a.data as { resolved?: boolean } | undefined)?.resolved)
                       .filter((a) => (seen.has(a.id) ? false : (seen.add(a.id), true)))
                       .slice(-5);
                     const send = async () => {
@@ -5870,6 +5885,13 @@ export function VideoReviewEditor({
                               <div className="mt-0.5 flex items-center gap-1 font-medium">
                                 {job?.active ? <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" /> : null}
                                 {!job ? '送っています…' : job.active ? (job.state === 'running' ? 'ダンが作業中' : '順番待ち') : job.state === 'completed' ? '✓ ダンが直しました' : `止まりました（${job.label}）`}
+                                {job && !job.active ? (
+                                  <button type="button" data-clip-comment-resolve className="ml-auto rounded border border-emerald-400/60 px-1 text-[10px] text-emerald-300 hover:bg-emerald-500/20"
+                                    title="解決済みにして、クリップの印とこの欄から外します"
+                                    onClick={() => setAnnotations((prev) => prev.map((x) => (x.id === a.id ? { ...x, data: { ...(x.data || {}), resolved: true, resolved_at: new Date().toISOString() } } : x)))}>
+                                    解決済みにする
+                                  </button>
+                                ) : null}
                               </div>
                               {job?.active && job.progress ? <div className="mt-0.5 text-muted-foreground">{job.progress}</div> : null}
                               {job && !job.active && job.result ? <div className="mt-0.5 line-clamp-4 whitespace-pre-wrap text-muted-foreground">{job.result}</div> : null}
