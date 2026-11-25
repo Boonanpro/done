@@ -1,6 +1,6 @@
 // メインの段を詰めて直す（2026-11-25 本人）。node --experimental-strip-types で動かす。
 import assert from 'node:assert/strict';
-import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, rippleDeleteMain, rippleMove, rippleTrim, type RLane, type RSeq } from './ripple-edit.ts';
+import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, riderIds, rippleDeleteMain, rippleMove, rippleTrim, type RLane, type RSeq } from './ripple-edit.ts';
 
 // メイン: A[0-10] B[10-20] C[20-30]（声つき）。字幕: B の上 12-14、C の上 22-25。BGM 0-30。モザイク 15-18（B の上）。
 const mk = (): { seq: RSeq; lanes: Map<string, RLane> } => {
@@ -136,5 +136,48 @@ const span = (s: RSeq, id: string) => { const c = clip(s, id); return c ? [c.tim
   assert.deepEqual(span(r.seq, 'C'), [10, 20]);
   assert.deepEqual(span(r.seq, 'capB'), [10, 12]);
   assert.deepEqual(span(r.seq, 'capC'), [12, 15]);
+}
+// 長い映像に、カメラの音を消して別に録った声が乗っている所（2026-11-25 スヤさん2本目: 29秒の映像と29秒の声）。
+// 写す・並べ替える時は、その声と字幕も一緒に連れて行く。BGM と、隣のクリップに乗っている物は連れて行かない。
+const mkLong = (): { seq: RSeq; lanes: Map<string, RLane> } => {
+  const seq: RSeq = {
+    tracks: [
+      { type: 'video', clips: [
+        { id: 'A', asset_id: 'x', timeline_start: 0, timeline_end: 30, source_start: 100, source_end: 130, link_id: 'la' },
+        { id: 'B', asset_id: 'x', timeline_start: 30, timeline_end: 40, source_start: 200, source_end: 210, link_id: 'lb' },
+      ] },
+      { type: 'audio', clips: [
+        { id: 'a', asset_id: 'x', timeline_start: 0, timeline_end: 30, source_start: 100, source_end: 130, link_id: 'la', volume: 0, layer: 0 },
+        { id: 'b', asset_id: 'x', timeline_start: 30, timeline_end: 40, source_start: 200, source_end: 210, link_id: 'lb', volume: 0, layer: 0 },
+        { id: 'voiceA', asset_id: 'v', role: 'voice', timeline_start: 0, timeline_end: 29.9, source_start: 0, source_end: 29.9, layer: 1 },
+        { id: 'voiceB', asset_id: 'v', role: 'voice', timeline_start: 29.9, timeline_end: 40, source_start: 29.9, source_end: 40, layer: 1 },
+        { id: 'bgm', asset_id: 'm', role: 'bgm', timeline_start: 0, timeline_end: 40, source_start: 0, source_end: 40, layer: 2 },
+      ] },
+      { type: 'caption', clips: [
+        { id: 'capA', text: 'A', timeline_start: 5, timeline_end: 8, source_start: 0, source_end: 0 },
+        { id: 'capAB', text: 'AB', timeline_start: 28, timeline_end: 33, source_start: 0, source_end: 0 },
+      ] },
+    ],
+  };
+  const lanes = new Map<string, RLane>([
+    ['A', { zone: 'visual', layer: 0 }], ['B', { zone: 'visual', layer: 0 }],
+    ['a', { zone: 'audio', layer: 0 }], ['b', { zone: 'audio', layer: 0 }], ['voiceA', { zone: 'audio', layer: 1 }],
+    ['voiceB', { zone: 'audio', layer: 1 }], ['bgm', { zone: 'audio', layer: 2 }],
+    ['capA', { zone: 'visual', layer: 2 }], ['capAB', { zone: 'visual', layer: 2 }],
+  ]);
+  return { seq, lanes };
+};
+{
+  const { seq, lanes } = mkLong();
+  assert.deepEqual(riderIds(seq, ['A', 'a'], lanes, 0).sort(), ['capA', 'voiceA']);
+  assert.deepEqual(riderIds(seq, ['B', 'b'], lanes, 0).sort(), ['capAB', 'voiceB']);
+  assert.deepEqual(riderIds(seq, ['voiceA'], lanes, 0), []); // メインの映像を選んでいなければ連れて行かない
+  // 並べ替え: A を B の後ろ（詰めた後の 10）へ → 29.9秒の声も字幕も A と一緒に動き、BGM は動かない
+  const r = rippleMove(seq, [], ['A', 'a'], 10, lanes, 0);
+  assert.deepEqual(span(r.seq, 'A'), [10, 40]);
+  assert.deepEqual(span(r.seq, 'voiceA'), [10, 39.9]);
+  assert.deepEqual(span(r.seq, 'capA'), [15, 18]);
+  assert.deepEqual(span(r.seq, 'B'), [0, 10]);
+  assert.deepEqual(span(r.seq, 'bgm'), [0, 40]);
 }
 console.log('ripple-edit ok');

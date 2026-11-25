@@ -16,6 +16,8 @@ import {
   Check,
   Eye,
   EyeOff,
+  Lock,
+  LockOpen,
   Volume2,
   VolumeX,
   ChevronDown,
@@ -60,7 +62,8 @@ import { MotionPanel } from './motion-panel';
 import { isOneForm, motionAt, setKeyAt, sortedKeys, type MotionKey } from './placement';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
-import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, rippleDeleteMain, rippleMove, rippleTrim } from './ripple-edit';
+import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, riderIds, rippleDeleteMain, rippleMoveGroups, rippleTrim } from './ripple-edit';
+import { applyRoll, applySlide, applySlip, editPoints, insertBlock, overwriteMoved, resolveFree, touchingNeighbor, trimRoom, withPartners, type Placement } from './timeline-ops';
 
 /** A form control whose value is a timeline setting (slider, number box, select, checkbox…), not
  *  free text. `typing` = only the ones still being typed into (number boxes). */
@@ -553,6 +556,22 @@ type SequenceClipDrag = {
   originalSourceEnd: number;
 };
 
+/** 写したクリップ（コピー・切り取り）。main = 写した時にメインの段にあった物（割り込んで貼る時の目安）。 */
+type ClipClipboard = {
+  clips: Array<{ clip: SequenceClip; trackId: string; trackType: string; zone: 'visual' | 'audio'; layer: number; rider?: boolean; main?: boolean }>;
+  annotations: ReviewAnnotation[];
+  origin: number;
+  end: number;
+} | null;
+
+/** 写しを置く時に合わせる所。メインの映像を写していればその頭と終わり（乗っている字幕が少し前から始まっていても、
+ *  メインの映像を赤線・つなぎ目にぴったり置く）、無ければ写した物全体。 */
+function clipboardAnchor(src: NonNullable<ClipClipboard>): { origin: number; end: number } {
+  const mains = src.clips.filter((x) => x.main);
+  if (!mains.length) return { origin: src.origin, end: src.end };
+  return { origin: Math.min(...mains.map((x) => x.clip.timeline_start)), end: Math.max(...mains.map((x) => x.clip.timeline_end)) };
+}
+
 type DraftAnnotation = Omit<ReviewAnnotation, 'id' | 'created_at'>;
 
 function trackForIntent(intent: string): 'audio' | 'visual' {
@@ -630,7 +649,7 @@ export function computeClipLanes(tracks: Array<{ type?: string | null; clips?: S
   return out;
 }
 
-export type LaneSwitches = Record<string, { hidden?: boolean; muted?: boolean }>;
+export type LaneSwitches = Record<string, { hidden?: boolean; muted?: boolean; locked?: boolean }>;
 
 /** その段が切ってあるか（映像の段は非表示、音声の段は消音）。 */
 export function laneSwitchedOff(sw: LaneSwitches | null | undefined, key: string): boolean {
@@ -1140,11 +1159,30 @@ export function VideoReviewEditor({
   });
   useEffect(() => { try { window.localStorage.setItem('dan-editor-ripple', rippleOn ? '1' : '0'); } catch { /* ignore */ } }, [rippleOn]);
   // 詰めて動かしている間: 動かすメインのクリップ（先頭）と相方、引きずり始めのモザイクなどの一覧
-  const rippleDragRef = useRef<{ ids: string[]; anns: ReviewAnnotation[] } | null>(null);
+  const rippleDragRef = useRef<{ ids: string[]; groups: string[][]; anns: ReviewAnnotation[] } | null>(null);
   // 並べ替えで差し込む所（メインの段に黄色い線）
   const [rippleMarker, setRippleMarker] = useState<number | null>(null);
   const [gapMenu, setGapMenu] = useState<{ x: number; y: number; gap: [number, number] } | null>(null);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
+  // タイムラインの道具（Premiere・DaVinci と同じ）: 選択 V／切る C／ロール N／スリップ Y／スライド U（2026-11-25 本人）
+  const [timelineTool, setTimelineTool] = useState<'select' | 'razor' | 'roll' | 'slip' | 'slide'>('select');
+  const timelineToolRef = useRef(timelineTool);
+  timelineToolRef.current = timelineTool;
+  // 段の高さ（1・1.5・2倍）。次に開いた時も残す
+  const [laneScale, setLaneScale] = useState(() => {
+    try { const v = Number(window.localStorage.getItem('dan-editor-lane-scale')); return v === 1.5 || v === 2 ? v : 1; } catch { return 1; }
+  });
+  useEffect(() => { try { window.localStorage.setItem('dan-editor-lane-scale', String(laneScale)); } catch { /* ignore */ } }, [laneScale]);
+  // 引きずっている間は段の並びを止める（動かすたびに空の段が増えて、つかんでいる段の位置がずれないように）
+  const [laneFreeze, setLaneFreeze] = useState<{ visual: number[]; audio: number[] } | null>(null);
+  // 引きずる間に Ctrl/⌘ を押している＝その回だけ上書き（重なった相手を切り詰める・消す）。離していれば重ならない段へ逃がす
+  const overwriteRef = useRef(false);
+  // ロール・スリップ・スライドで引きずっている間の元の形
+  const toolDragRef = useRef<{ tool: 'roll' | 'slip' | 'slide'; snap: EditSequence; ids: string[]; prevIds: string[]; nextIds: string[]; room: { minStart: number; maxEnd: number } } | null>(null);
+  // 写しを置く処理（後ろで作る。前で使う所のために ref で持つ）
+  const placeClipCopiesRef = useRef<((src: NonNullable<ClipClipboard>, shift: number, mode: 'free' | 'insert' | 'overwrite' | 'none') => unknown) | null>(null);
+  // Alt で写しを引きずってメインに割り込む間の元の形
+  const altInsertRef = useRef<{ src: NonNullable<ClipClipboard>; before: EditSequence | null; anns: ReviewAnnotation[]; moved: boolean; lastIds: string[] } | null>(null);
   const [openNoteKey, setOpenNoteKey] = useState<string | null>(null);
   // 送った指示（ピン・ペン・枠・素材の枠）の進み具合と、置いた直後に言葉の欄へ入る印（sendInstruction の所に説明）
   const [instrJobs, setInstrJobs] = useState<Record<string, InstrJob>>({});
@@ -1230,6 +1268,39 @@ export function VideoReviewEditor({
     });
   }, []);
 
+  // 段の鍵（2026-11-25）: 鍵を掛けた段のクリップは選べない・動かせない・消せない。詰める時は一緒にずれる（ずれない）。
+  const lockedLanes = useMemo(() => new Set(Object.entries(laneSwitches || {}).filter(([, v]) => v?.locked).map(([k]) => k)), [laneSwitches]);
+  const isLockedClip = useCallback((id: string) => {
+    if (!lockedLanes.size) return false;
+    const l = clipLanes.get(String(id));
+    return !!l && lockedLanes.has(`${l.zone}-${l.layer}`);
+  }, [clipLanes, lockedLanes]);
+  const isLockedClipRef = useRef(isLockedClip);
+  isLockedClipRef.current = isLockedClip;
+  const toggleLaneLock = useCallback((key: string) => {
+    setEditSequence((current) => {
+      if (!current) return current;
+      const sw: LaneSwitches = { ...(current.lane_switches || {}) };
+      const now = { ...(sw[key] || {}) };
+      if (now.locked) delete now.locked;
+      else now.locked = true;
+      if (Object.keys(now).length) sw[key] = now;
+      else delete sw[key];
+      const next: EditSequence = { ...current, lane_switches: sw };
+      if (!Object.keys(sw).length) delete next.lane_switches;
+      return next;
+    });
+  }, []);
+  // 段に並んでいるクリップ以外の物（モザイク・指示の箱）。クリップを置く時に重ねない
+  const annPlacements = useMemo<Placement[]>(() => annotations.filter((a) => a.kind !== 'clip').map((a) => {
+    const layer = Number((a.data as { layer?: number } | undefined)?.layer);
+    return { id: a.id, zone: trackForIntent(a.intent), layer: Number.isFinite(layer) ? layer : 5, start: a.start, end: a.end ?? a.start + 0.2 };
+  }), [annotations]);
+  const annPlacementsRef = useRef(annPlacements);
+  annPlacementsRef.current = annPlacements;
+  const lockedLanesRef = useRef(lockedLanes);
+  lockedLanesRef.current = lockedLanes;
+
   // NLE-style ordered lanes derived from the sequence tracks + annotations.
   // Order top→bottom: visual instructions, captions, effects, overlay video
   // layers, base video (middle), audio lanes by role, audio instructions.
@@ -1288,7 +1359,8 @@ export function VideoReviewEditor({
       // fresh spare appears. This is why video/audio clips couldn't move before: with only one
       // used lane there was no target.
       const maxUsed = layers.size ? Math.max(...layers) : 0;
-      for (let k = 1; k <= extraLanes[zone] + 1; k += 1) layers.add(maxUsed + k);
+      if (laneFreeze) for (const l of laneFreeze[zone]) layers.add(l);
+      else for (let k = 1; k <= extraLanes[zone] + 1; k += 1) layers.add(maxUsed + k);
       if (layers.size === 0) layers.add(0);
       const ordered = Array.from(layers).sort((x, y) => (zone === 'visual' ? y - x : x - y));
       return ordered.map((layer, i) => {
@@ -1300,14 +1372,14 @@ export function VideoReviewEditor({
           zone,
           layer,
           // 音は波形が見える高さに、映像は絵が見える高さに（2026-11-13 本人「波形を出すなら縦幅を大きく」）
-          height: zone === 'audio' ? 44 : hasVideo ? 44 : 28,
+          height: Math.round((zone === 'audio' ? 44 : hasVideo ? 44 : 28) * laneScale),
           items,
         };
       });
     };
 
     return [...buildZone('visual'), ...buildZone('audio')];
-  }, [editSequence, annotations, extraLanes]);
+  }, [editSequence, annotations, extraLanes, laneFreeze, laneScale]);
 
   // Y-geometry of each lane within the tracks column, for vertical drag hit-testing.
   const laneGeom = useMemo(() => {
@@ -2699,7 +2771,7 @@ export function VideoReviewEditor({
   // selection we cut only those clips (+ their A/V-link partner); with no selection we cut
   // every clip under the playhead. Each pair of right-halves gets a fresh shared link_id so
   // A/V partners stay paired on both sides of the cut. Total duration is unchanged.
-  const splitClipAtTime = useCallback((t: number, clipIds?: Set<string>) => {
+  const splitClipAtTime = useCallback((t: number, clipIds?: Set<string>, locked?: Set<string>) => {
     setEditSequence((current) => {
       if (!current) return current;
       const r = (v: number) => Number(v.toFixed(2));
@@ -2713,7 +2785,10 @@ export function VideoReviewEditor({
           allClips.forEach((c) => { if (c.link_id && linkIds.has(c.link_id)) targets.add(c.id); });
         }
       } else {
-        targets = new Set(allClips.filter(inside).map((c) => c.id));
+        // 何も選んでいない時は、その時刻の全部の段を切る（鍵を掛けた段は切らない）
+        const lanesNow = locked && locked.size ? computeClipLanes(current.tracks || []) : null;
+        const open = (c: SequenceClip) => { const l = lanesNow?.get(String(c.id)); return !l || !locked!.has(`${l.zone}-${l.layer}`); };
+        targets = new Set(allClips.filter((c) => inside(c) && open(c)).map((c) => c.id));
       }
       if (targets.size === 0) return current;
       const rightLink = new Map<string, string>(); // original link_id -> new link_id for right halves
@@ -2731,9 +2806,11 @@ export function VideoReviewEditor({
             if (!newLink) { newLink = `lk_${makeId()}`; rightLink.set(c.link_id, newLink); }
           }
           out.push({ ...c, timeline_end: r(t), ...(isAV ? { source_end: r(Number(c.source_start || 0) + sourceAdvance(c, d)) } : {}) });
+          // 動きのキーはクリップの頭からの秒なので、右側は切った所からの秒に直す
+          const keys = c.motion_keys && c.motion_keys.length ? { motion_keys: c.motion_keys.map((k) => ({ ...k, t: Number((k.t - d).toFixed(4)) })) } : {};
           out.push({ ...c, id: `${c.id}__s_${makeId()}`, timeline_start: r(t),
             ...(isAV ? { source_start: r(Number(c.source_start || 0) + sourceAdvance(c, d)) } : {}),
-            ...(newLink ? { link_id: newLink } : {}) });
+            ...(newLink ? { link_id: newLink } : {}), ...keys });
         }
         return { ...track, clips: out };
       });
@@ -2776,8 +2853,8 @@ export function VideoReviewEditor({
     const clipIds = new Set(selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
     if (annIds.size > 0) splitAnnotationAtTime(currentTime, annIds);
     // Split clips when clips are selected, or (default) when nothing at all is selected.
-    if (clipIds.size > 0 || annIds.size === 0) splitClipAtTime(currentTime, clipIds);
-  }, [currentTime, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds, splitAnnotationAtTime, splitClipAtTime]);
+    if (clipIds.size > 0 || annIds.size === 0) splitClipAtTime(currentTime, clipIds, lockedLanes);
+  }, [currentTime, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds, splitAnnotationAtTime, splitClipAtTime, lockedLanes]);
 
   // After undo/redo the selection stays on what still exists, so the side panel (サイズ・位置 etc.)
   // stays open on the clip being adjusted (11/17 本人: 位置・サイズを直して Ctrl+Z で戻したい).
@@ -2816,6 +2893,103 @@ export function VideoReviewEditor({
     setDragCrop(null);
     keepLiveSelection(restored);
   }, [annotations, editSequence, flushHistory, keepLiveSelection]);
+
+  // ── キーで編集（2026-11-25 本人「Premiere や DaVinci の基本の編集機能を一通り」）──
+  const selectedClipIdList = useCallback(() => (
+    selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []
+  ), [selectedSequenceClipId, selectedSequenceClipIds]);
+
+  // Alt+←/→: 選んだクリップを1コマ（Shift で10コマ）動かす。隣のクリップに当たったらそこで止まる（消さない）
+  // 引きずって1コマ動かしたのと同じ: 隣に重なるなら空いている段へ逃げる（Ctrl/⌘ も押せば上書き）
+  const nudgeSelected = useCallback((frames: number, overwrite = false) => {
+    if (!editSequence) return;
+    const sel = selectedClipIdList().filter((id) => !isLockedClip(id));
+    if (!sel.length) return;
+    let ids = linkAV ? withPartners(editSequence, sel) : sel;
+    if (linkAV) ids = [...ids, ...riderIds(editSequence, ids, clipLanes, mainLayer)];
+    const set = new Set(ids);
+    const cs = allSequenceClips.filter((c) => set.has(c.id));
+    if (!cs.length) return;
+    const d = Math.max(frames / fps, -Math.min(...cs.map((c) => c.timeline_start)));
+    if (Math.abs(d) < 1e-6) return;
+    const r = (v: number) => Number(v.toFixed(3));
+    const moved = new Map<string, Partial<SequenceClip>>();
+    for (const c of cs) moved.set(c.id, { timeline_start: r(c.timeline_start + d), timeline_end: r(c.timeline_end + d) });
+    const map = moved as unknown as Map<string, Record<string, unknown>>;
+    const placed = overwrite ? map : resolveFree(editSequence, map, clipLanes, { locked: lockedLanes, extra: annPlacements });
+    setEditSequence(overwriteMoved(editSequence, placed, clipLanes) as EditSequence);
+  }, [editSequence, selectedClipIdList, isLockedClip, linkAV, clipLanes, mainLayer, fps, annPlacements, allSequenceClips, lockedLanes]);
+
+  // Alt+↑/↓: 選んだクリップを1つ上・下の段へ（空いている段まで。一番上より上は新しい段）
+  const moveSelectedLanes = useCallback((up: boolean) => {
+    if (!editSequence) return;
+    const sel = selectedClipIdList().filter((id) => !isLockedClip(id));
+    if (!sel.length) return;
+    const set = new Set(sel);
+    const obst: Placement[] = [...annPlacements];
+    for (const c of allSequenceClips) {
+      if (set.has(c.id)) continue;
+      const l = clipLanes.get(String(c.id));
+      if (l) obst.push({ id: c.id, zone: l.zone, layer: l.layer, start: c.timeline_start, end: c.timeline_end });
+    }
+    const moved = new Map<string, Partial<SequenceClip>>();
+    for (const c of allSequenceClips) {
+      if (!set.has(c.id)) continue;
+      const l = clipLanes.get(String(c.id));
+      if (!l) continue;
+      const step = l.zone === 'visual' ? (up ? 1 : -1) : (up ? -1 : 1);
+      const busy = (L: number) => lockedLanes.has(`${l.zone}-${L}`) || obst.some((o) => o.zone === l.zone && o.layer === L && o.end > c.timeline_start + 0.01 && o.start < c.timeline_end - 0.01);
+      let L = l.layer + step;
+      let guard = 0;
+      while (L >= 0 && busy(L) && guard++ < 100) L += step;
+      if (L < 0) continue;
+      moved.set(c.id, { layer: L });
+      obst.push({ id: c.id, zone: l.zone, layer: L, start: c.timeline_start, end: c.timeline_end });
+    }
+    if (!moved.size) { toast.message('その向きに空いている段がありません'); return; }
+    setEditSequence(overwriteMoved(editSequence, moved as unknown as Map<string, Record<string, unknown>>, clipLanes) as EditSequence);
+  }, [editSequence, selectedClipIdList, isLockedClip, allSequenceClips, clipLanes, annPlacements, lockedLanes]);
+
+  // ↑/↓: 前・次のつなぎ目（クリップの頭と終わり）へ
+  const jumpEditPoint = useCallback((dir: 1 | -1) => {
+    const pts = editPoints(editSequence || {});
+    const t = liveTimeRef.current;
+    const next = dir > 0 ? pts.find((p) => p > t + 1e-3) : [...pts].reverse().find((p) => p < t - 1e-3);
+    if (next === undefined) return;
+    setPlaying(false);
+    seekTimeline(next);
+  }, [editSequence, seekTimeline]);
+
+  // A: 赤線から後ろのクリップを全部の段で選ぶ／Shift+A: 赤線より前を選ぶ／Ctrl+A: 全部
+  const selectByPlayhead = useCallback((which: 'after' | 'before' | 'all') => {
+    const t = liveTimeRef.current;
+    const ids = allSequenceClips.filter((c) => !isLockedClip(c.id) && (
+      which === 'all' ? true : which === 'after' ? c.timeline_start >= t - 0.01 : c.timeline_end <= t + 0.01
+    )).map((c) => c.id);
+    setSelectedId(null);
+    setSelectedIds([]);
+    setSelectedSequenceClipIds(ids);
+    setSelectedSequenceClipId(ids.length ? ids[ids.length - 1] : null);
+    if (!ids.length) toast.message('選べるクリップがありません');
+  }, [allSequenceClips, isLockedClip]);
+
+  // Ctrl+L: 選んだクリップの映像と音声をつなぐ・つなぎを外す（Premiere と同じ）
+  const toggleLinkSelected = useCallback(() => {
+    const sel = new Set(selectedClipIdList());
+    if (!sel.size || !editSequence) return;
+    const chosen = allSequenceClips.filter((c) => sel.has(c.id));
+    const links = new Set(chosen.map((c) => c.link_id).filter((x): x is string => !!x));
+    if (links.size) {
+      setEditSequence((cur) => cur && ({ ...cur, tracks: (cur.tracks || []).map((t) => ({ ...t, clips: (t.clips || []).map((c) => (c.link_id && links.has(c.link_id) ? { ...c, link_id: null } : c)) })) }));
+      toast.message('つなぎを外しました（映像と音声を別々に動かせます）');
+    } else if (chosen.length >= 2) {
+      const id = `lk_${makeId()}`;
+      setEditSequence((cur) => cur && ({ ...cur, tracks: (cur.tracks || []).map((t) => ({ ...t, clips: (t.clips || []).map((c) => (sel.has(c.id) ? { ...c, link_id: id } : c)) })) }));
+      toast.message('つなぎました（一緒に動きます）');
+    } else {
+      toast.message('つなぐには2つ以上のクリップを選んでください');
+    }
+  }, [selectedClipIdList, editSequence, allSequenceClips]);
 
   // キーボードは最後に押した所に効かせる（2026-11-13 本人）: チャットの入力欄に文字を打った後に
   // タイムラインやプレビューを押したら、入力欄から外してエディターで受ける。タイムラインの部品は
@@ -2918,6 +3092,35 @@ export function VideoReviewEditor({
         rippleTrimToPlayhead(event.key.toLowerCase() === 'q' ? 'start' : 'end');
         return;
       }
+      // 道具: V 選択／C 切る／N ロール／Y スリップ／U スライド。Esc で選択へ戻す
+      if (!modKey && !event.altKey && !event.shiftKey) {
+        const k = event.key.toLowerCase();
+        const toolOf: Record<string, 'select' | 'razor' | 'roll' | 'slip' | 'slide'> = { v: 'select', c: 'razor', n: 'roll', y: 'slip', u: 'slide' };
+        if (toolOf[k]) { event.preventDefault(); setTimelineTool(toolOf[k]); return; }
+      }
+      if (event.key === 'Escape' && timelineToolRef.current !== 'select') { setTimelineTool('select'); return; }
+      // A: 赤線から後ろを全部選ぶ（Shift+A は前）／Ctrl+A: 全部
+      if (!event.altKey && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        selectByPlayhead(modKey ? 'all' : event.shiftKey ? 'before' : 'after');
+        return;
+      }
+      if (modKey && !event.altKey && event.key.toLowerCase() === 'l') { event.preventDefault(); toggleLinkSelected(); return; }
+      // \: 全体が見える大きさへ
+      if (!modKey && event.key === '\\') { event.preventDefault(); requestZoom(1); return; }
+      // ↑/↓: 前・次のつなぎ目へ。Alt+↑/↓: 選んだクリップを上・下の段へ
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        if (event.altKey) moveSelectedLanes(event.key === 'ArrowUp');
+        else jumpEditPoint(event.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+      // Alt+←/→: 選んだクリップを1コマ（Shift で10コマ）動かす
+      if (event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+        event.preventDefault();
+        nudgeSelected((event.key === 'ArrowRight' ? 1 : -1) * (event.shiftKey ? 10 : 1), modKey);
+        return;
+      }
       // Cut at the playhead — S (Premiere C/B style) or Ctrl/Cmd+B.
       if ((!modKey && (event.key === 's' || event.key === 'S')) || (modKey && event.key.toLowerCase() === 'b')) {
         event.preventDefault();
@@ -2945,7 +3148,8 @@ export function VideoReviewEditor({
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     return () => { window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); };
-  }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, rippleTrimToPlayhead, rippleOn, mainLayer, clipLanes, selectedSequenceClipIds, selectedSequenceClipId, seekTimeline, splitAtPlayhead, timelineDuration, undo, togglePreviewFullscreen, contentDuration, maxTimelineZoom]);
+  }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, rippleTrimToPlayhead, rippleOn, mainLayer, clipLanes, selectedSequenceClipIds, selectedSequenceClipId, seekTimeline, splitAtPlayhead, timelineDuration, undo, togglePreviewFullscreen, contentDuration, maxTimelineZoom,
+    selectByPlayhead, toggleLinkSelected, moveSelectedLanes, jumpEditPoint, nudgeSelected]);
 
   const markerPointRef = useRef<Point | null>(null);
   const handlePointerDown = useCallback(
@@ -3730,27 +3934,39 @@ export function VideoReviewEditor({
         source_start: 0, source_end: se, timeline_start: ts, timeline_end: te,
         track: 'audio', layer: 0, role: 'dialogue', link_id: linkId,
       };
-      setEditSequence((current) => {
-        const base = current || { tracks: [] };
-        const tracks = (base.tracks || []).map((t) => ({ ...t, clips: [...(t.clips || [])] }));
-        let vt = tracks.find((t) => t.type === 'video');
-        if (!vt) { vt = { id: `tk_${makeId()}`, type: 'video', clips: [] }; tracks.push(vt); }
-        vt.clips = [...(vt.clips || []), videoClip];
-        let at = tracks.find((t) => t.type === 'audio');
-        if (!at) { at = { id: `tk_${makeId()}`, type: 'audio', clips: [] }; tracks.push(at); }
-        at.clips = [...(at.clips || []), audioClip];
-        const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
-        return { ...base, tracks, duration: Number(nextDuration.toFixed(3)) };
-      });
-      selectSequenceClip(videoId);
+      // 置き方は貼り付けと同じ: 詰める ON でメインの段へ落としたら、一番近いつなぎ目（遠ければ落とした所で切って）に
+      // 割り込む。それ以外は重なる相手を消さずに空いている段へ（前は重ねて置くだけで、下の物が見えなくなっていた）。
+      const lanesNow = computeClipLanes(editSequence?.tracks || []);
+      const mainNow = mainLayerOf(editSequence?.tracks || [], lanesNow);
+      const toMain = mainNow === null ? layer === 0 : layer === mainNow;
+      let at = ts;
+      if (rippleOn && toMain && editSequence) {
+        const pts = editPoints(editSequence, (c) => { const l = lanesNow.get(String(c.id)); return !(l?.zone === 'visual' && l.layer === mainNow); });
+        const rect = timelineRef.current?.getBoundingClientRect();
+        const tol = rect && timelineDuration ? (24 / rect.width) * timelineDuration : 0.5;
+        let near = pts[0] ?? at;
+        for (const p of pts) if (Math.abs(p - at) < Math.abs(near - at)) near = p;
+        if (Math.abs(near - at) <= tol) at = near;
+      }
+      const src: NonNullable<ClipClipboard> = {
+        clips: [
+          { clip: videoClip, trackId: '', trackType: 'video', zone: 'visual', layer, main: toMain },
+          { clip: audioClip, trackId: '', trackType: 'audio', zone: 'audio', layer: 0 },
+        ],
+        annotations: [],
+        origin: ts,
+        end: te,
+      };
+      placeClipCopiesRef.current?.(src, at - ts, rippleOn && toMain ? 'insert' : 'free');
     },
-    [selectSequenceClip]
+    [editSequence, rippleOn, timelineDuration]
   );
 
   // ── 効果音を自分で入れる（2026-11-14 本人「使いたい効果音を全部消しちゃった状態では自分で追加する術がない」）──
   // 一覧の音をこの作品の素材にしてから（同じ名前があればそれを使う）、音の段に置く。段は、置く所が空いている
   // 効果音の段（無ければ声の段より上の空いた段、それも無ければ新しい段）。音量は同じ音の既存の置き方に合わせる。
   const [sfxOpen, setSfxOpen] = useState(false);
+  const [keysOpen, setKeysOpen] = useState(false);
   const addSfx = useCallback(async (item: SfxItem, at: number, layerArg?: number) => {
     if (!roomId) return;
     let assetId = item.in_room_asset_id;
@@ -3863,56 +4079,23 @@ export function VideoReviewEditor({
   // middle (DaVinci/Premiere overwrite). The overlap-aware target lookup lets several moved
   // clips on one lane each overwrite their own neighbour.
   const commitMovedSet = useCallback((snap: EditSequence, moved: Map<string, Partial<SequenceClip>>) => {
-    const r = (v: number) => Number(v.toFixed(2));
-    const lanes = computeClipLanes(snap.tracks || []);
-    const targets = Array.from(moved.entries()).map(([id, f]) => {
-      const o = (snap.tracks || []).flatMap((t) => t.clips || []).find((c) => c.id === id)!;
-      return {
-        id,
-        lane: laneKeyOf(lanes, id, f.layer ?? undefined),
-        as: Number(f.timeline_start ?? o.timeline_start),
-        ae: Number(f.timeline_end ?? o.timeline_end),
-      };
-    });
-    const tracks = (snap.tracks || []).map((track) => {
-      const out: SequenceClip[] = [];
-      for (const c0 of track.clips || []) {
-        // Audio lanes are packed (computeClipLanes): pin every audio clip to the lane it is shown
-        // on, so moving one clip never reshuffles the others' lanes under the cursor.
-        const cl = lanes.get(String(c0.id));
-        const c = track.type === 'audio' && cl && !Number.isFinite(c0.layer as number) ? { ...c0, layer: cl.layer } : c0;
-        const mv = moved.get(c.id);
-        if (mv) { out.push({ ...c, ...mv, ...(cl && mv.layer === undefined ? { layer: c.layer ?? cl.layer } : {}) }); continue; }
-        const lane = laneKeyOf(lanes, c.id);
-        const t = targets.find((x) => x.lane === lane && x.id !== c.id && x.ae > c.timeline_start + 0.001 && x.as < c.timeline_end - 0.001);
-        if (!t) { out.push(c); continue; } // not overlapped by any moved clip on this lane
-        const bs = c.timeline_start, be = c.timeline_end;
-        const isAV = Number.isFinite(c.source_end as number);
-        if (t.as <= bs + 0.001 && t.ae >= be - 0.001) continue; // fully covered -> delete
-        if (t.as <= bs + 0.001) {
-          const d = t.ae - bs;
-          out.push({ ...c, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + sourceAdvance(c, d)) } : {}) });
-        } else if (t.ae >= be - 0.001) {
-          const d = be - t.as;
-          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_end || 0) - sourceAdvance(c, d)) } : {}) });
-        } else {
-          const dl = t.as - bs, dr = t.ae - bs;
-          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_start || 0) + sourceAdvance(c, dl)) } : {}) });
-          out.push({ ...c, id: `${c.id}__r`, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + sourceAdvance(c, dr)) } : {}) });
-        }
-      }
-      return { ...track, clips: out };
-    });
-    const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
-    setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)), tracks });
+    setEditSequence(overwriteMoved(snap, moved as Map<string, Partial<SequenceClip> & Record<string, unknown>>, computeClipLanes(snap.tracks || [])) as EditSequence);
   }, []);
+  // 動かしたクリップを置く。Ctrl/⌘ を押していなければ、重なる相手を消さずに空いている段へ逃がす（Final Cut と同じ）。
+  // fixed は段を変えないクリップ（端を伸ばしているクリップ）。2026-11-25 本人「置いただけで下にあった映像や音声が消滅する」
+  const placeMovedSet = useCallback((snap: EditSequence, moved: Map<string, Partial<SequenceClip>>, fixed?: Set<string>, overwrite = overwriteRef.current) => {
+    if (overwrite) { commitMovedSet(snap, moved); return; }
+    const lanes = computeClipLanes(snap.tracks || []);
+    const free = resolveFree(snap, moved as Map<string, Partial<SequenceClip> & Record<string, unknown>>, lanes, { fixed, locked: lockedLanesRef.current, extra: annPlacementsRef.current });
+    commitMovedSet(snap, free as Map<string, Partial<SequenceClip>>);
+  }, [commitMovedSet]);
 
   // ── コピー・切り取り・貼り付け・複製（2026-11-14 本人「クリップのコピペや複製もできるようにして」）──
   // 写しは元のクリップの中身を全部持ち（字幕の文字・書体、場面、音量、切り抜き…）、新しい id と、
   // A/V の組なら組ごとの新しい link_id を付ける。置く段は元の段のまま（Premiere・DaVinci と同じ）。
   // 置いた所で同じ段の別クリップと重なれば、動かした時と同じ上書き（commitMovedSet）で切り詰める。
   const [hasClipClipboard, setHasClipClipboard] = useState(false);
-  const clipClipboardRef = useRef<{ clips: Array<{ clip: SequenceClip; trackId: string; trackType: string; zone: 'visual' | 'audio'; layer: number }>; annotations: ReviewAnnotation[]; origin: number; end: number } | null>(null);
+  const clipClipboardRef = useRef<ClipClipboard>(null);
 
   // 選んでいる物（A/V リンクが入っていれば相方も）を、段の情報つきで集める。
   const buildCopySource = useCallback((clipIdList: string[], annIdList: string[]) => {
@@ -3925,9 +4108,19 @@ export function VideoReviewEditor({
       const linkIds = new Set(all.filter((x) => clipIdSet.has(x.clip.id) && x.clip.link_id).map((x) => x.clip.link_id));
       all.forEach((x) => { if (x.clip.link_id && linkIds.has(x.clip.link_id)) clipIdSet.add(x.clip.id); });
     }
+    // メインの映像を写す時は、その上に乗っている字幕・絵・モザイク・別に録った声も一緒に写す（Final Cut の
+    // つながったクリップと同じ）。カメラの音を消して声を別に入れた所で、写した方だけ声が抜けていた（2026-11-25）。
+    const riders = new Set<string>();
+    if (linkAV && clipIdSet.size > 0 && seq) {
+      for (const id of riderIds(seq, [...clipIdSet], lanes, mainLayerOf(seq.tracks || [], lanes))) {
+        riders.add(id);
+        clipIdSet.add(id);
+      }
+    }
+    const mainNow = seq ? mainLayerOf(seq.tracks || [], lanes) : null;
     const clips = all.filter((x) => clipIdSet.has(x.clip.id)).map((x) => {
       const l = lanes.get(String(x.clip.id)) || { zone: (x.trackType === 'audio' ? 'audio' : 'visual') as 'visual' | 'audio', layer: Number(x.clip.layer ?? 0) };
-      return { ...x, clip: JSON.parse(JSON.stringify(x.clip)) as SequenceClip, zone: l.zone, layer: l.layer };
+      return { ...x, clip: JSON.parse(JSON.stringify(x.clip)) as SequenceClip, zone: l.zone, layer: l.layer, rider: riders.has(String(x.clip.id)), main: l.zone === 'visual' && l.layer === mainNow };
     });
     const anns = annotations.filter((a) => annIds.has(a.id)).map((a) => JSON.parse(JSON.stringify(a)) as ReviewAnnotation);
     const starts = [...clips.map((x) => x.clip.timeline_start), ...anns.map((a) => a.start)];
@@ -3941,21 +4134,36 @@ export function VideoReviewEditor({
     selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : [],
   ), [buildCopySource, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds]);
 
-  // 写しを shift 秒ずらして置く。overwrite=true は同じ段の重なった所を上書き、false は重ねて置くだけ
-  // （Alt で引きずる複製の出だし。そのあとの引きずりが上書きを受け持つ）。置いた写しの id を返す。
-  const placeClipCopies = useCallback((
-    src: NonNullable<typeof clipClipboardRef.current>,
+  // 写しを shift 秒ずらして置く（純粋な計算。状態は変えない）。mode:
+  //  'free'      重なる相手を消さずに、空いている段へ逃がして置く（ふだんの貼り付け・複製）
+  //  'insert'    写しの頭の時刻で全部の段を写しの長さだけ後ろへずらしてから置く（割り込み。Premiere の挿入）
+  //  'overwrite' 同じ段の重なった所を上書き（Ctrl+Alt+V）
+  //  'none'      重ねて置くだけ（Alt で引きずる複製の出だし。そのあとの引きずりが置き方を受け持つ）
+  const buildClipCopies = useCallback((
+    baseSeq: EditSequence | null,
+    baseAnns: ReviewAnnotation[],
+    src: NonNullable<ClipClipboard>,
     shift: number,
-    overwrite: boolean,
-  ): { clipIds: string[]; seq: EditSequence | null } => {
+    mode: 'free' | 'insert' | 'overwrite' | 'none',
+  ): { clipIds: string[]; annIds: string[]; seq: EditSequence | null; anns: ReviewAnnotation[] } => {
     const r = (v: number) => Number(v.toFixed(2));
     const newClipIds: string[] = [];
-    let nextSeq: EditSequence | null = editSequence;
-    if (src.clips.length > 0 && editSequence) {
-      const lanes = computeClipLanes(editSequence.tracks || []);
+    let anns = baseAnns;
+    let base = baseSeq;
+    if (mode === 'insert' && base) {
+      const lanes0 = computeClipLanes(base.tracks || []);
+      const an = clipboardAnchor(src);
+      const P = Math.max(0, an.origin + shift);
+      const ins = insertBlock(base, baseAnns, P, an.end - an.origin, lanes0, mainLayerOf(base.tracks || [], lanes0), makeId);
+      base = ins.seq;
+      anns = ins.anns;
+    }
+    let nextSeq: EditSequence | null = base;
+    if (src.clips.length > 0 && base) {
+      const lanes = computeClipLanes(base.tracks || []);
       // 音声の段は詰めて並べる作り（computeClipLanes）なので、写しを足す前に今の段を全部のクリップに
       // 書き込んで固定する。そうしないと写しが入った段にいた元のクリップが別の段へ押し出される。
-      const tracks = (editSequence.tracks || []).map((t) => ({
+      const tracks = (base.tracks || []).map((t) => ({
         ...t,
         clips: (t.clips || []).map((c) => {
           const l = lanes.get(String(c.id));
@@ -3965,8 +4173,8 @@ export function VideoReviewEditor({
       const linkMap = new Map<string, string>();
       const moved = new Map<string, Partial<SequenceClip>>();
       for (const item of src.clips) {
-        const base = String(item.clip.id).split('__')[0];
-        const id = `${base}__c_${makeId()}`;
+        const baseId = String(item.clip.id).split('__')[0];
+        const id = `${baseId}__c_${makeId()}`;
         let link: string | null | undefined = item.clip.link_id;
         if (link) {
           if (!linkMap.has(link)) linkMap.set(link, `lk_${makeId()}`);
@@ -3989,16 +4197,18 @@ export function VideoReviewEditor({
         newClipIds.push(id);
         moved.set(id, {});
       }
-      const snap: EditSequence = { ...editSequence, tracks };
-      if (overwrite) {
-        // commitMovedSet が setEditSequence まで行う。返す seq は呼び手の目安なので snap で足りる。
-        commitMovedSet(snap, moved);
-      } else {
+      const snap: EditSequence = { ...base, tracks };
+      const lanesSnap = computeClipLanes(tracks);
+      if (mode === 'none') {
         const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
-        setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)) });
+        nextSeq = { ...snap, duration: Number(nextDuration.toFixed(3)) };
+      } else {
+        const placeMoved = mode === 'overwrite' ? moved
+          : resolveFree(snap, moved as unknown as Map<string, Record<string, unknown>>, lanesSnap, { locked: lockedLanesRef.current, extra: annPlacementsRef.current }) as unknown as Map<string, Partial<SequenceClip>>;
+        nextSeq = overwriteMoved(snap, placeMoved as unknown as Map<string, Record<string, unknown>>, lanesSnap) as EditSequence;
       }
-      nextSeq = snap;
     }
+    const annIds: string[] = [];
     if (src.annotations.length > 0) {
       const now = new Date().toISOString();
       const copies = src.annotations.map((a) => {
@@ -4010,22 +4220,35 @@ export function VideoReviewEditor({
         };
         return { ...a, id: makeId(), created_at: now, start: r(Math.max(0, a.start + shift)), end: a.end == null ? a.end : r(Math.max(0, a.end + shift)), data };
       });
-      setAnnotations((prev) => [...prev, ...copies]);
-      if (newClipIds.length === 0) {
-        setSelectedSequenceClipId(null);
-        setSelectedSequenceClipIds([]);
-        setSelectedIds(copies.map((a) => a.id));
-        setSelectedId(copies[copies.length - 1].id);
-      }
+      anns = [...anns, ...copies];
+      annIds.push(...copies.map((a) => a.id));
     }
-    if (newClipIds.length > 0) {
+    return { clipIds: newClipIds, annIds, seq: nextSeq, anns };
+  }, []);
+
+  // 写しを置いて、写しを選んだ状態にする。置いた写しの id と、置いた後の形を返す。
+  const placeClipCopies = useCallback((
+    src: NonNullable<ClipClipboard>,
+    shift: number,
+    mode: 'free' | 'insert' | 'overwrite' | 'none',
+  ): { clipIds: string[]; seq: EditSequence | null } => {
+    const res = buildClipCopies(editSequence, annotations, src, shift, mode);
+    if (res.seq !== editSequence) setEditSequence(res.seq);
+    if (res.anns !== annotations) setAnnotations(res.anns);
+    if (res.clipIds.length > 0) {
       setSelectedId(null);
       setSelectedIds([]);
-      setSelectedSequenceClipIds(newClipIds);
-      setSelectedSequenceClipId(newClipIds[newClipIds.length - 1]);
+      setSelectedSequenceClipIds(res.clipIds);
+      setSelectedSequenceClipId(res.clipIds[res.clipIds.length - 1]);
+    } else if (res.annIds.length > 0) {
+      setSelectedSequenceClipId(null);
+      setSelectedSequenceClipIds([]);
+      setSelectedIds(res.annIds);
+      setSelectedId(res.annIds[res.annIds.length - 1]);
     }
-    return { clipIds: newClipIds, seq: nextSeq };
-  }, [editSequence, commitMovedSet]);
+    return { clipIds: res.clipIds, seq: res.seq };
+  }, [editSequence, annotations, buildClipCopies]);
+  placeClipCopiesRef.current = placeClipCopies;
 
   const copySelectedClips = useCallback((): boolean => {
     const got = gatherSelectionForCopy();
@@ -4036,40 +4259,48 @@ export function VideoReviewEditor({
   }, [gatherSelectionForCopy]);
 
   // 貼り付け: 写した物のうち一番早い所を再生位置（赤線）に合わせ、間隔はそのままで元の段に置く。
-  const pasteClips = useCallback(() => {
+  // 詰める ON でメインの映像を写していれば、赤線の所に割り込む（後ろが全部ずれる。赤線がクリップの途中なら切って割り込む）。
+  // それ以外は重なる相手を消さずに空いている段へ。Ctrl+Shift+V はいつも割り込み、Ctrl+Alt+V は上書き。
+  const pasteClips = useCallback((how?: 'insert' | 'overwrite' | 'free') => {
     const src = clipClipboardRef.current;
     if (!src) return;
     setPlaying(false);
-    placeClipCopies(src, Number(currentTime.toFixed(2)) - src.origin, true);
-  }, [currentTime, placeClipCopies]);
+    const mode = how || (rippleOn && src.clips.some((x) => x.main) ? 'insert' : 'free');
+    placeClipCopies(src, Number(liveTimeRef.current.toFixed(2)) - clipboardAnchor(src).origin, mode);
+  }, [placeClipCopies, rippleOn]);
 
-  // 複製: 選んだ物のすぐ後ろ（同じ段）に写しを置く。クリップボードは変えない。
+  // 複製: 選んだ物のすぐ後ろに写しを置く。メインの映像なら後ろに割り込む（詰める ON の時）。クリップボードは変えない。
   const duplicateSelectedClips = useCallback(() => {
     const got = gatherSelectionForCopy();
     if (!got) return;
-    placeClipCopies(got, got.end - got.origin, true);
-  }, [gatherSelectionForCopy, placeClipCopies]);
+    const an = clipboardAnchor(got);
+    placeClipCopies(got, an.end - an.origin, rippleOn && got.clips.some((x) => x.main) ? 'insert' : 'free');
+  }, [gatherSelectionForCopy, placeClipCopies, rippleOn]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return;
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (!(event.ctrlKey || event.metaKey)) return;
       const k = event.key.toLowerCase();
       if (k !== 'c' && k !== 'x' && k !== 'v' && k !== 'd') return;
+      if (event.altKey && k !== 'v') return;
       // チャットなどの文字を選んでいる時の Ctrl+C はブラウザのコピーのまま
       const sel = window.getSelection?.();
       if ((k === 'c' || k === 'x') && sel && !sel.isCollapsed && String(sel).trim()) return;
       if (k === 'c') { if (copySelectedClips()) event.preventDefault(); return; }
       if (k === 'x') { if (copySelectedClips()) { event.preventDefault(); deleteSelected(); } return; }
-      if (k === 'v') { if (clipClipboardRef.current) { event.preventDefault(); pasteClips(); } return; }
+      if (k === 'v') {
+        if (clipClipboardRef.current) { event.preventDefault(); pasteClips(event.altKey ? 'overwrite' : event.shiftKey ? 'insert' : undefined); }
+        return;
+      }
       if (k === 'd') { event.preventDefault(); duplicateSelectedClips(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [copySelectedClips, deleteSelected, duplicateSelectedClips, pasteClips]);
 
-  const applyDragOverwrite = useCallback((draggedId: string, fields: Partial<SequenceClip>) => {
+  const applyDragOverwrite = useCallback((draggedId: string, fields: Partial<SequenceClip>, mode: 'start' | 'end' | 'move' = 'move') => {
     const snap = dragSnapshotRef.current;
     if (!snap) return;
     const allOrig = (snap.tracks || []).flatMap((t) => (t.clips || []).map((c) => ({ ...c, track: c.track || t.type })));
@@ -4133,8 +4364,22 @@ export function VideoReviewEditor({
       if (pLayer !== pLane.layer) pf.layer = pLayer;
       moved.set(partner.id, pf);
     }
-    commitMovedSet(snap, moved);
-  }, [linkAV, commitMovedSet]);
+    // メインの映像を動かす時は、上に乗っている字幕・絵・モザイク・別に録った声も一緒に動かす（Final Cut の
+    // つながったクリップと同じ。2026-11-25 本人「その上についてるクリップが付いてこない」）
+    if (mode === 'move' && linkAV) {
+      const lanesR = computeClipLanes(snap.tracks || []);
+      const d = Number(fields.timeline_start ?? original.timeline_start) - original.timeline_start;
+      if (Math.abs(d) > 1e-6) {
+        for (const id of riderIds(snap, [...moved.keys()], lanesR, mainLayerOf(snap.tracks || [], lanesR))) {
+          const c = allOrig.find((x) => x.id === id);
+          if (!c || moved.has(id)) continue;
+          moved.set(id, { timeline_start: r(c.timeline_start + d), timeline_end: r(c.timeline_end + d) });
+        }
+      }
+    }
+    // 端を伸ばしているクリップは段を変えない。動かしたクリップは重ならない段へ（Ctrl/⌘ の間は上書き）
+    placeMovedSet(snap, moved, mode === 'move' ? undefined : new Set([draggedId]));
+  }, [linkAV, placeMovedSet]);
 
   // Block move: shift every selected clip (+ A/V-link partners) by the SAME timeline delta,
   // preserving their relative spacing and source ranges (a move, not a trim). Non-moved
@@ -4154,11 +4399,13 @@ export function VideoReviewEditor({
       const linkIds = new Set(allOrig.filter((c) => set.has(c.id) && c.link_id).map((c) => c.link_id));
       allOrig.forEach((c) => { if (c.link_id && linkIds.has(c.link_id)) set.add(c.id); });
     }
+    const lanes = computeClipLanes(snap.tracks || []);
+    // 選んだメインの映像に乗っている物も一緒に動かす（段は変えない）
+    const riders = new Set(linkAV ? riderIds(snap, [...set], lanes, mainLayerOf(snap.tracks || [], lanes)) : []);
     const inSet = allOrig.filter((c) => set.has(c.id));
     if (inSet.length === 0) return;
-    const minStart = Math.min(...inSet.map((c) => c.timeline_start));
+    const minStart = Math.min(...inSet.map((c) => c.timeline_start), ...allOrig.filter((c) => riders.has(c.id)).map((c) => c.timeline_start));
     const eff = Math.max(delta, -minStart); // keep the block at/after t=0
-    const lanes = computeClipLanes(snap.tracks || []);
     const shiftOf = blockLaneShift(inSet.map((c) => lanes.get(String(c.id))), laneShift);
     const moved = new Map<string, Partial<SequenceClip>>();
     inSet.forEach((c, i) => {
@@ -4167,8 +4414,9 @@ export function VideoReviewEditor({
       if (layer !== null) f.layer = layer;
       moved.set(c.id, f);
     });
-    commitMovedSet(snap, moved);
-  }, [linkAV, commitMovedSet]);
+    if (Math.abs(eff) > 1e-6) for (const c of allOrig) if (riders.has(c.id)) moved.set(c.id, { timeline_start: r(c.timeline_start + eff), timeline_end: r(c.timeline_end + eff) });
+    placeMovedSet(snap, moved);
+  }, [linkAV, placeMovedSet]);
 
   // Alt で引きずる複製の出だしの状態。動かさずに離したら写しを取り消す（元の上に重なったまま残さない）。
   const altDupRef = useRef<{ before: EditSequence | null; origIds: string[]; moved: boolean } | null>(null);
@@ -4178,6 +4426,20 @@ export function VideoReviewEditor({
       if (event.button !== 0) return; // let right-drag fall through to rubber-band select
       event.preventDefault();
       event.stopPropagation();
+      // 鍵を掛けた段のクリップは選べない・動かせない
+      if (isLockedClip(clip.id)) return;
+      // 切る道具（C）: 押した所で切る。Shift を押していれば、その時刻の全部の段を切る
+      if (timelineTool === 'razor') {
+        const rect = timelineRef.current?.getBoundingClientRect();
+        if (!rect || !timelineDuration) return;
+        let t = ((event.clientX - rect.left) / rect.width) * timelineDuration;
+        const tol = (8 / rect.width) * timelineDuration;
+        if (snapEnabled && Math.abs(t - liveTimeRef.current) < tol) t = liveTimeRef.current;
+        t = Math.round(t * fps) / fps;
+        if (event.shiftKey) splitClipAtTime(t, undefined, lockedLanesRef.current);
+        else splitClipAtTime(t, new Set([clip.id]));
+        return;
+      }
       // If the grabbed clip is already part of a multi-selection, keep the whole selection and
       // move it as a block. Otherwise (re)select just this clip (shift/ctrl toggles into a set).
       const additive = event.shiftKey || event.ctrlKey || event.metaKey;
@@ -4187,16 +4449,54 @@ export function VideoReviewEditor({
       const startLane = clipLanes.get(String(clip.id)) || { zone: 'visual' as const, layer: clip.layer ?? 0 };
       dragLayerRef.current = startLane.layer;
       dragLaneGeomRef.current = laneGeomRef.current.map((g) => ({ ...g })); // freeze for stable hit-testing
+      // 段の並びも止める（引きずる間に空の段が増えて、つかんだ段がずれないように）
+      setLaneFreeze({
+        visual: timelineLanes.filter((l) => l.zone === 'visual').map((l) => l.layer),
+        audio: timelineLanes.filter((l) => l.zone === 'audio').map((l) => l.layer),
+      });
+      overwriteRef.current = event.ctrlKey || event.metaKey;
       // クリップを押す・引きずる・端を伸ばすだけでは再生位置を動かさない（Premiere・DaVinci と同じ）。
       // 再生位置が動くのは目盛りの帯と何もない所を押した時だけ（2026-11-17 本人の指摘）。
       dragSnapshotRef.current = editSequence;
+      toolDragRef.current = null;
+      altInsertRef.current = null;
+      // ロール（N）・スリップ（Y）・スライド（U）
+      if (editSequence && !additive && (timelineTool === 'roll' || timelineTool === 'slip' || timelineTool === 'slide')) {
+        const lanesNow = clipLanes;
+        const ids = linkAV ? withPartners(editSequence, [clip.id]) : [clip.id];
+        if (timelineTool === 'roll' && mode !== 'move') {
+          const nb = touchingNeighbor(editSequence, clip.id, mode, lanesNow);
+          if (nb) {
+            const nbIds = linkAV ? withPartners(editSequence, [String(nb.id)]) : [String(nb.id)];
+            toolDragRef.current = mode === 'end'
+              ? { tool: 'roll', snap: editSequence, ids, prevIds: ids, nextIds: nbIds, room: { minStart: 0, maxEnd: Infinity } }
+              : { tool: 'roll', snap: editSequence, ids, prevIds: nbIds, nextIds: ids, room: { minStart: 0, maxEnd: Infinity } };
+          }
+        } else if (timelineTool === 'slip' && mode === 'move') {
+          toolDragRef.current = { tool: 'slip', snap: editSequence, ids, prevIds: [], nextIds: [], room: { minStart: 0, maxEnd: Infinity } };
+        } else if (timelineTool === 'slide' && mode === 'move') {
+          const prev = touchingNeighbor(editSequence, clip.id, 'start', lanesNow);
+          const next = touchingNeighbor(editSequence, clip.id, 'end', lanesNow);
+          const riders = linkAV ? riderIds(editSequence, ids, lanesNow, mainLayer) : [];
+          const all = [...ids, ...riders];
+          toolDragRef.current = {
+            tool: 'slide', snap: editSequence, ids: all,
+            prevIds: prev ? (linkAV ? withPartners(editSequence, [String(prev.id)]) : [String(prev.id)]) : [],
+            nextIds: next ? (linkAV ? withPartners(editSequence, [String(next.id)]) : [String(next.id)]) : [],
+            room: trimRoom(editSequence, clip.id, lanesNow, new Set(all), annPlacementsRef.current),
+          };
+        }
+      }
       // Alt（Mac は Option）を押しながら真ん中をつかむと、写しを作って写しの方を引きずる
-      // （Premiere・DaVinci と同じ）。元のクリップはその場に残る。
+      // （Premiere・DaVinci と同じ）。元のクリップはその場に残る。詰める ON でメインの映像なら、写しを
+      // つなぎ目に割り込ませる（後ろが全部ずれる）。
       let dragId = clip.id;
-      if (event.altKey && mode === 'move' && !additive) {
+      if (event.altKey && mode === 'move' && !additive && !toolDragRef.current) {
         const src = buildCopySource(dragSelectionRef.current, []);
-        if (src && src.clips.length > 0) {
-          const placed = placeClipCopies(src, 0, false);
+        if (src && src.clips.length > 0 && rippleOn && mainLayer !== null && src.clips.some((x) => x.main)) {
+          altInsertRef.current = { src, before: editSequence, anns: annotations, moved: false, lastIds: [] };
+        } else if (src && src.clips.length > 0) {
+          const placed = placeClipCopies(src, 0, 'none');
           const idx = src.clips.findIndex((x) => x.clip.id === clip.id);
           if (placed.seq && idx >= 0 && placed.clipIds[idx]) {
             dragId = placed.clipIds[idx];
@@ -4204,24 +4504,41 @@ export function VideoReviewEditor({
             // 引きずる組は選んでいたクリップの写しだけにする。
             const origIds = [...dragSelectionRef.current];
             const picked = new Set(origIds);
+            // 乗っている物の写しも引きずる組に入れて、一緒に動かす
             dragSelectionRef.current = src.clips
-              .map((x, i) => (picked.has(x.clip.id) ? placed.clipIds[i] : null))
+              .map((x, i) => (picked.has(x.clip.id) || x.rider ? placed.clipIds[i] : null))
               .filter((x): x is string => !!x);
             dragSnapshotRef.current = placed.seq;
             altDupRef.current = { before: editSequence, origIds, moved: false };
           }
         }
       }
-      // 詰める（リップル）: メインの段のクリップを1つだけつかんだ時。相方の音声をつかんでもメインの映像として扱う。
+      // 詰める（リップル）: メインの段のクリップをつかんだ時。相方の音声をつかんでもメインの映像として扱う。
+      // メインのクリップを何本か選んでいれば、まとめて抜いて詰め、つなぎ目に差し込む。
       rippleDragRef.current = null;
-      if (rippleOn && mainLayer !== null && !altDupRef.current && dragSelectionRef.current.length <= 1) {
-        const all = (editSequence?.tracks || []).flatMap((t) => t.clips || []);
+      if (rippleOn && mainLayer !== null && !altDupRef.current && !altInsertRef.current && !toolDragRef.current && editSequence) {
+        const all = (editSequence.tracks || []).flatMap((t) => t.clips || []);
         const isMainId = (id: string) => { const l = clipLanes.get(String(id)); return l?.zone === 'visual' && l.layer === mainLayer; };
-        let head: SequenceClip | undefined = isMainId(clip.id) ? clip : undefined;
-        if (!head && linkAV && clip.link_id) head = all.find((c) => c.id !== clip.id && c.link_id === clip.link_id && isMainId(c.id));
+        const headOf = (id: string): SequenceClip | undefined => {
+          const c = all.find((x) => x.id === id);
+          if (!c) return undefined;
+          if (isMainId(c.id)) return c;
+          return linkAV && c.link_id ? all.find((x) => x.id !== c.id && x.link_id === c.link_id && isMainId(x.id)) : undefined;
+        };
+        const head = headOf(clip.id);
         if (head) {
-          const partners = linkAV && head.link_id ? all.filter((c) => c.id !== head!.id && c.link_id === head!.link_id).map((c) => c.id) : [];
-          rippleDragRef.current = { ids: [head.id, ...partners], anns: annotations };
+          const partnersOf = (h: SequenceClip) => (linkAV && h.link_id ? all.filter((c) => c.id !== h.id && c.link_id === h.link_id).map((c) => c.id) : []);
+          let groups: string[][] = [[head.id, ...partnersOf(head)]];
+          if (dragSelectionRef.current.length > 1) {
+            const heads = new Map<string, SequenceClip>();
+            for (const id of dragSelectionRef.current) { const h = headOf(id); if (h) heads.set(h.id, h); }
+            const carried = new Set<string>();
+            for (const h of heads.values()) { carried.add(h.id); for (const p of partnersOf(h)) carried.add(p); }
+            const riders = new Set(riderIds(editSequence, [...carried], clipLanes, mainLayer));
+            const others = dragSelectionRef.current.filter((id) => !carried.has(id) && !riders.has(id));
+            groups = others.length ? [] : [...heads.values()].map((h) => [h.id, ...partnersOf(h)]);
+          }
+          if (groups.length) rippleDragRef.current = { ids: [head.id, ...partnersOf(head)], groups, anns: annotations };
         }
       }
       setSequenceClipDrag({
@@ -4247,7 +4564,8 @@ export function VideoReviewEditor({
         /* ignore */
       }
     },
-    [editSequence, clipLanes, selectSequenceClip, selectedSequenceClipIds, buildCopySource, placeClipCopies, rippleOn, mainLayer, linkAV, annotations]
+    [editSequence, clipLanes, selectSequenceClip, selectedSequenceClipIds, buildCopySource, placeClipCopies, rippleOn, mainLayer, linkAV, annotations,
+      isLockedClip, timelineTool, timelineDuration, snapEnabled, fps, splitClipAtTime, timelineLanes]
   );
 
   useEffect(() => {
@@ -4260,6 +4578,60 @@ export function VideoReviewEditor({
       if (!clip) return;
       if (altDupRef.current && Math.abs(event.clientX - sequenceClipDrag.startClientX) + Math.abs(event.clientY - sequenceClipDrag.startClientY) >= 3) altDupRef.current.moved = true;
       if (altDupRef.current && !altDupRef.current.moved) return;
+      overwriteRef.current = event.ctrlKey || event.metaKey;
+      const snapTolR = (8 / rect.width) * timelineDuration;
+      // カーソルの高さから行き先の段。一番上の映像の段より上（目盛りの所）・一番下の音声の段より下へ引くと、
+      // その分だけ新しい段になる（何段でも上げ下げできる。2026-11-25 本人「上のレーンに1つ分しか持っていけない」）
+      const pickLayer = (yIn: number): number | null => {
+        const geomP = dragLaneGeomRef.current || laneGeomRef.current;
+        const zone = sequenceClipDrag.zone;
+        const hit = geomP.find((g) => g.zone === zone && yIn >= g.top + 8 && yIn < g.bottom - 8);
+        if (hit) return hit.layer;
+        const zl = geomP.filter((g) => g.zone === zone);
+        if (!zl.length) return null;
+        const maxL = Math.max(...zl.map((g) => g.layer));
+        if (zone === 'visual' && yIn < zl[0].top) return maxL + 1 + Math.floor((zl[0].top - yIn) / 36);
+        if (zone === 'audio' && yIn > zl[zl.length - 1].bottom) return maxL + 1 + Math.floor((yIn - zl[zl.length - 1].bottom) / 36);
+        return null;
+      };
+      // Alt で写しを引きずってメインに割り込む: 一番近いつなぎ目に写しを差し込み、後ろを全部ずらす（黄色い線）
+      const ai = altInsertRef.current;
+      if (ai) {
+        if (!ai.moved && Math.abs(event.clientX - sequenceClipDrag.startClientX) + Math.abs(event.clientY - sequenceClipDrag.startClientY) < 3) return;
+        ai.moved = true;
+        const lanesB = computeClipLanes(ai.before?.tracks || []);
+        const pts = editPoints(ai.before || {}, (c) => { const l = lanesB.get(String(c.id)); return !(l?.zone === 'visual' && l.layer === mainLayer); });
+        const anc = clipboardAnchor(ai.src).origin;
+        const rawStart = anc + delta;
+        let P = pts[0] ?? 0;
+        for (const p of pts) if (Math.abs(p - rawStart) < Math.abs(P - rawStart)) P = p;
+        const res = buildClipCopies(ai.before, ai.anns, ai.src, P - anc, 'insert');
+        ai.lastIds = res.clipIds;
+        setEditSequence(res.seq);
+        setAnnotations(res.anns);
+        setRippleMarker(P);
+        return;
+      }
+      // ロール・スリップ・スライド
+      const td = toolDragRef.current;
+      if (td) {
+        const durOf = (c: { asset_id?: unknown; source_duration?: unknown; kind?: unknown }) => {
+          const asset = sequenceAssetMap.get(String(c.asset_id || ''));
+          if (asset?.kind === 'image' || c.kind === 'image') return Number.POSITIVE_INFINITY;
+          return Number(asset?.metadata?.duration) || Number(c.source_duration) || Number.POSITIVE_INFINITY;
+        };
+        let d = delta;
+        if (td.tool === 'roll') {
+          const edge = sequenceClipDrag.mode === 'end' ? sequenceClipDrag.originalTimelineEnd : sequenceClipDrag.originalTimelineStart;
+          if (snapEnabled && Math.abs(edge + d - liveTimeRef.current) < snapTolR) d = liveTimeRef.current - edge;
+          setEditSequence(applyRoll(td.snap, td.prevIds, td.nextIds, d, durOf).seq);
+        } else if (td.tool === 'slip') {
+          setEditSequence(applySlip(td.snap, td.ids, d, durOf).seq);
+        } else {
+          setEditSequence(applySlide(td.snap, td.ids, td.prevIds, td.nextIds, d, durOf, td.room).seq);
+        }
+        return;
+      }
       // 詰める（リップル）: メインのクリップの端を動かすと後ろの全部の段が付いてくる。真ん中をつかんで横に動かすと、
       // 抜いて詰め、一番近いつなぎ目に差し込む（並べ替え）。Ctrl/⌘ を押している間と、別の段へ動かした時は前の上書き。
       const rip = rippleDragRef.current;
@@ -4268,9 +4640,8 @@ export function VideoReviewEditor({
         let overwrite = event.ctrlKey || event.metaKey;
         if (!overwrite && sequenceClipDrag.mode === 'move') {
           const yIn = event.clientY - rect.top;
-          const geomR = dragLaneGeomRef.current || laneGeomRef.current;
-          const candR = geomR.find((g) => g.zone === sequenceClipDrag.zone && yIn >= g.top + 8 && yIn < g.bottom - 8);
-          if (candR && candR.layer !== sequenceClipDrag.originalLayer) overwrite = true;
+          const pk = pickLayer(yIn);
+          if (pk !== null && pk !== sequenceClipDrag.originalLayer) overwrite = true;
         }
         const head = (ripSnap.tracks || []).flatMap((t) => t.clips || []).find((c) => c.id === rip.ids[0]);
         if (head && !overwrite) {
@@ -4278,11 +4649,14 @@ export function VideoReviewEditor({
           const ha = head.timeline_start, hb = head.timeline_end;
           let res: { seq: EditSequence; anns: ReviewAnnotation[] };
           if (sequenceClipDrag.mode === 'move') {
-            const pts = insertPoints(ripSnap, rip.ids, lanesSnap, mainLayer);
-            const rawStart = ha + delta;
+            const hostIds = rip.groups.map((g) => g[0]);
+            const allSnap = (ripSnap.tracks || []).flatMap((t) => t.clips || []);
+            const blockStart = Math.min(...allSnap.filter((c) => hostIds.includes(c.id)).map((c) => c.timeline_start));
+            const pts = insertPoints(ripSnap, rip.ids, lanesSnap, mainLayer, hostIds);
+            const rawStart = (Number.isFinite(blockStart) ? blockStart : ha) + delta;
             let P = pts[0] ?? 0;
             for (const p of pts) if (Math.abs(p - rawStart) < Math.abs(P - rawStart)) P = p;
-            res = rippleMove(ripSnap, rip.anns, rip.ids, P, lanesSnap, mainLayer);
+            res = rippleMoveGroups(ripSnap, rip.anns, rip.groups, P, lanesSnap, mainLayer);
             setRippleMarker(P);
           } else {
             const hAsset = sequenceAssetMap.get(String(head.asset_id || ''));
@@ -4343,7 +4717,11 @@ export function VideoReviewEditor({
         const snappedStart = snap(sequenceClipDrag.originalTimelineStart + delta);
         // 左へは素材の頭まで（それより前を伸ばすと、中身が付いてこず再生がずれていた）
         const minStart = isVideoClip ? sequenceClipDrag.originalTimelineStart - sequenceClipDrag.originalSourceStart / dragSpeed : 0;
-        const nextTimelineStart = clamp(snappedStart, Math.max(0, minStart), sequenceClipDrag.originalTimelineEnd - 0.1);
+        // 隣のクリップの手前まで（Ctrl/⌘ の間は上書き）
+        const roomS = !overwriteRef.current && dragSnapshotRef.current
+          ? trimRoom(dragSnapshotRef.current, sequenceClipDrag.id, computeClipLanes(dragSnapshotRef.current.tracks || []), new Set(withPartners(dragSnapshotRef.current, [sequenceClipDrag.id])), annPlacementsRef.current).minStart
+          : 0;
+        const nextTimelineStart = clamp(snappedStart, Math.max(0, minStart, Math.min(roomS, sequenceClipDrag.originalTimelineStart)), sequenceClipDrag.originalTimelineEnd - 0.1);
         const effDelta = nextTimelineStart - sequenceClipDrag.originalTimelineStart;
         const fields: Partial<SequenceClip> = { timeline_start: Number(nextTimelineStart.toFixed(3)) };
         if (isVideoClip) {
@@ -4356,14 +4734,18 @@ export function VideoReviewEditor({
           const base = sortedKeys(snapClip || clip);
           fields.motion_keys = base.map((k) => ({ ...k, t: Number((k.t - effDelta).toFixed(4)) }));
         }
-        applyDragOverwrite(sequenceClipDrag.id, fields);
+        applyDragOverwrite(sequenceClipDrag.id, fields, 'start');
       } else if (sequenceClipDrag.mode === 'end') {
         const snappedEnd = snap(sequenceClipDrag.originalTimelineEnd + delta);
         // 右へは素材の終わりまで
         const maxEnd = isVideoClip
           ? sequenceClipDrag.originalTimelineEnd + Math.max(0, sourceDuration - sequenceClipDrag.originalSourceEnd) / dragSpeed
           : Infinity;
-        const nextTimelineEnd = clamp(snappedEnd, sequenceClipDrag.originalTimelineStart + 0.1, Math.min(maxEnd, Math.max(timelineDuration, sequenceClipDrag.originalTimelineEnd)));
+        const roomE = !overwriteRef.current && dragSnapshotRef.current
+          ? trimRoom(dragSnapshotRef.current, sequenceClipDrag.id, computeClipLanes(dragSnapshotRef.current.tracks || []), new Set(withPartners(dragSnapshotRef.current, [sequenceClipDrag.id])), annPlacementsRef.current).maxEnd
+          : Infinity;
+        // 最後のクリップは目盛りの外へも伸ばせる（全体が長くなる）
+        const nextTimelineEnd = clamp(snappedEnd, sequenceClipDrag.originalTimelineStart + 0.1, Math.min(maxEnd, Math.max(roomE, sequenceClipDrag.originalTimelineEnd)));
         const effDelta = nextTimelineEnd - sequenceClipDrag.originalTimelineEnd;
         const fields: Partial<SequenceClip> = { timeline_end: Number(nextTimelineEnd.toFixed(3)) };
         if (isVideoClip) {
@@ -4371,7 +4753,7 @@ export function VideoReviewEditor({
         } else if (isImage) {
           fields.source_end = Number((sequenceClipDrag.originalSourceStart + (nextTimelineEnd - sequenceClipDrag.originalTimelineStart)).toFixed(3));
         }
-        applyDragOverwrite(sequenceClipDrag.id, fields);
+        applyDragOverwrite(sequenceClipDrag.id, fields, 'end');
       } else if (dragSelectionRef.current.length > 1) {
         // Block move: shift the whole selection together (time + lane steps). Magnet:
         // snap the BLOCK's leading or trailing edge (whichever is closer) to a neighbour/playhead/
@@ -4392,15 +4774,15 @@ export function VideoReviewEditor({
         }
         // 縦: カーソルが同じ種類（映像／音声）の別の段の中ほどに入ったら、その段数だけまとめて上下に動かす
         // （1つだけ動かす時と同じく、境目の近くでは切り替えない）
-        const yWithinB = event.clientY - rect.top;
         const geomB = dragLaneGeomRef.current || laneGeomRef.current;
-        const candB = geomB.find(
-          (g) => g.zone === sequenceClipDrag.zone && yWithinB >= g.top + 8 && yWithinB < g.bottom - 8
-        );
-        if (candB) dragLayerRef.current = candB.layer;
+        const pickedB = pickLayer(event.clientY - rect.top);
+        if (pickedB !== null) dragLayerRef.current = pickedB;
         const zoneLayers = Array.from(new Set(geomB.filter((g) => g.zone === sequenceClipDrag.zone).map((g) => g.layer))).sort((a, b) => a - b);
         const fromIdx = zoneLayers.indexOf(sequenceClipDrag.originalLayer);
-        const toIdx = dragLayerRef.current !== null ? zoneLayers.indexOf(dragLayerRef.current) : fromIdx;
+        const maxZ = zoneLayers.length ? zoneLayers[zoneLayers.length - 1] : 0;
+        const toIdx = dragLayerRef.current === null ? fromIdx
+          : dragLayerRef.current > maxZ ? zoneLayers.length - 1 + (dragLayerRef.current - maxZ)
+            : zoneLayers.indexOf(dragLayerRef.current);
         const steps = fromIdx >= 0 && toIdx >= 0 ? toIdx - fromIdx : 0;
         applyBlockMove(blockDelta, dragSelectionRef.current, steps ? { zone: sequenceClipDrag.zone, steps, layers: zoneLayers } : undefined);
       } else {
@@ -4420,13 +4802,8 @@ export function VideoReviewEditor({
         // Hysteresis — only switch when the cursor is well INSIDE another lane (a deadband
         // around each border), so jitter near a boundary doesn't flip the lane back and forth
         // (which would also reflow the lanes and fight the cursor).
-        const yWithin = event.clientY - rect.top;
-        const MARGIN = 8;
-        const geom = dragLaneGeomRef.current || laneGeomRef.current; // frozen geometry
-        const cand = geom.find(
-          (g) => g.zone === sequenceClipDrag.zone && yWithin >= g.top + MARGIN && yWithin < g.bottom - MARGIN
-        );
-        if (cand) dragLayerRef.current = cand.layer;
+        const picked = pickLayer(event.clientY - rect.top);
+        if (picked !== null) dragLayerRef.current = picked;
         // ALWAYS carry the committed layer: applyDragOverwrite rebuilds the clip from the
         // drag-start snapshot, so omitting it (when the live layer already matches) would let
         // the overwrite revert the clip to its original layer — that was the frame-by-frame
@@ -4438,6 +4815,15 @@ export function VideoReviewEditor({
     const clearDrag = () => {
       const dup = altDupRef.current;
       altDupRef.current = null;
+      const ai = altInsertRef.current;
+      altInsertRef.current = null;
+      if (ai && ai.moved && ai.lastIds.length) {
+        setSelectedSequenceClipIds(ai.lastIds);
+        setSelectedSequenceClipId(ai.lastIds[ai.lastIds.length - 1]);
+      }
+      toolDragRef.current = null;
+      overwriteRef.current = false;
+      setLaneFreeze(null);
       if (dup && !dup.moved) {
         // 動かさずに離した: 写しを取り消して、元のクリップを選んだ状態に戻す
         setEditSequence(dup.before);
@@ -4460,7 +4846,7 @@ export function VideoReviewEditor({
       window.removeEventListener('pointerup', clearDrag);
       window.removeEventListener('pointercancel', clearDrag);
     };
-  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove, snapEnabled, sequenceDuration, currentTime, mainLayer, sequenceAssetMap]);
+  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove, snapEnabled, sequenceDuration, currentTime, mainLayer, sequenceAssetMap, buildClipCopies]);
 
   // Rubber-band (marquee) select: while a right-drag is active, draw the rectangle and on
   // release select every clip bar (data-clip-id) whose on-screen box intersects it. A tiny
@@ -4519,6 +4905,9 @@ export function VideoReviewEditor({
       document.querySelectorAll('[data-annotation-id]').forEach((el) => {
         if (intersects(el)) { const id = el.getAttribute('data-annotation-id'); if (id) annIds.push(id); }
       });
+      // 鍵を掛けた段のクリップは選ばない
+      const lockedNow = isLockedClipRef.current;
+      for (let i = clipIds.length - 1; i >= 0; i -= 1) if (lockedNow(clipIds[i])) clipIds.splice(i, 1);
       if (clipIds.length > 0 || annIds.length > 0) {
         setSelectedSequenceClipIds(clipIds);
         setSelectedSequenceClipId(clipIds.length ? clipIds[clipIds.length - 1] : null);
@@ -4709,6 +5098,9 @@ export function VideoReviewEditor({
                             ) : null}
                             <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
                             {/* 段の頭で切った段は、クリップの上に薄い幕をかけて分かるようにする（押す・動かすはそのままできる） */}
+                            {lockedLanes.has(lane.key) ? (
+                              <div data-lane-locked className="pointer-events-none absolute inset-0 z-[16] border border-amber-400/50 bg-[repeating-linear-gradient(45deg,transparent_0,transparent_7px,rgba(245,158,11,0.16)_7px,rgba(245,158,11,0.16)_9px)]" />
+                            ) : null}
                             {laneSwitchedOff(laneSwitches, lane.key) ? (
                               <div data-lane-off className="pointer-events-none absolute inset-0 z-[15] bg-background/55 bg-[repeating-linear-gradient(135deg,transparent_0,transparent_6px,rgba(127,127,127,0.18)_6px,rgba(127,127,127,0.18)_8px)]" />
                             ) : null}
@@ -4917,7 +5309,7 @@ export function VideoReviewEditor({
                           </div>
                         );
                       })
-  ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedClipSet, highlightedClipIds, danTouch, viewWin, trackPx, pxPerSec, instrJobs, laneSwitches, rippleMarker, mainLayer]);
+  ), [timelineLanes, pendingAnnotation, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedClipSet, highlightedClipIds, danTouch, viewWin, trackPx, pxPerSec, instrJobs, laneSwitches, rippleMarker, mainLayer, lockedLanes]);
 
 
   // ── スマホの形（2026-11-17 本人「縦持ちは横幅いっぱい・YouTube やショート動画の感覚で左右に動かして移動・
@@ -5663,12 +6055,18 @@ export function VideoReviewEditor({
         <>
           <div className="fixed inset-0 z-50" onClick={() => setClipMenu(null)} onContextMenu={(e) => { e.preventDefault(); setClipMenu(null); }} />
           <div className="fixed z-[51] min-w-[180px] rounded-md border border-border bg-popover py-1 text-sm shadow-lg"
-            style={{ left: Math.min(clipMenu.x, window.innerWidth - 220), top: Math.min(clipMenu.y, window.innerHeight - 220) }}>
+            style={{ left: Math.min(clipMenu.x, window.innerWidth - 260), top: Math.max(8, Math.min(clipMenu.y, window.innerHeight - 400)) }}>
             {[
               { label: 'コピー', key: 'Ctrl+C', run: () => { copySelectedClips(); } },
               { label: '切り取り', key: 'Ctrl+X', run: () => { if (copySelectedClips()) deleteSelected(); } },
               { label: '複製（すぐ後ろに）', key: 'Ctrl+D', run: () => duplicateSelectedClips() },
-              ...(hasClipClipboard ? [{ label: '再生位置に貼り付け', key: 'Ctrl+V', run: () => pasteClips() }] : []),
+              ...(hasClipClipboard ? [
+                { label: '再生位置に貼り付け', key: 'Ctrl+V', run: () => pasteClips() },
+                { label: '赤線に割り込んで貼り付け', key: 'Ctrl+Shift+V', run: () => pasteClips('insert') },
+                { label: '上書きで貼り付け', key: 'Ctrl+Alt+V', run: () => pasteClips('overwrite') },
+              ] : []),
+              { label: 'つなぐ／つなぎを外す', key: 'Ctrl+L', run: () => toggleLinkSelected() },
+              { label: '赤線から後ろを全部選ぶ', key: 'A', run: () => selectByPlayhead('after') },
               { label: '消して詰める', key: 'Shift+Delete', run: () => rippleDelete() },
               { label: '消す（隙間を残す）', key: rippleOn && clipLanes.get(String(clipMenu.clip.id))?.layer === mainLayer && clipLanes.get(String(clipMenu.clip.id))?.zone === 'visual' ? '' : 'Delete', run: () => deleteSelected() },
             ].map((item) => (
@@ -5704,6 +6102,12 @@ export function VideoReviewEditor({
               onClick={() => { setGapMenu(null); closeGaps(); }}>
               メインの隙間を全部詰める
             </button>
+            {hasClipClipboard ? (
+              <button type="button" className="flex w-full items-center justify-between gap-4 px-3 py-1.5 text-left hover:bg-muted"
+                onClick={() => { setGapMenu(null); pasteClips('insert'); }}>
+                <span>赤線に割り込んで貼り付け</span><span className="text-[11px] text-muted-foreground">Ctrl+Shift+V</span>
+              </button>
+            ) : null}
           </div>
         </>
       ) : null}
@@ -6645,10 +7049,10 @@ export function VideoReviewEditor({
               title="ドラッグしてタイムラインの高さを調整"
             />
 
-            <div className={`relative shrink-0 border-t border-neutral-800 bg-background ${compact ? 'p-1.5' : 'p-3'}`} style={{ height: compact ? 150 : timelineHeight }}>
+            <div className={`relative flex shrink-0 flex-col border-t border-neutral-800 bg-background ${compact ? 'p-1.5' : 'p-3'}`} style={{ height: compact ? 150 : timelineHeight }}>
               {sfxOpen && roomId ? <SfxPanel roomId={roomId} onAdd={(it) => void addSfx(it, liveTimeRef.current)} onClose={() => setSfxOpen(false)} /> : null}
               {compact ? <style>{'[data-editor-toolbar] > *:not([data-keep]) { display: none !important; }'}</style> : null}
-              <div className="flex items-center gap-2" data-editor-toolbar>
+              <div className="flex shrink-0 flex-wrap items-center gap-2" data-editor-toolbar>
                 <Button variant={tool === 'select' ? 'default' : 'outline'} size="sm" title="選択・移動" onClick={() => setTool('select')}>
                   <MousePointer2 className="h-4 w-4" />
                   <span className="hidden sm:inline">選択</span>
@@ -6680,10 +7084,51 @@ export function VideoReviewEditor({
                   <Music2 className="h-4 w-4" />
                   <span className="hidden sm:inline">効果音</span>
                 </Button>
+                <div className="ml-auto flex shrink-0 items-center overflow-hidden rounded-md border border-border" role="group" aria-label="タイムラインの道具">
+                  {([
+                    ['select', '選択', 'V', '選択（V）：クリップを動かす・端を引いて長さを変える'],
+                    ['razor', '切る', 'C', '切る（C）：クリップを押した所で切る。Shift を押しながら押すと、その時刻の全部の段を切る'],
+                    ['roll', 'ロール', 'N', 'ロール（N）：つなぎ目を引くと、前のクリップの終わりと後ろのクリップの頭が一緒に動く（全体の長さは変わらない）'],
+                    ['slip', 'スリップ', 'Y', 'スリップ（Y）：クリップを横に引くと、置き場所と長さはそのままで中身（使う区間）だけがずれる'],
+                    ['slide', 'スライド', 'U', 'スライド（U）：クリップを横に引くと、前後のクリップが伸び縮みして、隙間も重なりも作らずに動く'],
+                  ] as const).map(([id, label, key, title]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      data-tool-button={id}
+                      aria-pressed={timelineTool === id}
+                      title={title}
+                      onClick={() => setTimelineTool(id)}
+                      className={`h-7 px-1.5 text-[11px] leading-none ${timelineTool === id ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                    >
+                      {label}<span className="ml-0.5 hidden opacity-60 2xl:inline">{key}</span>
+                    </button>
+                  ))}
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  data-lane-scale={laneScale}
+                  title="段の高さ（押すたびに 1倍→1.5倍→2倍）"
+                  onClick={() => setLaneScale((v) => (v === 1 ? 1.5 : v === 1.5 ? 2 : 1))}
+                >
+                  ↕ {laneScale}倍
+                </Button>
+                <Button
+                  variant={keysOpen ? 'default' : 'ghost'}
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  data-keys-help
+                  title="キーと操作の一覧"
+                  onClick={() => setKeysOpen((v) => !v)}
+                >
+                  ⌨ 操作
+                </Button>
                 <Button
                   variant={snapEnabled ? 'default' : 'outline'}
                   size="sm"
-                  className="ml-auto h-7 px-2 text-xs"
+                  className="h-7 px-2 text-xs"
                   title={snapEnabled ? 'マグネット ON：クリップ端・赤線・再生ヘッドがつなぎ目に吸着。クリックでOFF（自由移動）' : 'マグネット OFF：自由に動かせます。クリックでON（吸着）'}
                   onClick={() => setSnapEnabled((v) => !v)}
                 >
@@ -6695,8 +7140,8 @@ export function VideoReviewEditor({
                   className="h-7 px-2 text-xs"
                   data-ripple-toggle={rippleOn ? 'on' : 'off'}
                   title={rippleOn
-                    ? '詰める ON：一番下の映像の段（メイン）のクリップを縮める・伸ばす・消すと、後ろの全部の段（字幕・BGM・モザイク）も一緒に詰まる。真ん中をつかんで横に動かすと、クリップの間に割り込んで並べ替え。引きずる間 Ctrl/⌘ を押すとその回だけ上書き。Q＝頭から赤線まで切って詰める／W＝赤線から終わりまで切って詰める。メインの何もない所を右クリックで隙間を詰める。クリックでOFF'
-                    : '詰める OFF：動かす・縮めると隙間が残り、重なった所は上書き。クリックでON'}
+                    ? '詰める ON：一番下の映像の段（メイン）のクリップを縮める・伸ばす・消すと、後ろの全部の段（字幕・BGM・モザイク）も一緒に詰まる。真ん中をつかんで横に動かすと、クリップの間に割り込んで並べ替え（何本か選べばまとめて）。メインの映像を貼る・複製する・Alt で引きずって写すと割り込む。Q＝頭から赤線まで切って詰める／W＝赤線から終わりまで切って詰める。メインの何もない所を右クリックで隙間を詰める。クリックでOFF'
+                    : '詰める OFF：動かす・縮めると隙間が残る。重なる所は空いている段へ逃がす。クリックでON'}
                   onClick={() => setRippleOn((v) => !v)}
                 >
                   {rippleOn ? '⇤ 詰める' : '⇤ 詰めない'}
@@ -6770,18 +7215,57 @@ export function VideoReviewEditor({
                   <span ref={timeReadoutRef}>{fmtTime(currentTime)}</span> / {fmtTime(contentDuration)}
                 </div>
               </div>
+              {keysOpen ? (
+                <div data-keys-panel className="mt-2 max-h-[45%] shrink-0 overflow-auto rounded-md border border-border bg-muted/40 p-2 text-xs">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="font-medium">キーと操作（Mac は Ctrl を ⌘、Alt を Option）</span>
+                    <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setKeysOpen(false)} aria-label="閉じる">×</button>
+                  </div>
+                  <div className="grid grid-cols-1 gap-x-6 gap-y-0.5 sm:grid-cols-2 lg:grid-cols-3">
+                    {([
+                      ['動かす', 'クリップの真ん中を引く。重なる所は空いている段へ逃げる（下の物は消えない）'],
+                      ['上書き', '引く間 Ctrl を押す（重なった相手を切り詰める）'],
+                      ['段を増やす', '一番上の段より上（目盛りの所）・一番下より下へ引く'],
+                      ['並べ替え', '詰める ON でメインのクリップを横へ（何本か選べばまとめて）'],
+                      ['写して割り込む', 'Alt を押しながら引く'],
+                      ['コピー・切り取り', 'Ctrl+C／Ctrl+X'],
+                      ['貼り付け', 'Ctrl+V（メインの映像は赤線に割り込む）'],
+                      ['割り込み／上書きで貼る', 'Ctrl+Shift+V／Ctrl+Alt+V'],
+                      ['複製', 'Ctrl+D'],
+                      ['切る', 'S（赤線で）・道具の「切る」C'],
+                      ['頭・終わりを切って詰める', 'Q／W'],
+                      ['消す／消して詰める', 'Delete／Shift+Delete'],
+                      ['道具', 'V 選択・C 切る・N ロール・Y スリップ・U スライド・Esc で選択'],
+                      ['前後のつなぎ目へ', '↑／↓'],
+                      ['1コマ・10コマ進む', '←→／Shift+←→'],
+                      ['クリップを1コマ動かす', 'Alt+←→（Shift で10コマ）'],
+                      ['クリップを上下の段へ', 'Alt+↑↓'],
+                      ['赤線から後ろを選ぶ', 'A（前は Shift+A、全部は Ctrl+A）'],
+                      ['映像と音声をつなぐ・外す', 'Ctrl+L'],
+                      ['囲んで選ぶ', '右ボタンで引く'],
+                      ['再生・止める・倍速', 'Space・K・L'],
+                      ['先頭・最後', 'Home／End'],
+                      ['拡大・縮小・全体', '＋／－／\\'],
+                      ['元に戻す・やり直す', 'Ctrl+Z／Ctrl+Shift+Z'],
+                      ['段の鍵', '段の名前の横の錠前'],
+                    ] as const).map(([what, how]) => (
+                      <div key={what} className="flex gap-2"><span className="w-[9.5em] shrink-0 text-muted-foreground">{what}</span><span>{how}</span></div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {openNoteKey ? (
-                <div className="mt-2 flex items-start gap-2 rounded-md border border-border bg-muted/40 p-2 text-xs">
+                <div className="mt-2 flex shrink-0 items-start gap-2 rounded-md border border-border bg-muted/40 p-2 text-xs">
                   <span className="flex-1 whitespace-pre-wrap">{openNoteKey}</span>
                   <button type="button" className="shrink-0 text-muted-foreground hover:text-foreground" onClick={() => setOpenNoteKey(null)} aria-label="閉じる">
                     ×
                   </button>
                 </div>
               ) : null}
-              <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2`}>
+              <div ref={timelineScrollRef} className={`mt-3 min-h-0 flex-1 overflow-auto rounded-md border border-border bg-muted/40 p-2`}>
                 <div className="flex gap-x-2 text-[11px]">
                   {/* 段の名前は横に動かしても左に残す（2026-11-13 拡大して右へ動かすと「映像3」などが消えていた） */}
-                  <div ref={laneLabelColRef} className="relative z-30 flex w-[82px] shrink-0 flex-col bg-background will-change-transform">
+                  <div ref={laneLabelColRef} className="relative z-30 flex w-[100px] shrink-0 flex-col bg-background will-change-transform">
                     <div className="sticky top-0 z-20 mb-1 h-5 shrink-0 bg-background" />
                     {timelineLanes.map((lane, i) => (
                       <div
@@ -6790,6 +7274,23 @@ export function VideoReviewEditor({
                         style={{ height: lane.height, marginTop: i === 0 ? 0 : timelineLanes[i - 1].zone !== lane.zone ? 14 : 4 }}
                       >
                         <span className={`truncate ${laneSwitchedOff(laneSwitches, lane.key) ? 'opacity-40' : ''}`}>{lane.label}</span>
+                        {(() => {
+                          const locked = lockedLanes.has(lane.key);
+                          const title = locked ? 'この段の鍵を外す' : 'この段に鍵を掛ける（クリップを選べない・動かせない・消せない）';
+                          return (
+                            <button
+                              type="button"
+                              data-lane-lock={lane.key}
+                              aria-pressed={locked}
+                              title={title}
+                              aria-label={title}
+                              onClick={() => toggleLaneLock(lane.key)}
+                              className={`flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted ${locked ? 'text-amber-500' : 'text-muted-foreground/50 hover:text-foreground'}`}
+                            >
+                              {locked ? <Lock className="h-3.5 w-3.5" /> : <LockOpen className="h-3.5 w-3.5" />}
+                            </button>
+                          );
+                        })()}
                         {(() => {
                           const off = laneSwitchedOff(laneSwitches, lane.key);
                           const visual = lane.zone === 'visual';
@@ -6827,7 +7328,9 @@ export function VideoReviewEditor({
                     </div>
                     <div
                       ref={timelineRef}
-                      className="relative"
+                      data-timeline-tool={timelineTool}
+                      className={`relative ${timelineTool === 'razor' ? '[&_[data-clip-id]]:!cursor-crosshair [&_[data-clip-id]_*]:!cursor-crosshair'
+                        : timelineTool === 'slip' || timelineTool === 'slide' ? '[&_[data-clip-id]]:!cursor-col-resize [&_[data-clip-id]_*]:!cursor-col-resize' : ''}`}
                       style={timelineTrackStyle}
                       onPointerDownCapture={(event) => {
                         if (event.button !== 2) return; // right button starts a rubber-band select
