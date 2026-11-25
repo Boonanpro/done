@@ -74,7 +74,11 @@ def render(item, values, folder, *, font='SourceHanSansJP-Bold'):
         app = AE / 'Adobe After Effects 2027.app/Contents/MacOS/After Effects'
         binary = root / 'event'
         subprocess.run(['swiftc', SCRIPTS / 'event.swift', '-o', binary], check=True, capture_output=True, timeout=90)
-        worker = subprocess.Popen([app, '-m', '-noui'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Private instances have no windows to restore. A macOS recovery dialog
+        # would otherwise block startup before the worker can receive scripts.
+        worker = subprocess.Popen([app, '-m', '-noui', '-ApplePersistenceIgnoreState', 'YES',
+                                   '-NSQuitAlwaysKeepsWindows', 'NO'],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             def event(code):
                 if worker.poll() is not None:
@@ -102,12 +106,18 @@ def render(item, values, folder, *, font='SourceHanSansJP-Bold'):
                 raise RuntimeError(report.read_text() if report.exists() else 'テンプレートを準備できません')
         finally:
             if worker.poll() is None:
-                worker.terminate()
                 try:
-                    worker.wait(timeout=10)
+                    subprocess.run([binary, str(worker.pid),
+                                    'app.beginSuppressDialogs();app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);app.quit();'],
+                                   capture_output=True, timeout=8)
+                    worker.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    worker.kill()
-                    worker.wait()
+                    worker.terminate()
+                    try:
+                        worker.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        worker.kill()
+                        worker.wait()
         subprocess.run([AE/'aerender', '-project', root/'render.aep', '-rqindex', '1'],
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=1800)
         path = root/'render.mov'
