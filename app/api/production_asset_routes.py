@@ -109,6 +109,8 @@ class CreateContentRequest(BaseModel):
 class SaveContentRequest(BaseModel):
     title: str | None = None
     timeline: dict[str, Any] | None = None
+    # エディターが直し始めた版（渡したタイムラインの _rev）。今の版と違えばクリップごとに重ねる
+    base_rev: str | None = None
     asset_ids: list[str] | None = None
     status: Literal["draft", "running", "ready", "failed"] | None = None
 
@@ -7232,7 +7234,12 @@ async def list_contents(
     room_id: str = Query(...),
     current_user: TokenData = Depends(get_current_user),
 ):
-    return _read_contents(room_id)
+    contents = _read_contents(room_id)
+    # 渡すタイムラインには版（_rev）を付けて控える。エディターは保存の時にどの版から直したかを言い、
+    # 古い画面の保存でもダンの直しを消さない（app/services/timeline_revs.py）
+    from app.services import timeline_revs
+    timeline_revs.stamp_contents(room_id, contents)
+    return contents
 
 
 @router.get("/contents/{content_id}/edit-feed")
@@ -7253,6 +7260,9 @@ async def content_edit_feed(
         return {"last": last, "entries": []}
     content = next((c for c in _read_contents(room_id) if str(c.get("id")) == str(content_id)), None)
     sequence = ((content or {}).get("timeline") or {}).get("sequence")
+    if isinstance(sequence, dict):
+        from app.services import timeline_revs
+        timeline_revs.remember(room_id, content_id, sequence)
     import time as _time
     # now: the server clock, so the editor can tell how old a step is without trusting its own
     # clock (Windows vs the Mac). Old steps are applied at once, not replayed as motion.
@@ -7305,6 +7315,12 @@ async def update_content(
     room_id: str = Query(...),
     current_user: TokenData = Depends(get_current_user),
 ):
+    from app.services.timeline_draft import ContentsLock
+    with ContentsLock(room_id):
+        return _update_content_locked(content_id, data, request, room_id)
+
+
+def _update_content_locked(content_id: str, data: SaveContentRequest, request: Request, room_id: str):
     contents = _read_contents(room_id)
     now = datetime.now(timezone.utc).isoformat()
     for content in contents:
@@ -7314,9 +7330,23 @@ async def update_content(
             if data.timeline is not None:
                 # 画面からの保存はみきさんの手（2026-11-15 本人「誰が動かしたか分かるようにしないと」）。
                 # エディターは X-Timeline-Actor: owner を付けて送る。付いていない保存（台本・道具）は「画面の外」。
-                from app.services import timeline_authors
+                from app.services import timeline_authors, timeline_revs
                 before_seq = ((content.get("timeline") or {}) if isinstance(content.get("timeline"), dict) else {}).get("sequence")
                 after_seq = data.timeline.get("sequence") if isinstance(data.timeline, dict) else None
+                if isinstance(after_seq, dict):
+                    after_seq.pop(timeline_revs.REV_KEY, None)
+                # 古い画面からの保存: 画面が直し始めた版と今の版が違えば、画面が知らない直し（ダンの直し・
+                # 別の画面の直し）を残してクリップごとに重ねる。2026-11-25 寝ていたタブの保存がダンの直し
+                # 72か所を消し、本人が開き直しても直しが見えなかった
+                if isinstance(after_seq, dict) and isinstance(before_seq, dict) and data.base_rev \
+                        and data.base_rev != timeline_revs.rev_of(before_seq):
+                    base = timeline_revs.load(room_id, content_id, data.base_rev)
+                    if base is None:
+                        raise HTTPException(status_code=409, detail={
+                            "stale": True, "message": "画面の中身が古いので、最新のタイムラインを読み直してください"})
+                    merged, _stats = timeline_revs.merge(base, after_seq, before_seq)
+                    data.timeline["sequence"] = merged
+                    after_seq = merged
                 if isinstance(after_seq, dict):
                     actor = (timeline_authors.OWNER if (request.headers.get("x-timeline-actor") or "").lower() == "owner"
                              else {"kind": "other", "label": "画面の外からの保存"})
@@ -7332,6 +7362,10 @@ async def update_content(
                 content["status"] = data.status
             content["updated_at"] = now
             _write_contents(room_id, contents)
+            seq = (content.get("timeline") or {}).get("sequence") if isinstance(content.get("timeline"), dict) else None
+            if isinstance(seq, dict):
+                from app.services import timeline_revs
+                timeline_revs.remember(room_id, content_id, seq)
             return content
     raise HTTPException(status_code=404, detail="Content not found")
 
