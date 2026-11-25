@@ -9,6 +9,7 @@
 // - 伸ばす（区間を足す）: 足した所より後ろから始まる物を後ろへずらす。またいでいる物はそのまま。
 // - 並べ替え: 動かすクリップを抜いて詰め、別のつなぎ目に差し込む。そのクリップの上にある字幕などは一緒に動く。
 // 長いBGMのように何本ものクリップにまたがる物は、並べ替えでは動かさない（全体の長さは変わらないので）。
+// 半分以上が動かすクリップの中にある物は、長くても乗っている物として一緒に動く（ridesOn）。
 
 export type RClip = {
   id: string;
@@ -44,6 +45,34 @@ export function isSpanning(c: RClip, lane?: RLane): boolean {
   const role = String(c.role || '');
   if (lane?.zone === 'audio' && (role === 'music' || role === 'bgm')) return true;
   return c.timeline_end - c.timeline_start > 20;
+}
+
+/** メインのクリップ [a, b] に乗っている物か（字幕・絵・モザイク・別に録った声）。自分の長さの半分以上が
+ *  そのクリップの中にあり、BGM ではない。長さは問わない（30秒のクリップに付けた30秒の声も乗っている物）。
+ *  2026-11-25 本人「コピペしたら音が出なくなる」: カメラの音は消してあり、聞こえる声は別に録った声の
+ *  クリップだったので、映像と声のつながりだけを写すと声が抜けていた。 */
+export function ridesOn(c: RClip, lane: RLane | undefined, a: number, b: number): boolean {
+  const role = String(c.role || '');
+  if (lane?.zone === 'audio' && (role === 'music' || role === 'bgm')) return false;
+  const ov = Math.max(0, Math.min(c.timeline_end, b) - Math.max(c.timeline_start, a));
+  return ov >= Math.max(EPS, (c.timeline_end - c.timeline_start) * 0.5);
+}
+
+/** 選んだメインのクリップに乗っている、ほかの段のクリップの id（写す・動かす時に一緒に連れて行く）。 */
+export function riderIds(seq: RSeq, ids: string[], lanes: Map<string, RLane>, mainLayer: number | null): string[] {
+  if (mainLayer === null) return [];
+  const idset = new Set(ids.map(String));
+  const all = (seq.tracks || []).flatMap((t) => t.clips || []);
+  const isMain = (c: RClip) => { const l = lanes.get(String(c.id)); return l?.zone === 'visual' && l.layer === mainLayer; };
+  const hosts = all.filter((c) => idset.has(String(c.id)) && isMain(c));
+  if (!hosts.length) return [];
+  const out: string[] = [];
+  for (const c of all) {
+    if (idset.has(String(c.id)) || isMain(c)) continue;
+    const lane = lanes.get(String(c.id));
+    if (hosts.some((h) => ridesOn(c, lane, h.timeline_start, h.timeline_end))) out.push(String(c.id));
+  }
+  return out;
 }
 
 /** メインの段: 映像のクリップがある一番下の映像の段。無ければ null。 */
@@ -193,61 +222,88 @@ export function rippleTrim<S extends RSeq, A extends RAnn>(
 }
 
 /** メインのクリップ（と相方 ids）を抜いて詰め、詰めた後のタイムラインの時刻 P に差し込む。
- *  上に乗っている物（半分以上がそのクリップの上にある字幕・絵・モザイク）は一緒に動く。 */
+ *  上に乗っている物（半分以上がそのクリップの上にある字幕・絵・モザイク・別に録った声）は一緒に動く。 */
 export function rippleMove<S extends RSeq, A extends RAnn>(
   seq: S, anns: A[], ids: string[], P: number, lanes: Map<string, RLane>, mainLayer: number | null,
 ): { seq: S; anns: A[] } {
+  return rippleMoveGroups(seq, anns, [ids], P, lanes, mainLayer);
+}
+
+/** 何本かのメインのクリップ（groups の各組 = [メインのクリップ, 相方…]）をまとめて抜いて詰め、元の順番のまま
+ *  詰めた後の時刻 P に並べて差し込む（2026-11-25 本人「途中の映像を先頭に持ってくる時に全体を動かしつつ差し込みたい」）。
+ *  それぞれに乗っている物はそのクリップと一緒に動く。 */
+export function rippleMoveGroups<S extends RSeq, A extends RAnn>(
+  seq: S, anns: A[], groups: string[][], P: number, lanes: Map<string, RLane>, mainLayer: number | null,
+): { seq: S; anns: A[] } {
   const all = (seq.tracks || []).flatMap((t) => t.clips || []);
-  const main = all.find((c) => String(c.id) === ids[0]);
-  if (!main) return { seq, anns };
-  const a = main.timeline_start, b = main.timeline_end, L = b - a;
-  const idset = new Set(ids);
+  const byId = new Map(all.map((c) => [String(c.id), c]));
+  const gs = groups.filter((g) => g.length && byId.has(String(g[0])))
+    .map((g) => ({ ids: g.map(String), host: byId.get(String(g[0]))! }))
+    .sort((p, q) => p.host.timeline_start - q.host.timeline_start);
+  if (!gs.length) return { seq, anns };
+  const carried = new Map<string, number>();
+  const hosts: Array<{ a: number; b: number; shift: number }> = [];
+  let off = 0;
+  for (const g of gs) {
+    const a = g.host.timeline_start, b = g.host.timeline_end;
+    const shift = P + off - a;
+    off += b - a;
+    hosts.push({ a, b, shift });
+    for (const id of g.ids) carried.set(id, shift);
+  }
+  const L = off;
   const isMain = (c: RClip) => { const l = lanes.get(String(c.id)); return l?.zone === 'visual' && l.layer === mainLayer; };
-  const mainClips = all.filter((c) => isMain(c) && !idset.has(String(c.id)));
-  // 抜いて詰めた後の時刻
-  const lifted = (t: number) => (t >= b - EPS ? t - L : t);
-  // 差し込んだ後の時刻（詰めた後の時刻 t' について）
+  // 抜いて詰めた後の時刻（抜いた区間より後ろは、その前に抜いた長さだけ前へ）
+  const lifted = (t: number) => { let d = 0; for (const h of hosts) if (h.b <= t + EPS) d += h.b - h.a; return t - d; };
   const placed = (t: number) => (t >= P - EPS ? t + L : t);
   const outside = (t: number) => placed(lifted(t)) - t;
+  const mainClips = all.filter((c) => isMain(c) && !carried.has(String(c.id)));
   const mainShift = new Map<string, number>();
   for (const c of mainClips) mainShift.set(String(c.id), outside(c.timeline_start));
   const mainAt = (t: number) => mainClips.find((c) => t >= c.timeline_start - EPS && t < c.timeline_end - EPS);
-  const ride = P - a;
-  const attached = (s: number, e: number) => {
-    const ov = Math.max(0, Math.min(e, b) - Math.max(s, a));
+  const attachedTo = (s: number, e: number) => hosts.find((h) => {
+    const ov = Math.max(0, Math.min(e, h.b) - Math.max(s, h.a));
     return ov >= Math.max(EPS, (e - s) * 0.5);
-  };
+  });
   const shiftFor = (s: number, e: number, spanning: boolean): number => {
     if (spanning) return 0;
-    if (attached(s, e)) return ride;
+    const h = attachedTo(s, e);
+    if (h) return h.shift;
     const host = mainAt(s + EPS) || mainAt(e - EPS);
     if (host) return mainShift.get(String(host.id)) || 0;
-    if (s > a - EPS && s < b - EPS) return 0;
+    const inside = hosts.find((x) => s > x.a - EPS && s < x.b - EPS);
+    if (inside) return inside.shift;
     return outside(s);
   };
   const tracks = (seq.tracks || []).map((track) => ({
     ...track,
     clips: (track.clips || []).map((c) => {
-      if (idset.has(String(c.id))) return shiftClip(c, ride);
-      if (isMain(c)) return shiftClip(c, mainShift.get(String(c.id)) || 0);
-      return shiftClip(c, shiftFor(c.timeline_start, c.timeline_end, isSpanning(c, lanes.get(String(c.id)))));
+      const id = String(c.id);
+      if (carried.has(id)) return shiftClip(c, carried.get(id)!);
+      if (isMain(c)) return shiftClip(c, mainShift.get(id) || 0);
+      const lane = lanes.get(id);
+      // 乗っている物は長くても一緒に動く（30秒のクリップの声が置いて行かれていた）
+      const rh = hosts.find((h) => ridesOn(c, lane, h.a, h.b));
+      if (rh) return shiftClip(c, rh.shift);
+      return shiftClip(c, shiftFor(c.timeline_start, c.timeline_end, isSpanning(c, lane)));
     }),
   }));
   const outAnns = anns.map((x) => shiftAnn(x, shiftFor(x.start, x.end ?? x.start + 0.5, false)) as A);
   return { seq: withDuration({ ...seq, tracks }), anns: outAnns };
 }
 
-/** 並べ替えで差し込める所（抜いて詰めた後のメインのつなぎ目）。 */
-export function insertPoints(seq: RSeq, ids: string[], lanes: Map<string, RLane>, mainLayer: number | null): number[] {
+/** 並べ替えで差し込める所（抜いて詰めた後のメインのつなぎ目）。ids の先頭がつかんだメインのクリップ。
+ *  hostIds を渡すと、そのメインのクリップを全部抜いた後のつなぎ目。 */
+export function insertPoints(seq: RSeq, ids: string[], lanes: Map<string, RLane>, mainLayer: number | null, hostIds?: string[]): number[] {
   const all = (seq.tracks || []).flatMap((t) => t.clips || []);
-  const main = all.find((c) => String(c.id) === ids[0]);
-  if (!main) return [];
-  const a = main.timeline_start, b = main.timeline_end, L = b - a;
-  const lifted = (t: number) => (t >= b - EPS ? t - L : t);
+  const hs = (hostIds && hostIds.length ? hostIds : [ids[0]]).map((id) => all.find((c) => String(c.id) === String(id))).filter((c): c is RClip => !!c);
+  if (!hs.length) return [];
+  const skip = new Set([...ids.map(String), ...hs.map((c) => String(c.id))]);
+  const lifted = (t: number) => { let d = 0; for (const h of hs) if (h.timeline_end <= t + EPS) d += h.timeline_end - h.timeline_start; return t - d; };
   const pts = new Set<number>([0]);
   for (const c of all) {
     const l = lanes.get(String(c.id));
-    if (ids.includes(String(c.id)) || l?.zone !== 'visual' || l.layer !== mainLayer) continue;
+    if (skip.has(String(c.id)) || l?.zone !== 'visual' || l.layer !== mainLayer) continue;
     pts.add(r2(lifted(c.timeline_start)));
     pts.add(r2(lifted(c.timeline_end)));
   }
