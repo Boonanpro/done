@@ -8,13 +8,16 @@
 // - 案の「…」で 表のサムネにする・複製・消す（消すのは控えに回すだけ。最後の1つは消せない）
 // - ダンが案を足した・直した・並べ替えた時は、その案に光と「ダン」の印を出す（2026-11-24 本人「下の一覧から新規追加するとか
 //   複製するとか画面外のものも全部、ダンが何かやる時は必ずその操作を見える化しなさい」）。2秒ごとに読み直す
+// - 案は引きずって並べ替える。帯の上にマウスがある間は ← → で前後の案へ移る。移る時は画面を作り直さず、
+//   帯が持っている案の形をそのまま次の画面の最初の形にする（2026-11-26 本人「下の画像をドラッグアンドドロップしたら並べ替え
+//   れるようにして。カーソル判定がある時はキーボードの左右ボタンで切り替え。毎回ページをリフレッシュするんじゃなくてシームレスに」）
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, Loader2, MoreHorizontal, MousePointer2, Plus, Star, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { ThumbCanvas } from './thumb-canvas';
-import { asThumbDoc, type ThumbDoc } from './thumb-doc';
+import { asThumbDoc, movedOrder, type ThumbDoc } from './thumb-doc';
 
 export type ThumbPatternLink = {
   videoId: string;
@@ -27,6 +30,31 @@ export type ThumbPatternLink = {
 type Pattern = { id: string; title: string; doc: ThumbDoc };
 type DanMark = { kind: 'added' | 'edited' | 'moved'; until: number };
 const DAN_MARK_MS = 3500;
+
+// 案を移ると画面は作り直される（key が案の id）。帯の並びと案の形をこの窓の間だけ覚えておき、
+// 次の画面の帯と直す画面の最初の形にする（読み込み中の表示や帯が空になる一瞬を出さない）
+const stripCache = new Map<string, Pattern[]>();
+const docCache = new Map<string, ThumbDoc>();
+/** 帯が最後に読んだ、その案の形（無ければ null）。直す画面が最初の形に使う */
+export function cachedThumbDoc(contentId: string): ThumbDoc | null {
+  return docCache.get(contentId) || null;
+}
+/** 直す画面が今の形を覚えさせる（案を戻った時にも最新から始まる） */
+export function rememberThumbDoc(contentId: string, doc: ThumbDoc) {
+  docCache.set(contentId, doc);
+}
+
+function isTypingTarget(el: EventTarget | null) {
+  const t = el as HTMLElement | null;
+  if (!t || !t.tagName) return false;
+  if (t.isContentEditable) return true;
+  if (t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return true;
+  if (t.tagName === 'INPUT') {
+    const ty = (t as HTMLInputElement).type;
+    return !['button', 'checkbox', 'radio', 'range', 'color', 'submit'].includes(ty);
+  }
+  return false;
+}
 
 function url(path: string, roomId: string) {
   return `/api/v1/production-assets/contents/${path}${path.includes('?') ? '&' : '?'}room_id=${encodeURIComponent(roomId)}`;
@@ -41,7 +69,17 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
   /** エディターの Ctrl+D（部品を選んでいない時）から今の案を複製できるよう、その操作を渡す */
   onActions?: (a: ThumbPatternActions | null) => void;
 }) {
-  const [items, setItems] = useState<Pattern[]>([]);
+  const [items, setItemsState] = useState<Pattern[]>(() => stripCache.get(link.videoId) || []);
+  const setItems = useCallback((next: Pattern[]) => {
+    stripCache.set(link.videoId, next);
+    next.forEach((p) => { if (p.id !== currentId || !docCache.has(p.id)) docCache.set(p.id, p.doc); });
+    setItemsState(next);
+  }, [link.videoId, currentId]);
+  // 引きずって並べ替えている案と、落とす先（その案の前か後ろか）
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
+  const hover = useRef(false);
+  const ordering = useRef(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [menu, setMenu] = useState<string | null>(null);
   // 帯は横に送れる箱なので、小さな欄は画面に固定して出す（箱の中だと切れる）
@@ -76,9 +114,11 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
         if (Object.keys(add).length) setMarks((m) => ({ ...m, ...add }));
       }
       seen.current = new Map(next.map((p, k) => [p.id, { rev: p.doc.rev ?? 0, k }]));
+      // 並べ替えを送っている間は、手元の並びを読み直しで戻さない
+      if (ordering.current) return;
       setItems(next);
     } catch { /* 次に */ }
-  }, [roomId, link.videoId]);
+  }, [roomId, link.videoId, setItems]);
 
   useEffect(() => {
     void load();
@@ -177,16 +217,83 @@ export function ThumbPatterns({ roomId, currentId, liveDoc, link, compact, befor
     link.onOpen({ id: p.id, title: p.title });
   };
 
+  // 並べ替え: 落とした所の並びをすぐ画面に出し、全部の並びを送る（先頭が表のサムネ）
+  const reorder = async (from: string, to: string, after: boolean) => {
+    const ids = items.map((p) => p.id);
+    const nextIds = movedOrder(ids, from, to, after);
+    if (nextIds.join() === ids.join()) return;
+    const byId = new Map(items.map((p) => [p.id, p]));
+    setItems(nextIds.map((id) => byId.get(id)!).filter(Boolean));
+    if (seen.current) nextIds.forEach((id, k) => { const v = seen.current!.get(id); if (v) seen.current!.set(id, { ...v, k }); });
+    ordering.current = true;
+    try {
+      const res = await fetch(url(`${encodeURIComponent(link.videoId)}/thumbnail-patterns/order`, roomId), {
+        method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: nextIds }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      link.onChanged?.();
+    } catch (e) {
+      toast.error('並べ替えられませんでした', { description: String((e as Error).message || e).slice(0, 160) });
+    } finally {
+      ordering.current = false;
+      await load();
+    }
+  };
+
+  // 帯の上にマウスがある間の ← →: 前後の案へ移る（直す画面の「部品を1画素動かす」より先に受け取る）
+  const openRef = useRef(open);
+  useEffect(() => { openRef.current = open; });
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (!hover.current || (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight')) return;
+      if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.shiftKey || isTypingTarget(ev.target)) return;
+      const list = stripCache.get(link.videoId) || [];
+      const k = list.findIndex((p) => p.id === currentId);
+      const next = list[k + (ev.key === 'ArrowRight' ? 1 : -1)];
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      if (k < 0 || !next) return;
+      void openRef.current(next);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [link.videoId, currentId]);
+
   const cardW = compact ? 112 : 132;
   return (
-    <div ref={boxRef} className="flex shrink-0 items-end gap-2 overflow-x-auto px-3 py-2" data-thumb-patterns>
+    <div ref={boxRef} className="flex shrink-0 items-end gap-2 overflow-x-auto px-3 py-2" data-thumb-patterns
+      onPointerEnter={() => { hover.current = true; }} onPointerLeave={() => { hover.current = false; }}
+      title="引きずって並べ替え・マウスを乗せて ← → で前後の案へ">
       <style>{'@keyframes thumbDanIn{from{opacity:0;transform:translateY(8px) scale(.85)}to{opacity:1;transform:none}}'}</style>
       {items.map((p, k) => {
         const cur = p.id === currentId;
         const dm = marks[p.id];
         return (
-          <div key={p.id} className="relative shrink-0" style={{ width: cardW, animation: dm?.kind === 'added' ? 'thumbDanIn .45s cubic-bezier(.2,.8,.2,1)' : undefined }} data-thumb-pattern={p.id}>
-            <button type="button" onClick={() => void open(p)} title={cur ? '今開いている案' : 'この案を開く'}
+          <div key={p.id} className="relative shrink-0" draggable={menu !== p.id}
+            style={{ width: cardW, animation: dm?.kind === 'added' ? 'thumbDanIn .45s cubic-bezier(.2,.8,.2,1)' : undefined, opacity: dragId === p.id ? 0.4 : 1 }}
+            onDragStart={(e) => { setMenu(null); setDragId(p.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('application/x-thumb-pattern', p.id); }}
+            onDragOver={(e) => {
+              if (!dragId || dragId === p.id) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              const r = e.currentTarget.getBoundingClientRect();
+              const after = e.clientX > r.left + r.width / 2;
+              setDropAt((d) => (d && d.id === p.id && d.after === after ? d : { id: p.id, after }));
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              const from = dragId;
+              const to = dropAt && dropAt.id === p.id ? dropAt : { id: p.id, after: false };
+              setDragId(null); setDropAt(null);
+              if (from) void reorder(from, to.id, to.after);
+            }}
+            onDragEnd={() => { setDragId(null); setDropAt(null); }}
+            data-thumb-pattern={p.id}>
+            {dropAt && dropAt.id === p.id ? (
+              <div aria-hidden className="pointer-events-none absolute -top-0.5 bottom-5 z-20 w-1 rounded-full bg-sky-500"
+                style={dropAt.after ? { right: -6 } : { left: -6 }} data-thumb-pattern-drop={dropAt.after ? 'after' : 'before'} />
+            ) : null}
+            <button type="button" onClick={() => void open(p)} title={cur ? '今開いている案（引きずって並べ替え）' : 'この案を開く（引きずって並べ替え）'}
               className={`block w-full overflow-hidden rounded-md ${cur ? 'ring-2 ring-sky-500' : 'ring-1 ring-border hover:ring-sky-300'}`}
               style={dm ? { boxShadow: '0 0 0 2px #38bdf8, 0 0 14px 3px rgba(56,189,248,.65)' } : undefined}>
               <div className="pointer-events-none"><ThumbCanvas doc={cur ? liveDoc : p.doc} width="100%" /></div>

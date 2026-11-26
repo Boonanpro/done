@@ -59,6 +59,7 @@ export type ThumbDoc = {
   // 一覧で並べて見る時に横に並べるほかのサムネ（参考や同じチャンネルの過去の動画）
   references?: Array<{ src: string; title?: string; channel?: string }>;
   title?: string; // 一覧で並べた時に下に出す動画の題
+  plan_note?: string; // 「並べる」で絵の下に書く企画のメモ（企画の一言・冒頭5秒など）
   // 本人がペンで書き込んで送った指示（結果は指示の欄にだけ出す）
   instructions?: ThumbInstruction[];
 };
@@ -264,4 +265,14 @@ export function stepParts<T extends HasId>(parts: T[], ids: string[], dir: 'up' 
     }
   }
   return out;
+}
+
+/** 案の並び（ids）で from の案を to の前か後ろへ動かした並び（下の案の帯を引きずって並べ替える時） */
+export function movedOrder(ids: string[], from: string, to: string, after: boolean): string[] {
+  if (from === to) return ids;
+  const rest = ids.filter((x) => x !== from);
+  const at = rest.indexOf(to);
+  if (at < 0) return ids;
+  rest.splice(after ? at + 1 : at, 0, from);
+  return rest;
 }
