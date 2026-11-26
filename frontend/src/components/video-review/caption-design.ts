@@ -3,9 +3,11 @@
 // helpers here, at the OUTPUT resolution, so the timeline preview equals the burned-in video
 // pixel-for-pixel. No ffmpeg/libass styling is involved for designed captions.
 
+import { ADOBE_FONTS, ADOBE_FONT_CSS, BUNDLED_ADOBE_FONTS, adobeFontUrl } from './adobe-fonts';
 import type { CSSProperties } from 'react';
 
 export type CaptionFontId =
+  | keyof typeof ADOBE_FONTS
   | 'noto-sans'
   | 'dela-gothic'
   | 'zen-maru'
@@ -17,12 +19,12 @@ export type CaptionFontId =
   | 'hiragino-w8'
   | 'toppan-mincho';
 
-// Registry of caption fonts. The first seven are the bundled OFL fonts (frontend/public/fonts).
-// The last three are the owner's own fonts (macOS / Morisawa faces kept in ~/.dan/fonts, NOT in
-// git — redistributing them is not allowed), served by the backend's scene font route; their
-// fallbacks keep a caption readable when that file can't be loaded. `css` is the font-family
-// value; `weight` is what we actually request (display faces are single-weight).
-export const CAPTION_FONTS: Record<CaptionFontId, { label: string; css: string; weight: number }> = {
+type FontDesign = { label: string; css: string; weight: number };
+function adobeCaptionFont(id: keyof typeof ADOBE_FONTS): FontDesign {
+  const face = ADOBE_FONTS[id];
+  return { label: face.label, css: `"${"web" in face ? face.web : face.face}"`, weight: face.weight };
+}
+export const CAPTION_FONTS: Record<CaptionFontId, FontDesign> = {
   'noto-sans':     { label: '標準',     css: '"NotoSansJP"',    weight: 900 },
   'dela-gothic':   { label: '極太',     css: '"DelaGothicOne"', weight: 400 },
   'zen-maru':      { label: '角丸',     css: '"ZenMaruGothic"', weight: 900 },
@@ -33,6 +35,16 @@ export const CAPTION_FONTS: Record<CaptionFontId, { label: string; css: string; 
   'hiragino-w6':   { label: 'ヒラギノ角ゴ W6', css: '"HiraginoW6", "Hiragino Sans", "NotoSansJP"', weight: 600 },
   'hiragino-w8':   { label: 'ヒラギノ角ゴ W8', css: '"HiraginoW8", "Hiragino Sans", "NotoSansJP"', weight: 800 },
   'toppan-mincho': { label: '凸版文久見出し明朝', css: '"ToppanMidashiMincho", "ShipporiMincho"', weight: 800 },
+  'kozuka-heavy': adobeCaptionFont('kozuka-heavy'),
+  'neokuro': adobeCaptionFont('neokuro'),
+  'ryo-display': adobeCaptionFont('ryo-display'),
+  'shuei-ymincho': adobeCaptionFont('shuei-ymincho'),
+  'v7-maru': adobeCaptionFont('v7-maru'),
+  'biz-udp': adobeCaptionFont('biz-udp'),
+  'zen-kaku': adobeCaptionFont('zen-kaku'),
+  'klee': adobeCaptionFont('klee'),
+  'kaisei': adobeCaptionFont('kaisei'),
+  'yuji': adobeCaptionFont('yuji'),
 };
 
 // Look up a font by id, falling back to the default for anything unknown. Stored designs can
@@ -75,6 +87,10 @@ export function captionFontFilesFor(designs: ReadonlyArray<CaptionDesign | undef
     const f = d && typeof d.font === 'string' && Object.prototype.hasOwnProperty.call(CAPTION_OWNER_FONT_FILES, d.font)
       ? CAPTION_OWNER_FONT_FILES[d.font as CaptionFontId] : undefined;
     if (f && !out.includes(f)) out.push(f);
+    if (d?.font && Object.prototype.hasOwnProperty.call(BUNDLED_ADOBE_FONTS, d.font)) {
+      const face = BUNDLED_ADOBE_FONTS[d.font as keyof typeof BUNDLED_ADOBE_FONTS];
+      if (!out.some(row => row[0] === face.face)) out.push([face.face, adobeFontUrl(face.face), String(face.weight)]);
+    }
   }
   return out;
 }
@@ -104,6 +120,7 @@ export function loadCaptionFontFiles(files: ReadonlyArray<readonly [string, stri
 // @font-face for every bundled file. Emitted as a <style> by CaptionLayer so it works both
 // inside the editor (no global-CSS constraint) and on the standalone /caption-frame route.
 export const CAPTION_FONT_FACE_CSS = `
+${ADOBE_FONT_CSS}
 @font-face{font-family:'NotoSansJP';font-weight:100 900;src:url('/fonts/NotoSansJP.ttf') format('truetype');font-display:block;}
 @font-face{font-family:'DelaGothicOne';src:url('/fonts/DelaGothicOne-Regular.ttf') format('truetype');font-display:block;}
 @font-face{font-family:'ZenMaruGothic';font-weight:900;src:url('/fonts/ZenMaruGothic-Black.ttf') format('truetype');font-display:block;}
@@ -144,7 +161,8 @@ export type CaptionDesign = {
   highlightScale?: number;    // karaoke: scale bump on the active word (default 1.12)
   // 選択範囲ごとの文字色。s/e は text の UTF-16 コード単位のインデックス [s, e)。
   // ネイティブエディタの「選択範囲の色」から書かれる。後のスパンが優先。
-  colorSpans?: { s: number; e: number; color: string }[];
+  // Part of the line in another colour and/or size (scale = size relative to the rest of the line).
+  colorSpans?: { s: number; e: number; color?: string; scale?: number }[];
 };
 
 // Caption motion presets. 'pop'/'fade'/'slide' are pure intro animations; 'typewriter' reveals

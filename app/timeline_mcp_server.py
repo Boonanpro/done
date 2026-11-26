@@ -53,6 +53,19 @@ _draft_lock = threading.RLock()
 _BACKGROUND_TOOLS = {'generate_speech','generate_image','generate_look_frame','watch_video','watch_render','measure_speech','render_frame','probe_audio','resolve_reference','analyze_reference','search_web_references','render_motion_project','present_references','read_presentations','revise_presentation'}
 
 def _run_tool_thread(name,args):
+    if name == 'place_envato_component':
+        from app.services import envato_shelf
+        item = next((row for row in envato_shelf.catalog() if row['id'] == args['component']), None)
+        if not item:
+            return _ok({'ok': False, 'error': '部品が見つかりません'})
+        if not str(args.get('license_project') or '').strip():
+            return _ok({'ok': False, 'error': 'EnvatoのLicensesで、この作品への登録を確認してください', 'url': item['url']})
+        values = envato_shelf.resolve_values(item, args.get('values', {}), _assets())
+        scale, color, outline = envato_shelf.resolve_style(args.get('text_size'), args.get('text_color'), args.get('text_outline'))
+        path = envato_shelf.render(item, values, _room_dir() / 'envato-renders', font=args.get('font') or item.get('font', 'SourceHanSansJP-Bold'),
+                                   text_scale=scale, text_color=color, text_outline=outline)
+        # Only placement holds the content lock. A concurrent human edit is handled below.
+        args = {**args, '_render': str(path), '_title': item['name'], 'font': args.get('font') or item.get('font', 'SourceHanSansJP-Bold'), '_duration': item['duration'], '_source': item['url']}
     if name in _BACKGROUND_TOOLS:
         return asyncio.run(_dispatch(name,args))
     with _draft_lock, td.content_edit_lock(ROOM_ID, CONTENT_ID or _load().get('content_id', '')):
@@ -139,7 +152,7 @@ _STR = {"type": "string"}
 
 
 _CAPTION_STYLE = {'type':'object','additionalProperties':False,'properties':{
-    'font':{'type':'string','enum':list(tc.CAPTION_FONT_IDS),'description':'字幕フォントのID。noto-sans(源ノ角ゴシック。標準は極太900)/dela-gothic(極太)/zen-maru(角丸)/reggae/mplus-rounded(丸ポップ)/rocknroll/mincho(しっぽり明朝)/hiragino-w6・hiragino-w8(ヒラギノ角ゴ。普通の字幕を上品に)/toppan-mincho(凸版文久見出し明朝ExtraBold。赤箱に白明朝など)。省略でnoto-sans。'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
+    'font':{'type':'string','enum':list(tc.CAPTION_FONT_IDS),'description':'字幕フォントのID。noto-sans(源ノ角ゴシック。標準は極太900)/dela-gothic(極太)/zen-maru(角丸)/reggae/mplus-rounded(丸ポップ)/rocknroll/mincho(しっぽり明朝)/hiragino-w6・hiragino-w8(ヒラギノ角ゴ。普通の字幕を上品に)/toppan-mincho(凸版文久見出し明朝ExtraBold。赤箱に白明朝など)。Adobe Fontsの太い見出しはkozuka-heavy(小塚ゴシックH)、neokuro(ネオクロ)、ryo-display(りょうDisplay EB)、shuei-ymincho(秀英横太明朝B)、v7-maru(VDL V7丸ゴシックEB)。省略でnoto-sans。'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
     'color':{'type':'string'},'outlineColor':{'type':'string'},'outlineWidth':{'type':'number'},
     'maxWidth':{'type':'number','description':'画面幅に対する比率。'},
     'textAlign':{'type':'string','enum':['left','center','right']},
@@ -150,7 +163,9 @@ _CAPTION_STYLE = {'type':'object','additionalProperties':False,'properties':{
     'shadow':{'type':'object','additionalProperties':False,'description':'字幕全体の影(px)。外す時はblur:0,dx:0,dy:0。',
               'properties':{'color':{'type':'string'},'blur':{'type':'number'},'dx':{'type':'number'},'dy':{'type':'number'}}},
     'skew':{'type':'number','description':'箱ごと斜めにする角度(度)。負で上が右へ傾く(-9で赤の強調の斜め)。±30まで。0でまっすぐ。'},
-    'letterSpacing':{'type':'number','description':'字間。文字の大きさに対する比率(0.02で少し広げる)。'}
+    'letterSpacing':{'type':'number','description':'字間。文字の大きさに対する比率(0.02で少し広げる)。'},
+    'emphasis':{'type':['array','null'],'description':'字幕の中の一部の言葉だけ色・大きさを変える。[{text:"24年",color:"#e3141f",scale:1.4}]。textは字幕の本文にある言葉そのまま(同じ言葉が2回あれば並べた順に前から当てる)。scaleはその行の他の文字に対する倍率。渡すと前の強調を置き換え、[]で外す。',
+                'items':{'type':'object','additionalProperties':False,'properties':{'text':{'type':'string'},'color':{'type':'string'},'scale':{'type':'number'}},'required':['text']}}
 }}
 
 @app.list_tools()
@@ -182,6 +197,8 @@ def tool_definitions() -> list[types.Tool]:
         _tool("clip_history", "タイムラインを誰が（みきさんの手／どのダンの作業）・いつ・何を変えたかの記録を新しい順に読む。clip_idで1本に絞る。見覚えのない変更を見つけたら、本人に聞く前にこれで確かめる。",
               {"clip_id": _STR, "limit": {"type": "integer"}}),
         _tool("timeline_outline", "タイムライン全体の構造（レーン/クリップ/時刻/種類）を読む。作業前に必ず一度読むこと。", {}),
+        _tool('list_envato_components', 'Envatoの部品を用途と差し替え欄で探す。素材ページで現在の作品への利用登録を確かめる。', {'query': _STR}),
+        _tool('place_envato_component', '作品名でEnvatoの利用登録を確認した部品に文字・数字・作品内の写真素材IDを入れ、After Effectsで書き出して指定秒に置く。license_projectは実際に登録した作品名。fontは有効なAdobe FontsのPostScript名。text_sizeは文字の大きさの倍率(0.5〜4、テンプレートの元の大きさが1)、text_colorは文字の色、text_outlineは文字の縁の色(どちらも#rrggbb)。', {'component': _STR, 'values': {'type':'object'}, 'at': _NUM, 'font': _STR, 'license_project': _STR, 'text_size': _NUM, 'text_color': _STR, 'text_outline': _STR}, ['component','values','at','license_project']),
         _tool("list_assets", "部屋のアセット一覧（asset_id/ファイル名/種類/長さ）。配置ツールに渡すasset_idはここで確認する。", {}),
         _tool("timeline_transcript", "動画の発話内容（文字起こし）をタイムライン時刻つきで読む。内容理解はこれを根拠にする。",
               {"t0": _NUM, "t1": _NUM}),
@@ -490,6 +507,36 @@ async def _dispatch(name: str, a: dict) -> list:
         return _ok(timeline_authors.history_text(ROOM_ID, draft['content_id'], a.get('clip_id') or None,
                                                  int(a.get('limit') or 20)))
 
+    if name == 'list_envato_components':
+        from app.services import envato_shelf
+        query = str(a.get('query') or '').casefold()
+        return _ok({'items': [envato_shelf.describe(i) for i in envato_shelf.catalog()
+                              if query in ' '.join([i['id'],i['group'],i['name'],i['sourceName']]).casefold()]})
+    if name == 'place_envato_component':
+        at = float(a['at'])
+        request = {k: a[k] for k in ('component','values','at','license_project')}
+        request.update({k: a[k] for k in ('text_size','text_color','text_outline') if a.get(k) not in (None, '')})
+        request['font'] = a.get('font') or 'SourceHanSansJP-Bold'
+        for track in seq.get('tracks', []):
+            for clip in track.get('clips', []):
+                if clip.get('envato') == request and clip.get('timeline_start') == round(at,3):
+                    return _ok({'ok': True, 'clip_id': clip['id'], 'already_placed': True})
+        imported = next(({'ok': True, 'asset_id': aid} for aid, asset in assets.items()
+                         if asset.get('original_uri') == a['_render']), None)
+        if not imported:
+            imported = _import_media(draft, a['_render'], a['_title']+'.mov')
+            if not imported.get('ok'):
+                return _ok(imported)
+            assets = _assets()
+            draft = _load()
+            seq = draft['sequence']
+        result = tc.add_clip(seq, assets, asset_id=imported['asset_id'], timeline_start=at, duration=a['_duration'])
+        if result.get('ok'):
+            clip = next(c for tr in seq['tracks'] for c in tr['clips'] if c['id'] == result['clip_id'])
+            clip['envato'] = request
+            draft.setdefault('log', []).append({'t': time.time(), 'tool': name, 'args': request, 'source': a['_source']})
+            td.save_draft(draft)
+        return _ok(result)
     if name == "list_assets":
         rows = []
         for aid, a in assets.items():

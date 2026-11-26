@@ -73,7 +73,7 @@ RAW_DIR = re.compile(r'^(raw|撮影|元素材|元映像|footage)$', re.I)
 SKIP_DIRS = {'node_modules', '.git', '.next', '__pycache__', '.venv', 'venv', '.gradle', 'site-packages', '.pytest_cache', 'Pods'}
 SKIP_TOP = {'releases', 'mac_mini', 'tools', 'vlf-tools', 'dan-venv'}
 IGNORED_OK = re.compile(r'^(frontend/node_modules|frontend/\.next|mobile/node_modules|node_modules|\.venv|venv|\.data|\.env|\.tmp|uploads|'
-                        r'frontend/src/app/artifacts|frontend/public/artifacts|frontend/tsconfig\.tsbuildinfo|.*__pycache__/?|\.pytest_cache|'
+                        r'frontend/src/app/artifacts|frontend/src/app/artifact-sources\.css|frontend/public/artifacts|frontend/tsconfig\.tsbuildinfo|.*__pycache__/?|\.pytest_cache|'
                         r'.*\.pyc|frontend/next-env\.d\.ts|\.claude/settings\.local\.json|mobile/android/(app/)?build|mobile/\.expo)')
 
 DEFAULT_CLIENTS = {

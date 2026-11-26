@@ -11,6 +11,7 @@
 import { Suspense, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { CaptionLayer, type RenderCaption } from '@/components/video-review/caption-layer';
+import { prepareHeadingText } from '@/components/video-review/adobe-fonts';
 import { captionFontFilesFor, loadCaptionFontFiles } from '@/components/video-review/caption-design';
 
 type Payload = {
@@ -65,8 +66,9 @@ declare global {
   }
 }
 
-function payloadFontFiles(p: Payload | null) {
-  return captionFontFilesFor((p?.captions || []).map((c) => c.design));
+function loadPayloadFonts(p: Payload | null) {
+  const captions = p?.captions || [];
+  return Promise.all([loadCaptionFontFiles(captionFontFilesFor(captions.map(c => c.design))), prepareHeadingText(captions)]);
 }
 
 function decodePayload(raw: string | null): Payload | null {
@@ -107,7 +109,7 @@ function Inner() {
       });
     window.__setCaptionPayload = (next: Payload) =>
       // a new payload may name an owner font the page hasn't loaded yet: load it first
-      loadCaptionFontFiles(payloadFontFiles(next)).then(() => new Promise<void>((resolve) => {
+      loadPayloadFonts(next).then(() => new Promise<void>((resolve) => {
         window.__nativeCaptionPayload = next;
         setPayload(next);
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
@@ -138,7 +140,12 @@ function Inner() {
       // injected <style> does NOT register in document.fonts in time for the screenshot. So load
       // every face the payload needs via the FontFace API, add it to document.fonts, then await.
       // A face that fails is skipped (the caption falls back to another font, never blank).
-      await loadCaptionFontFiles(payloadFontFiles(firstPayload.current));
+      try {
+        await loadPayloadFonts(firstPayload.current);
+      } catch {
+        if (!cancelled) document.body.dataset.captionFontError = 'Adobe Fonts を読み込めませんでした。';
+        return;
+      }
       requestAnimationFrame(() =>
         requestAnimationFrame(() => {
           if (cancelled) return;

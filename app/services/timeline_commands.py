@@ -432,7 +432,7 @@ def add_overlay(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_st
 
 
 _CAPTION_STYLE_KEYS = {"font", "fontSize", "maxWidth", "textAlign", "color", "outlineColor", "outlineWidth", "x", "y",
-                       "bg", "shadow", "skew", "letterSpacing"}
+                       "bg", "shadow", "skew", "letterSpacing", "colorSpans", "emphasis"}
 # Sub-keys of the nested caption style objects, with the numeric ones clamped to a sane range
 # (relative units: bg radius/padding are fractions of the font size, shadow in output px).
 _CAPTION_BG_KEYS = {"color": None, "opacity": (0.0, 1.0), "radius": (0.0, 2.0), "padX": (0.0, 3.0), "padY": (0.0, 3.0)}
@@ -444,7 +444,9 @@ _CAPTION_SHADOW_KEYS = {"color": None, "blur": (0.0, 200.0), "dx": (-200.0, 200.
 # /caption-frame renderer and every exported frame came out as an error screen.
 # hiragino-w6/-w8/toppan-mincho are the owner's fonts (~/.dan/fonts, served by scene_fonts).
 CAPTION_FONT_IDS = ("noto-sans", "dela-gothic", "zen-maru", "reggae", "mplus-rounded", "rocknroll", "mincho",
-                    "hiragino-w6", "hiragino-w8", "toppan-mincho")
+                    "hiragino-w6", "hiragino-w8", "toppan-mincho",
+                    "kozuka-heavy", "neokuro", "ryo-display", "shuei-ymincho", "v7-maru",
+                    "biz-udp", "zen-kaku", "klee", "kaisei", "yuji")
 
 
 def _caption_sub_style(value: Any, keys: dict[str, tuple[float, float] | None]) -> dict[str, Any] | None:
@@ -481,6 +483,92 @@ def caption_font_error(style: Any) -> str | None:
             "(or omit font for the default noto-sans). No changes applied.")
 
 
+def _span_scale(v: Any) -> float | None:
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return None
+    return max(0.5, min(3.0, fv)) if math.isfinite(fv) else None
+
+
+def _clean_color_spans(value: Any) -> list[dict[str, Any]] | None:
+    """Part of a caption drawn in another colour / size: [{s, e, color, scale?}] (character
+    indices into the caption text, scale = size relative to the rest of the line)."""
+    if not isinstance(value, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for sp in value:
+        if not isinstance(sp, dict) or set(sp) - {"s", "e", "color", "scale"}:
+            return None
+        try:
+            s, e = int(sp["s"]), int(sp["e"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if s < 0 or e <= s:
+            return None
+        item: dict[str, Any] = {"s": s, "e": e}
+        if isinstance(sp.get("color"), str) and sp["color"].strip():
+            item["color"] = sp["color"].strip()
+        if sp.get("scale") is not None:
+            sc = _span_scale(sp["scale"])
+            if sc is None:
+                return None
+            item["scale"] = sc
+        if "color" not in item and "scale" not in item:
+            return None
+        out.append(item)
+    return out
+
+
+def _clean_emphasis(value: Any) -> list[dict[str, Any]] | None:
+    """Words to emphasise, by their text: [{text, color?, scale?}]. Turned into colorSpans
+    against the caption's text when the caption is saved."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for m in value:
+        if not isinstance(m, dict) or set(m) - {"text", "color", "scale"}:
+            return None
+        t = m.get("text")
+        if not isinstance(t, str) or not t:
+            return None
+        item: dict[str, Any] = {"text": t}
+        if isinstance(m.get("color"), str) and m["color"].strip():
+            item["color"] = m["color"].strip()
+        if m.get("scale") is not None:
+            sc = _span_scale(m["scale"])
+            if sc is None:
+                return None
+            item["scale"] = sc
+        if "color" not in item and "scale" not in item:
+            return None
+        out.append(item)
+    return out
+
+
+def _resolve_emphasis(style: dict[str, Any], text: str) -> str | None:
+    """Replace style['emphasis'] (words) with style['colorSpans'] (indices) for `text`.
+    Returns an error when a word is not in the caption. Each word marks its first
+    occurrence after the previous word's, so repeated words can be told apart by order."""
+    if "emphasis" not in style:
+        return None
+    marks = style.pop("emphasis") or []
+    spans: list[dict[str, Any]] = []
+    cur = 0
+    for m in marks:
+        at = text.find(m["text"], cur)
+        if at < 0:
+            at = text.find(m["text"])
+        if at < 0:
+            return f"emphasis text {m['text']!r} is not in the caption {text!r}. No changes applied."
+        spans.append({"s": at, "e": at + len(m["text"]), **{k: m[k] for k in ("color", "scale") if k in m}})
+        cur = at + len(m["text"])
+    style["colorSpans"] = spans or None
+    return None
+
+
 def _sanitize_caption_style(style: dict[str, Any] | None) -> dict[str, Any] | None:
     """The caption renderer uses RELATIVE units (fontSize ~1.0) and a fixed key set.
     An agent once wrote fontSize:64 + strokeColor — the design renderer produced a
@@ -507,6 +595,17 @@ def _sanitize_caption_style(style: dict[str, Any] | None) -> dict[str, Any] | No
         elif k == "textAlign":
             if v in {"left", "center", "right"}:
                 out[k] = v
+        elif k == "colorSpans":
+            if v is None:
+                out[k] = None
+                continue
+            spans = _clean_color_spans(v)
+            if spans is not None:
+                out[k] = spans
+        elif k == "emphasis":
+            marks = _clean_emphasis(v)
+            if marks is not None:
+                out[k] = marks
         elif k in ("bg", "shadow", "skew") and v is None:
             out[k] = None  # set_clip: remove the box / shadow / slant
         elif k in ("bg", "shadow"):
@@ -536,6 +635,11 @@ def add_caption(seq: dict[str, Any], *, text: str, timeline_start: float, timeli
     font_err = caption_font_error(style)
     if font_err:
         return {"ok": False, "error": font_err}
+    style = _sanitize_caption_style(style)
+    if style:
+        emph_err = _resolve_emphasis(style, text)
+        if emph_err:
+            return {"ok": False, "error": emph_err}
     if lane is None:
         lane_obj = _place_on_lane(seq, "caption", ts, te)
     else:
@@ -546,7 +650,7 @@ def add_caption(seq: dict[str, Any], *, text: str, timeline_start: float, timeli
     lane_obj.setdefault("clips", []).append({
         "id": cid, "track": "caption", "text": text,
         "timeline_start": round(ts, 3), "timeline_end": round(te, 3),
-        **({"style": clean} if (clean := {k: v for k, v in (_sanitize_caption_style(style) or {}).items()
+        **({"style": clean} if (clean := {k: v for k, v in (style or {}).items()
                                           if v is not None}) else {}),
     })
     _sorted(lane_obj)
@@ -603,12 +707,16 @@ def set_clip(seq: dict[str, Any], *, clip_id: str, text: str | None = None,
             return {"ok": False, "error": "Invalid caption style value; no changes applied. bg takes "
                     "{color,opacity,radius,padX,padY}, shadow takes {color,blur,dx,dy} (numbers except color)."}
         style = cleaned
+        if "emphasis" in style:
+            final_text = str(text) if text is not None else str(clip.get("text") or "")
+            emph_err = _resolve_emphasis(style, final_text)
+            if emph_err:
+                return {"ok": False, "error": emph_err}
     if text is not None:
         if clip.get("text") is None:
             return {"ok": False, "error": "clip has no text field (not a caption)"}
         clip["text"] = str(text)
     if isinstance(style, dict):
-        style = _sanitize_caption_style(style) or {}
         merged = dict(clip.get("style") or {})
         for k, v in style.items():
             if v is None:

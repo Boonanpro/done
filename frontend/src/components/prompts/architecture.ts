@@ -206,8 +206,8 @@ export const VIDEO_NODES: ArchNode[] = [
 
   { id: 'v-parts', name: '素材と部品', model: 'その都度ダンが選ぶ', icon: 'v-parts', x: 50, y: 790, w: 290,
     line: 'タイムラインに置く物。撮った映像・制作ライブラリの素材・AIで作る絵と映像・Envato・After Effects・HyperFrames。',
-    facts: ['Envato・After Effects・HyperFrames には決まった道具が無い。手順書と記憶を見て、ダンがブラウザやスクリプトでその都度動かす。', '制作の方法の一覧は5つ（production_methods）。部品の棚（71個）・見せ方の型（6個）・参考の棚（37個）は Windows 版の「話す」からしか引けない。', '11/22 に試した「見せ方の棚」（人気動画30場面）は、試しの中だけで本番の作業には入っていない。'],
-    programs: [{ path: 'scripts/production_library.py', what: '制作ライブラリの素材と作品を探す・登録する・サムネを作る。' }, { path: 'app/timeline_mcp_server.py', what: 'generate_image・generate_video・import_media で素材をタイムラインへ入れる。' }, { path: 'docs/production-methods.json', what: '制作の方法5つと、確かめ済みかどうか。' }] },
+    facts: ['Envatoの部品はエディターの一覧で見本を確認できる。ダンは作品に使う文字や写真を渡し、After Effectsで書き出した映像をタイムラインに置く。', '制作の方法の一覧は5つ（production_methods）。部品の棚（71個）・見せ方の型（6個）・参考の棚（37個）は Windows 版の「話す」からしか引けない。', '11/22 に試した「見せ方の棚」（人気動画30場面）は、試しの中だけで本番の作業には入っていない。'],
+    programs: [{ path: 'app/services/envato_shelf.py', what: '作品の文字・数値・写真をEnvatoのテンプレートに入れ、After Effectsで書き出す。' }, { path: 'scripts/production_library.py', what: '制作ライブラリの素材と作品を探す・登録する・サムネを作る。' }, { path: 'app/timeline_mcp_server.py', what: 'generate_image・generate_video・import_media で素材をタイムラインへ入れる。' }, { path: 'docs/production-methods.json', what: '制作の方法5つと、確かめ済みかどうか。' }] },
   { id: 'v-timeline', name: 'タイムラインの道具', model: '57個（mcp__timeline__）', icon: 'v-tltools', x: 365, y: 790, w: 290,
     line: 'クリップを置く・切る・動かす・字幕・音・範囲の効果。1手ごとに形を確かめて、みきさんの画面へすぐ出す。',
     facts: ['どの入口でも、同じ道具の箱（timeline_mcp_server.py）を使う。', '道具を使わず、ダンがその場で書いたプログラムで作品を書き換えることもできてしまう（11/22 の棚の試しの②はこれで、手順書の確かめを通らなかった）。'],
