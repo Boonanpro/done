@@ -5,7 +5,7 @@ from pathlib import Path
 from app.services import timeline_draft as td
 
 
-def import_media(room_id, path, name='', origin='editor'):
+def import_media(room_id, path, name='', origin='editor', *, preserve_canvas=False):
     src=Path(path).expanduser()
     if not src.is_file():return {'ok':False,'error':f'Media file not found: {path}'}
     suffix=src.suffix.lower()
@@ -18,7 +18,7 @@ def import_media(room_id, path, name='', origin='editor'):
         if kind=='image':
             from PIL import Image
             from app.services.clip_placement import trim_transparent
-            try:trimmed=trim_transparent(dest)  # 透明な余白は切って、元の位置を覚える
+            try:trimmed=None if preserve_canvas else trim_transparent(dest)  # 透明な余白は切って、元の位置を覚える
             except Exception:trimmed=None
             with Image.open(dest) as im:
                 im.load();meta={'width':im.width,'height':im.height,'duration':0,'has_audio':False,'has_video':False}
