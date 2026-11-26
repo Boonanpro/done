@@ -122,6 +122,9 @@ const BOARD_PAD = 0.06;
 const BOARD_PART_PAD = 40;
 // サムネの周りの余白（角のつまみと回すつまみが出る所）
 const STAGE_MARGIN = 28;
+// 仕上がりで見る時の題の大きさ（絵の幅に対して）と、絵の下に要る高さ（間＋2行）
+const YT_TITLE_RATIO = 16 / 360;
+const YT_BELOW_RATIO = 12 / 360 + YT_TITLE_RATIO * 1.35 * 2 + 0.01;
 // 絵の透けた所を押しても、その絵は選ばない（下の部品を選ぶ）。この濃さより薄い所は透けている扱い
 const HIT_ALPHA = 24;
 
@@ -537,7 +540,8 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
       const r = el.getBoundingClientRect();
       // 周りに余白を残す（ふちまである部品の角のつまみが、画面の端で切れずに掴めるように）2026-11-24
       const m = STAGE_MARGIN * 2;
-      const k = Math.min((r.width - m) / board.w, compact ? Infinity : (r.height - m) / board.h);
+      const below = outputView ? board.w * YT_BELOW_RATIO : 0;
+      const k = Math.min((r.width - m) / board.w, compact ? Infinity : (r.height - m) / (board.h + below));
       setStageW(Math.max(200, Math.floor(doc.width * k)));
     };
     fit();
@@ -545,7 +549,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     ro.observe(el);
     return () => ro.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boardKey, compact, hasDoc, doc?.width]);
+  }, [boardKey, compact, hasDoc, doc?.width, outputView]);
   const boardW = board ? Math.round(board.w * scale) : viewW;
   const boardH = board ? Math.round(board.h * scale) : Math.round(viewW * (doc ? doc.height / doc.width : 9 / 16));
   // 作業台の上の点（サムネの画素）を、作業台の左上からの画面の画素に
@@ -1611,7 +1615,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         {finishRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}{finishRunning ? '仕上げ中' : '仕上げ'}
       </button>
       {patterns ? (
-        <button type="button" className={toolBtn(lineup)} onClick={() => setLineup(!lineup)} title={lineup ? '1枚を直す画面に戻る' : '案を大きく並べて、絵の下で題とメモを書いて決める'} data-thumb-lineup-toggle>
+        <button type="button" className={toolBtn(lineup)} onClick={() => setLineup(!lineup)} title={lineup ? '1枚を直す画面に戻る' : '案を大きく並べて、絵の下で題を書いて決める'} data-thumb-lineup-toggle>
           <Columns3 className="h-3.5 w-3.5" />{lineup ? '並べるのをやめる' : '並べる'}
         </button>
       ) : null}
@@ -2141,35 +2145,33 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     keepUndo();
     bump((n) => n + 1);
   };
-  const metaField = 'w-full resize-none rounded-md border border-border bg-background px-2.5 py-1.5 text-sm leading-snug outline-none focus:border-sky-500';
-  const metaFields = doc ? (
-    <div className={compact ? 'space-y-2 px-3 pb-2 pt-1' : 'mx-auto grid w-full max-w-[1100px] grid-cols-[3fr_2fr] gap-3'} data-thumb-meta>
-      <label className="block min-w-0">
-        <span className="mb-0.5 flex items-center text-[11px] font-medium text-muted-foreground">
-          タイトル<span className="ml-auto tabular-nums">{(doc.title || '').length}文字</span>
-        </span>
-        <textarea rows={2} value={doc.title || ''} placeholder="YouTube に出すタイトル"
-          onChange={(e) => editMeta('title', e.target.value)} onBlur={() => endMeta('title')}
-          className={`${metaField} text-[15px] font-semibold`} data-thumb-meta-title />
-      </label>
-      <label className="block min-w-0">
-        <span className="mb-0.5 block text-[11px] font-medium text-muted-foreground">メモ（企画・冒頭5秒など）</span>
-        <textarea rows={2} value={doc.plan_note || ''} placeholder="この案の企画の一言、冒頭5秒・30秒で言うこと"
-          onChange={(e) => editMeta('plan_note', e.target.value)} onBlur={() => endMeta('plan_note')}
-          className={metaField} data-thumb-meta-note />
-      </label>
+  // 2026-11-26 本人「メモっていうやつは項目ごと全部いらん。タイトルっていうテキストも要らん。ただ文字が入れられる空白がそこに
+  // あれば良い。空白だった場合は中身にテキストとだけ薄い字で入れとけ」→ 見出しも文字数も無い、枠の無い1つの欄
+  const titleField = (fontPx: number, attr: Record<string, string>) => (
+    <textarea rows={2} value={doc?.title || ''} placeholder="テキスト" aria-label="タイトル"
+      onChange={(e) => editMeta('title', e.target.value)} onBlur={() => endMeta('title')}
+      style={{ fontSize: fontPx, lineHeight: 1.35 }}
+      className="block w-full resize-none rounded-md border border-transparent bg-transparent px-1 py-0.5 font-bold text-foreground outline-none placeholder:font-normal placeholder:text-muted-foreground/50 hover:border-border focus:border-sky-500"
+      {...attr} />
+  );
+  // 仕上がりで見る時は、YouTube の一覧のように絵のすぐ下に大きく出す（2026-11-26 本人「もっと文字とサムネを近づけて文字サイズも
+  // 大きくして実際のサムネとタイトルみたいに見えるように」）。YouTube の一覧は幅360の絵に16の題・間12なので、絵の幅に比べて同じ割合
+  const ytTitlePx = Math.max(15, Math.round(boardW * YT_TITLE_RATIO));
+  const metaFields = doc && !outputView ? (
+    <div className={compact ? 'px-3 pb-2 pt-1' : 'mx-auto w-full'} style={compact ? undefined : { maxWidth: Math.max(320, boardW) }} data-thumb-meta>
+      {titleField(compact ? 16 : 18, { 'data-thumb-meta-title': '' })}
     </div>
   ) : null;
 
   const stage = (
     <div className={`relative min-h-0 min-w-0 ${compact ? 'w-full' : 'h-full w-full'}`}>
     <div ref={stageWrap} className={`min-h-0 min-w-0 overflow-auto ${compact ? 'w-full' : 'h-full w-full'}`}
-      style={compact ? { height: boardH + STAGE_MARGIN * 2 } : undefined} data-thumb-stage-wrap
+      style={compact ? { height: boardH + STAGE_MARGIN * 2 + (outputView ? Math.round(boardW * YT_BELOW_RATIO) : 0) } : undefined} data-thumb-stage-wrap
       onPointerDown={onStagePointerDown}
       onDragOver={(e) => { if (Array.from(e.dataTransfer?.items || []).some((i) => i.kind === 'file')) e.preventDefault(); }}
       onDrop={onStageDrop}>
       <div className="flex min-h-full min-w-full w-max items-center justify-center" style={{ padding: STAGE_MARGIN }}>
-      <div style={{ width: boardW }} className={`relative shrink-0 ${outputView ? 'shadow-lg' : ''}`} data-thumb-stage>
+      <div style={{ width: boardW }} className="relative shrink-0" data-thumb-stage>
         <ThumbCanvas
           ref={svgRef}
           doc={shownDoc || doc}
@@ -2179,7 +2181,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           onMeasure={(id, box) => setBoxes((b) => (b[id] && Math.abs(b[id].x - box.x) < 0.5 && Math.abs(b[id].y - box.y) < 0.5 && Math.abs(b[id].w - box.w) < 0.5 && Math.abs(b[id].h - box.h) < 0.5 ? b : { ...b, [id]: box }))}
           partProps={partProps}
           overlay={<>{danMarks}{overlay}{guideEl}{marqueeEl}{pins}</>}
-          style={{ touchAction: 'none', cursor: mode === 'pen' ? 'crosshair' : undefined }}
+          style={{ touchAction: 'none', cursor: mode === 'pen' ? 'crosshair' : undefined, ...(outputView ? { clipPath: `inset(0 round ${Math.round(boardW * 12 / 360)}px)` } : {}) }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
@@ -2188,6 +2190,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
           onDoubleClick={onDoubleClick}
         />
         {floating}
+        {outputView && doc ? (
+          <div style={{ marginTop: Math.round(boardW * 12 / 360) - 2 }} data-thumb-yt-title>{titleField(ytTitlePx, { 'data-thumb-meta-title': '' })}</div>
+        ) : null}
       </div>
       </div>
     </div>

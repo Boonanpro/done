@@ -141,7 +141,6 @@ export function ThumbLineup({ roomId, videoId, currentId, liveDoc, compact, onOp
     );
   }
 
-  const field = 'w-full resize-none rounded-md border border-border bg-background px-2.5 py-2 text-sm leading-snug outline-none focus:border-sky-500';
   return (
     <div className="h-full min-h-0 overflow-y-auto" data-thumb-lineup>
       <style>{'@keyframes thumbLineupDan{from{box-shadow:0 0 0 3px #38bdf8,0 0 22px 6px rgba(56,189,248,.75)}to{box-shadow:0 0 0 0 rgba(56,189,248,0)}}'}</style>
@@ -172,22 +171,10 @@ export function ThumbLineup({ roomId, videoId, currentId, liveDoc, compact, onOp
                   <span className="ml-4 mt-[-2px] block w-max rounded-full bg-sky-500 px-2 py-[2px] text-[11px] font-semibold text-white shadow">ダン 直しました</span>
                 </div>
               ) : null}
-              <label className="mt-2.5 block">
-                <span className="mb-1 flex items-center text-[11px] font-medium text-muted-foreground">
-                  タイトル<span className="ml-auto tabular-nums">{d.title.length}文字</span>
-                </span>
-                <textarea rows={2} value={d.title} placeholder="YouTube に出す題"
-                  onFocus={() => { focused.current = `${p.id}:title`; }} onBlur={() => { focused.current = null; }}
-                  onChange={(e) => edit(p.id, 'title', e.target.value)}
-                  className={`${field} text-[15px] font-semibold`} data-thumb-lineup-title />
-              </label>
-              <label className="mt-2 block">
-                <span className="mb-1 block text-[11px] font-medium text-muted-foreground">メモ（企画・冒頭5秒など）</span>
-                <textarea rows={compact ? 3 : 4} value={d.plan_note} placeholder="この案の企画の一言、冒頭5秒・30秒で言うこと"
-                  onFocus={() => { focused.current = `${p.id}:plan_note`; }} onBlur={() => { focused.current = null; }}
-                  onChange={(e) => edit(p.id, 'plan_note', e.target.value)}
-                  className={field} data-thumb-lineup-note />
-              </label>
+              <textarea rows={2} value={d.title} placeholder="テキスト" aria-label="タイトル"
+                onFocus={() => { focused.current = `${p.id}:title`; }} onBlur={() => { focused.current = null; }}
+                onChange={(e) => edit(p.id, 'title', e.target.value)}
+                className="mt-2 block w-full resize-none rounded-md border border-transparent bg-transparent px-1 py-0.5 text-[16px] font-bold leading-snug outline-none placeholder:font-normal placeholder:text-muted-foreground/50 hover:border-border focus:border-sky-500" data-thumb-lineup-title />
             </div>
           );
         })}
