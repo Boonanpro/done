@@ -35,6 +35,7 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from app.services import owner_activity  # noqa: E402
 
 HOST_NAME = 'dan-home.paina.info'
 ZONE_NAME = 'paina.info'
@@ -135,6 +136,7 @@ async def app(scope, receive, send):
         return await reply(200, body, [(b'content-type', b'application/json'), (b'cache-control', b'no-store')])
     if method not in ('GET', 'HEAD') or path not in ALLOWED_PATHS:
         return await reply(404, b'not here')
+    owner_activity.touch()   # the owner is watching: a render on this Mac gives way (envato_shelf)
 
     query = '?' + scope['query_string'].decode() if scope['query_string'] else ''
     fwd = [(k, v) for k, v in headers.items() if k in PASS_REQUEST]
