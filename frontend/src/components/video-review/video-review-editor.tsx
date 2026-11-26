@@ -64,6 +64,7 @@ import { MotionPanel } from './motion-panel';
 import { isOneForm, motionAt, setKeyAt, sortedKeys, type MotionKey } from './placement';
 import { AdobeFontChoices } from './adobe-font-choices';
 import { isRetiredFont } from './adobe-fonts';
+import { WordControls, moveWordStyles, styleWords, type WordRange } from './caption-word-edit';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
 import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, riderIds, rippleDeleteMain, rippleMoveGroups, rippleTrim } from './ripple-edit';
@@ -1426,6 +1427,14 @@ export function VideoReviewEditor({
     }
     return null;
   }, [editSequence, selectedSequenceClipId]);
+  const [wordSelection, setWordSelection] = useState<(WordRange & { id: string }) | null>(null);
+  const [inlineCaption, setInlineCaption] = useState<{ id: string; top: number } | null>(null);
+  const activeWords = wordSelection?.id === selectedSequenceClip?.id && wordSelection && wordSelection.e > wordSelection.s ? wordSelection : null;
+  useEffect(() => {
+    setWordSelection(null);
+    setInlineCaption(null);
+  }, [selectedSequenceClipId, currentTime, playing]);
+
   // 選んだクリップを最後に動かした人（みきさんの手／どのダンの作業）・いつ・何を（2026-11-15 本人
   // 「誰が動かしたかどうか分からないなら分かるようにしないと」）。保存は少し遅れて届くので、変わるたびに少し待って読み直す。
   const [clipAuthor, setClipAuthor] = useState<{ id: string; label: string; t: number; what: string[]; kind: string } | null>(null);
@@ -3668,6 +3677,29 @@ export function VideoReviewEditor({
     updateSequenceClips(ids, patch);
   }, [selectedSequenceClipId, selectedSequenceClipIds, updateSequenceClips]);
 
+  function selectWords(field: HTMLTextAreaElement) {
+    if (selectedSequenceClip) setWordSelection({ id: selectedSequenceClip.id, s: field.selectionStart, e: field.selectionEnd });
+  }
+
+  function editCaptionText(value: string) {
+    if (!selectedSequenceClip) return;
+    const style = selectedSequenceClip.style;
+    if (style?.colorSpans?.length && selectedSequenceClipIds.length <= 1) {
+      updateSequenceClip(selectedSequenceClip.id, { text: value, style: { ...style,
+        colorSpans: moveWordStyles(style.colorSpans, selectedSequenceClip.text || '', value) } });
+    } else updateSelectedSequenceClip({ text: value });
+  }
+
+  function changeWordLook(patch: { color?: string; scale?: number }) {
+    if (!activeWords || !selectedSequenceClip) return;
+    updateSequenceClip(selectedSequenceClip.id, { style: { ...selectedSequenceClip.style,
+      colorSpans: styleWords(selectedSequenceClip.style?.colorSpans, activeWords, patch) } });
+  }
+  const selectedWordLook = activeWords ? [...(selectedSequenceClip?.style?.colorSpans || [])].reverse()
+    .find(span => span.s <= activeWords.s && activeWords.s < span.e) : null;
+  const wordControls = activeWords && selectedSequenceClip ? <WordControls
+    design={selectedSequenceClip.style || {}} range={activeWords} change={changeWordLook} /> : null;
+
   // --- pop-out effect preview: when 飛び出し is applied/changed, prepare a browser-playable
   // alpha overlay (matted person breaking out of the wipe box) once, so the editor preview can
   // show it without per-frame matting. Keyed by clip id; the SAME layer is used at export. ---
@@ -5754,6 +5786,19 @@ export function VideoReviewEditor({
         ref={stageRef}
         className={`relative h-full max-h-full max-w-full overflow-hidden ${nativeShell ? '' : 'bg-black'}`}
         style={{ aspectRatio: previewAspect }}
+        onDoubleClickCapture={event => {
+          if (playing || tool !== 'select' || (event.target as HTMLElement).closest('[data-inline-caption]')) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          const caption = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[data-caption-id]')).reverse().find(el => {
+            const r = el.getBoundingClientRect();
+            return event.clientX >= r.left && event.clientX < r.right && event.clientY >= r.top && event.clientY < r.bottom;
+          });
+          const id = caption?.dataset.captionId;
+          if (!id || !caption) return;
+          event.stopPropagation();
+          selectSequenceClip(id);
+          setInlineCaption({id, top: (caption.getBoundingClientRect().top - rect.top) / rect.height});
+        }}
         onContextMenu={(event) => event.preventDefault()}
       >
         {nativeShell ? (
@@ -5799,6 +5844,21 @@ export function VideoReviewEditor({
             skimFrom={compact ? 4 : 5}
           />
         )}
+        {inlineCaption && selectedSequenceClip?.id === inlineCaption.id && !playing ? (
+          <div data-inline-caption className="absolute left-[3%] right-[3%] z-50 rounded border border-sky-400 bg-background p-2 text-foreground shadow"
+            style={{ top: `clamp(0px, ${inlineCaption.top * 100}%, calc(100% - 110px))` }}
+            onPointerDown={e => e.stopPropagation()} onKeyDown={e => {
+              if (e.key === 'Escape' && !e.nativeEvent.isComposing) { e.preventDefault(); setInlineCaption(null); setWordSelection(null); }
+            }}>
+            <Textarea autoFocus rows={2} aria-label="プレビュー内のテロップ本文"
+              className="min-h-10 resize-none text-center text-base leading-tight" value={selectedSequenceClip.text || ''}
+              onChange={e => editCaptionText(e.target.value)} onSelect={e => selectWords(e.currentTarget)} />
+            <div className="mt-1 flex items-center justify-between gap-2">{wordControls}
+              <button type="button" aria-label="文字編集を終了" className="ml-auto rounded bg-secondary px-2 py-1 text-xs"
+                onClick={() => { setInlineCaption(null); setWordSelection(null); }}>完了</button>
+            </div>
+          </div>
+        ) : null}
         {playing && playRate !== 1 && !(compact && phoneControls) ? (
           <div className="pointer-events-none absolute right-2 top-2 z-30 rounded bg-black/70 px-2 py-0.5 text-sm font-semibold text-white" data-testid="play-rate">
             {rateText(playRate)}
@@ -7028,7 +7088,8 @@ export function VideoReviewEditor({
                     <>
                       <Textarea
                         value={selectedSequenceClip.text || ''}
-                        onChange={(e) => updateSelectedSequenceClip({ text: e.target.value })}
+                        onChange={e => editCaptionText(e.target.value)}
+                        onSelect={e => selectWords(e.currentTarget)}
                         rows={3}
                         placeholder="テロップ本文"
                       />
@@ -7178,11 +7239,11 @@ export function VideoReviewEditor({
                             </div>
                             <div className="grid grid-cols-2 gap-2">
                               <label className="flex items-center gap-2 text-xs">
-                                文字色
+                                {activeWords ? '選択部分の色' : '文字色'}
                                 <input
                                   type="color"
-                                  value={st.color || '#ffffff'}
-                                  onChange={(e) => setStyle({ color: e.target.value })}
+                                  value={(activeWords && selectedWordLook?.color) || st.color || '#ffffff'}
+                                  onChange={(e) => activeWords ? changeWordLook({ color: e.target.value }) : setStyle({ color: e.target.value })}
                                   className="h-6 w-8 rounded border border-input bg-background"
                                 />
                               </label>
@@ -7197,14 +7258,14 @@ export function VideoReviewEditor({
                               </label>
                             </div>
                             <label className="block text-xs">
-                              大きさ {Math.round((st.fontSize ?? 1) * 100)}%
+                              {activeWords ? '選択部分の大きさ' : '大きさ'} {Math.round((activeWords ? selectedWordLook?.scale ?? 1 : st.fontSize ?? 1) * 100)}%
                               <input
                                 type="range"
-                                min="0"
+                                min={activeWords ? 0.5 : 0}
                                 max="2.5"
-                                step="0.1"
-                                value={st.fontSize ?? 1}
-                                onChange={(e) => setStyle({ fontSize: Number(e.target.value) })}
+                                step={activeWords ? 0.05 : 0.1}
+                                value={activeWords ? selectedWordLook?.scale ?? 1 : st.fontSize ?? 1}
+                                onChange={(e) => activeWords ? changeWordLook({ scale: Number(e.target.value) }) : setStyle({ fontSize: Number(e.target.value) })}
                                 className="w-full"
                               />
                             </label>
