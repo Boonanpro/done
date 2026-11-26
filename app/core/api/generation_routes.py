@@ -24,4 +24,5 @@ async def activity(request: Request):
         if frame is not None: module = frame.f_globals.get('__name__', module)
         if module.startswith('app.') and module != 'app.services.job_process':
             busy.append(module + '.' + getattr(coro, '__qualname__', 'task'))
-    return {'idle': not busy, 'tasks': len(busy)}
+    # The names say what keeps a drained generation alive (2026-11-27: seven old sandboxes each held one for days).
+    return {'idle': not busy, 'tasks': len(busy), 'busy': sorted(set(busy))[:10]}
