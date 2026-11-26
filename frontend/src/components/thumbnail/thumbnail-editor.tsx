@@ -19,7 +19,7 @@ import {
 import { toast } from 'sonner';
 
 import { PartPreview, ThumbCanvas, partBounds, partCenter, type PartBox } from './thumb-canvas';
-import { ThumbPatterns, type ThumbPatternActions, type ThumbPatternLink } from './thumb-patterns';
+import { ThumbPatterns, cachedThumbDoc, rememberThumbDoc, type ThumbPatternActions, type ThumbPatternLink } from './thumb-patterns';
 import { ThumbLineup } from './thumb-lineup';
 import { useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
 import {
@@ -174,13 +174,17 @@ function partDetail(p: ThumbPart, b: PartBox): string {
   return `部品 ${p.id}（絵「${p.name || ''}」・${where}${p.rotation ? `・回転${p.rotation}` : ''}${hid}）`;
 }
 
+let lastStageW = 800;
+
 export function ThumbnailEditor({ roomId, contentId, title, compact = false, phoneChat, onBack, backLabel, chatLink, onReload, patterns }: Props) {
-  const [doc, setDoc] = useState<ThumbDoc | null>(null);
+  // 案を移った時は、下の帯が持っていた形から始める（読み込み中の表示を出さずにすぐ切り替わる。2026-11-26 本人「シームレスに」）
+  const [startDoc] = useState(() => cachedThumbDoc(contentId));
+  const [doc, setDoc] = useState<ThumbDoc | null>(startDoc);
   const docRef = useRef<ThumbDoc | null>(null);
   docRef.current = doc;
-  const baseRev = useRef<number>(-1);
+  const baseRev = useRef<number>(startDoc ? startDoc.rev ?? 0 : -1);
   // 手元の形の元にした保存の形（ほかの所＝ダン・別の画面の直しを、手元の直しと重ね合わせる時の基準）
-  const baseDoc = useRef<ThumbDoc | null>(null);
+  const baseDoc = useRef<ThumbDoc | null>(startDoc);
   const dirty = useRef(false);
   const saveTimer = useRef<number | null>(null);
   const [saving, setSaving] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -232,7 +236,9 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   }, [lineupKey]);
   const [exporting, setExporting] = useState(false);
   const [phoneChatOpen, setPhoneChatOpen] = useState(false);
-  const [stageW, setStageW] = useState(800);
+  // 画面の大きさは案を移っても前の大きさから始める（測り直すまでの一瞬に絵が跳ねない）
+  const [stageW, setStageW] = useState(() => lastStageW);
+  useEffect(() => { lastStageW = stageW; }, [stageW]);
   // 寄る・引く（1 = 枠に収まる大きさ）。Ctrl（Mac は ⌘）＋スクロール、トラックパッドのつまむ動き（11/21 本人）
   const [zoom, setZoom] = useState(1);
   const zoomAnchor = useRef<{ fx: number; fy: number; cx: number; cy: number } | null>(null);
@@ -330,12 +336,14 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   }, [roomId, contentId]);
 
   useEffect(() => {
-    void load(true);
+    // 帯の形から始めた時は、新しい保存があればそれを重ねて受け取る（手元で動かし始めた直しを消さない）
+    void load(!startDoc);
     const t = window.setInterval(() => void load(false), 1500);
     return () => window.clearInterval(t);
-  }, [load]);
+  }, [load, startDoc]);
 
   useEffect(() => { void loadThumbFonts(doc); }, [doc]);
+  useEffect(() => { if (doc && patterns) rememberThumbDoc(contentId, doc); }, [doc, contentId, patterns]);
 
   const flush = useCallback(async () => {
     // 保存は「この形はこの rev を元にした」と添えて出す。その間にダンなどが保存していたら断られるので、

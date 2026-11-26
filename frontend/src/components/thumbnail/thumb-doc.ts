@@ -266,3 +266,13 @@ export function stepParts<T extends HasId>(parts: T[], ids: string[], dir: 'up' 
   }
   return out;
 }
+
+/** 案の並び（ids）で from の案を to の前か後ろへ動かした並び（下の案の帯を引きずって並べ替える時） */
+export function movedOrder(ids: string[], from: string, to: string, after: boolean): string[] {
+  if (from === to) return ids;
+  const rest = ids.filter((x) => x !== from);
+  const at = rest.indexOf(to);
+  if (at < 0) return ids;
+  rest.splice(after ? at + 1 : at, 0, from);
+  return rest;
+}
