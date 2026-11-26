@@ -173,18 +173,23 @@ function EditableCaption({ cap, style, edit }: { cap: RenderCaption; style: CSSP
   const ref = useRef<HTMLParagraphElement>(null);
   const composing = useRef(false);
   const point = useRef(edit.point);
+  const pendingCaret = useRef<number | null>(null);
   useLayoutEffect(() => {
     const el = ref.current!;
     if (composing.current) return;
-    const selection = offsets(el);
-    const children = textRuns(cap.text, cap.design?.colorSpans).map(run => {
+    const caret = pendingCaret.current;
+    pendingCaret.current = null;
+    const selection = caret == null ? offsets(el) : [caret, caret];
+    const children: Node[] = textRuns(cap.text, cap.design?.colorSpans).map(run => {
       if (!run.style) return document.createTextNode(run.text);
       const span = document.createElement('span');
       span.textContent = run.text;
       Object.assign(span.style, run.style);
       return span;
     });
-    if (el.childNodes.length === children.length && children.every((node, i) => node.isEqualNode(el.childNodes[i]))) return;
+    // A trailing line break needs a caret stop on the empty final line.
+    if (cap.text.endsWith('\n')) children.push(document.createElement('br'));
+    if (caret == null && el.childNodes.length === children.length && children.every((node, i) => node.isEqualNode(el.childNodes[i]))) return;
     el.replaceChildren(...children);
     if (selection && document.activeElement === el) {
       window.getSelection()?.setBaseAndExtent(...textPoint(el, selection[0]), ...textPoint(el, selection[1]));
@@ -208,6 +213,36 @@ function EditableCaption({ cap, style, edit }: { cap: RenderCaption; style: CSSP
     CSS.highlights.set('caption-selection', new Highlight(r));
     return () => { CSS.highlights.delete('caption-selection'); };
   }, [edit.range, cap.text, cap.design?.colorSpans]);
+  useEffect(() => {
+    const el = ref.current!;
+    const replaceSelection = (text: string) => {
+      const ends = offsets(el);
+      if (!ends) return;
+      const start = Math.min(...ends), end = Math.max(...ends);
+      const caret = start + text.length;
+      pendingCaret.current = caret;
+      edit.onText(cap.text.slice(0, start) + text + cap.text.slice(end));
+      edit.onRange({ s: caret, e: caret });
+    };
+    // Native editable paragraphs add a second newline as a caret placeholder
+    // after Enter. Store the authored newline exactly once, including on mobile.
+    const beforeInput = (e: InputEvent) => {
+      if (e.isComposing || !['insertParagraph', 'insertLineBreak'].includes(e.inputType)) return;
+      e.preventDefault();
+      replaceSelection('\n');
+    };
+    const paste = (e: ClipboardEvent) => {
+      if (!e.clipboardData) return;
+      e.preventDefault();
+      replaceSelection(e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n'));
+    };
+    el.addEventListener('beforeinput', beforeInput);
+    el.addEventListener('paste', paste);
+    return () => {
+      el.removeEventListener('beforeinput', beforeInput);
+      el.removeEventListener('paste', paste);
+    };
+  }, [cap.text, edit]);
   function reportRange() {
     const el = ref.current!;
     if (document.activeElement !== el) return;
@@ -216,7 +251,7 @@ function EditableCaption({ cap, style, edit }: { cap: RenderCaption; style: CSSP
   }
   function commit() {
     const el = ref.current!;
-    if (!composing.current) edit.onText(el.innerText);
+    if (!composing.current) edit.onText(el.textContent || '');
     reportRange();
   }
   return <p ref={ref} contentEditable="plaintext-only" role="textbox" aria-label="テロップ本文"
