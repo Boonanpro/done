@@ -4644,12 +4644,14 @@ export function VideoReviewEditor({
       toolDragRef.current = null;
       altInsertRef.current = null;
       // ロール（N）・スリップ（Y）・スライド（U）
-      if (editSequence && !additive && (timelineTool === 'roll' || timelineTool === 'slip' || timelineTool === 'slide')) {
+      const captionEdge = timelineTool === 'select' && !inMulti && mode !== 'move'
+        && (clip.track === 'caption' || typeof clip.text === 'string');
+      if (editSequence && !additive && (captionEdge || timelineTool === 'roll' || timelineTool === 'slip' || timelineTool === 'slide')) {
         const lanesNow = clipLanes;
         const ids = linkAV ? withPartners(editSequence, [clip.id]) : [clip.id];
-        if (timelineTool === 'roll' && mode !== 'move') {
+        if ((captionEdge || timelineTool === 'roll') && mode !== 'move') {
           const nb = touchingNeighbor(editSequence, clip.id, mode, lanesNow);
-          if (nb) {
+          if (nb && (!captionEdge || nb.track === 'caption' || typeof nb.text === 'string')) {
             const nbIds = linkAV ? withPartners(editSequence, [String(nb.id)]) : [String(nb.id)];
             toolDragRef.current = mode === 'end'
               ? { tool: 'roll', snap: editSequence, ids, prevIds: ids, nextIds: nbIds, room: { minStart: 0, maxEnd: Infinity } }
@@ -5548,7 +5550,7 @@ export function VideoReviewEditor({
                                   sourceStart={srcStart}
                                   sourceEnd={srcEnd}
                                   volume={clip.volume ?? 1}
-                                  narrow={!selected && trackPx > 0 && rawWidthPx < 28}
+                                  narrow={kind !== 'caption' && !selected && trackPx > 0 && rawWidthPx < 28}
                                   selected={selected}
                                   linkedSelected={linkedSelected}
                                   touch={danTouch.ids.includes(clip.id)}

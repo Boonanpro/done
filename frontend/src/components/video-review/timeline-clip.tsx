@@ -388,6 +388,7 @@ function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip,
       <button
         type="button"
         className="relative z-[1] h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
+        style={kind === 'caption' ? { maxWidth: '30%' } : undefined}
         onPointerDown={(event) => fns.current.startDrag(event, clipId, 'start')}
         aria-label="Resize clip start"
       />
@@ -417,6 +418,7 @@ function ClipBoxInner({ clipId, left, width, widthPx, kind, label, thumb, strip,
       <button
         type="button"
         className="relative z-[1] h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
+        style={kind === 'caption' ? { maxWidth: '30%' } : undefined}
         onPointerDown={(event) => fns.current.startDrag(event, clipId, 'end')}
         aria-label="Resize clip end"
       />
