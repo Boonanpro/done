@@ -2089,7 +2089,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
             touchAction: 'none',
           }}
           onPointerDown={startCaptionDrag}
-          title="引きずるとテロップの位置が動きます"
+          title="ダブルクリックで文字を編集、ドラッグで位置を移動"
         />
       ) : null}
       {box && !capBox ? (
