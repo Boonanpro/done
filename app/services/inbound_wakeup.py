@@ -158,7 +158,7 @@ def _build_prompt(detected_message: Dict[str, Any], reason: str) -> str:
         sender=sender_info.get("from") or sender_info.get("email") or "不明",
         subject=detected_message.get("subject") or "(件名なし)",
         message_id=(detected_message.get("metadata") or {}).get("message_id") or detected_message.get("source_id") or "",
-        extra=_extra_lines(detected_message),
+        extra=_extra_lines(detected_message) + (detected_message.get("_watch_notes") or ""),
         compose_hint=_compose_hint(detected_message),
         send_policy=_send_policy(detected_message),
         date=sender_info.get("date") or "不明",
@@ -256,6 +256,15 @@ def automated_notice(detected_message: Dict[str, Any]) -> bool:
     return bool(_BOT_SENDER.search(sender) or _ACTIONS_RUN.search(detected_message.get("subject") or ""))
 
 
+def _mail_id(detected_message: Dict[str, Any]) -> str:
+    """The Message-ID of a mail (the same id the mail watches read from the mailbox); '' for other channels."""
+    if str(detected_message.get("source") or "").lower() not in ("gmail", "email", "icloud", "mail", "imap"):
+        return ""
+    md = detected_message.get("metadata") or {}
+    mid = str(md.get("message_id") or detected_message.get("source_id") or "").strip()
+    return mid if "@" in mid else ""
+
+
 def schedule_room_wakeup(detected_message: Dict[str, Any], room_id: str, *, reason: str) -> bool:
     """該当ルームでダンを起動するタスクを予約する。予約できたら True。
 
@@ -273,7 +282,19 @@ def schedule_room_wakeup(detected_message: Dict[str, Any], room_id: str, *, reas
     except RuntimeError:
         logger.warning("[inbound-wake] no running loop; cannot schedule wake for msg=%s", detected_message.get("id"))
         return False
+    from app.services import room_mail_once
+    mail_id = _mail_id(detected_message)
+    extra_notes = ""
+    if mail_id:
+        # One mail wakes a room once: the mail watches of this room that wait for the sender do not wake it again.
+        if not room_mail_once.claim(room_id, mail_id, "inbound"):
+            return True
+        sender = " ".join(str((detected_message.get("sender_info") or {}).get(k) or "") for k in ("from", "email"))
+        extra_notes = room_mail_once.notes_block(
+            room_mail_once.watch_notes(room_id, sender, detected_message.get("subject") or ""))
     from app.services.work_continuity import enqueue, key_for
+    if extra_notes and not detected_message.get("_inbox_prompt"):
+        detected_message = {**detected_message, "_watch_notes": extra_notes}
     prompt = _build_prompt(detected_message, reason)
     key = key_for("inbound:" + str(detected_message.get("source") or ""), room_id, detected_message.get("id") or detected_message.get("source_id") or prompt)
     enqueue(key=key, room_id=room_id, user_id=detected_message["user_id"], source="inbound", prompt=prompt)
