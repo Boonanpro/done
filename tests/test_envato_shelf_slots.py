@@ -74,6 +74,7 @@ class AeSlotTests(unittest.TestCase):
             def wait(self): pass
         killed, reniced = [], []
         with patch('subprocess.Popen', return_value=Proc()), patch.object(e, '_cores_for', return_value=[77]), \
+                patch('app.services.owner_activity.recent', return_value=False), \
                 patch.object(e, '_kill', killed.append), patch('time.sleep'), \
                 patch('subprocess.run', lambda args, **k: reniced.append(args)):
             e._aerender(project)
@@ -91,3 +92,24 @@ def test_a_slow_process_list_finds_nothing_instead_of_ending_the_render(monkeypa
     def slow(*a, **k): raise subprocess.TimeoutExpired(a[0], k.get('timeout'))
     monkeypatch.setattr(e.subprocess, 'run', slow)
     assert e._ps() == [] and e.sweep_orphans() == []
+
+
+def test_a_render_gives_way_while_the_owner_uses_the_screens(monkeypatch):
+    from app.services import envato_shelf as e
+    calls = []
+    monkeypatch.setattr(e, '_cores_for', lambda project: [41])
+    monkeypatch.setattr(e.subprocess, 'run', lambda args, **k: calls.append(args))
+    mode = e._give_way('p.aep', None, active=True)
+    mode = e._give_way('p.aep', mode, active=True)     # no change: nothing is run again
+    mode = e._give_way('p.aep', mode, active=False)
+    assert calls == [['taskpolicy', '-b', '-p', '41'], ['taskpolicy', '-B', '-p', '41']] and mode == 'normal'
+
+
+def test_the_owner_is_active_after_a_request_from_outside(tmp_path, monkeypatch):
+    from app.services import owner_activity as a
+    monkeypatch.setattr(a, 'STAMP', tmp_path / 'stamp')
+    monkeypatch.setattr(a, '_last', [0.0])
+    assert not a.recent()
+    assert not a.from_outside({'client': ('127.0.0.1', 1), 'headers': []})
+    assert a.from_outside({'client': ('133.155.120.53', 0), 'headers': []})
+    a.touch(); assert a.recent(120) and not a.recent(120, now=__import__('time').time() + 200)

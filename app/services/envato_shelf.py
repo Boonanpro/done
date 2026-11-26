@@ -132,10 +132,25 @@ def _low():
     os.nice(NICE)
 
 
+def _give_way(project, mode, active=None):
+    """macOS background work while the owner uses the screens, full speed otherwise (app/services/owner_activity).
+    nice alone did not help: a render still stopped the editor's media and the sandbox for 80〜105 s (2026-11-27)."""
+    from app.services import owner_activity
+    want = 'background' if (owner_activity.recent() if active is None else active) else 'normal'
+    if want == mode:
+        return mode
+    pids = _cores_for(project)
+    if not pids:
+        return mode   # the core has not started yet: look again next time
+    for pid in pids:
+        subprocess.run(['taskpolicy', '-b' if want == 'background' else '-B', '-p', str(pid)], capture_output=True, timeout=10)
+    return want
+
+
 def _aerender(project, timeout=1800):
     proc = subprocess.Popen([AE/'aerender', '-project', project, '-rqindex', '1'],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=_low)
-    deadline, reniced = time.monotonic() + timeout, set()
+    deadline, reniced, mode = time.monotonic() + timeout, set(), 'normal'
     try:
         while proc.poll() is None:
             if time.monotonic() > deadline:
@@ -144,6 +159,7 @@ def _aerender(project, timeout=1800):
                 if pid not in reniced:
                     subprocess.run(['renice', str(NICE), '-p', str(pid)], capture_output=True, timeout=5)
                     reniced.add(pid)
+            mode = _give_way(project, mode)
             time.sleep(2)
         err = proc.stderr.read().decode(errors='replace') if proc.stderr else ''
         if proc.returncode:
