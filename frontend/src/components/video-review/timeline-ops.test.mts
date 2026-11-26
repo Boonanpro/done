@@ -1,6 +1,6 @@
 // タイムラインの基本の編集（2026-11-25 本人）。node --experimental-strip-types で動かす。
 import assert from 'node:assert/strict';
-import { applyRoll, applySlide, applySlip, editPoints, insertBlock, nudgeRoom, overwriteMoved, resolveFree, splitAt, touchingNeighbor, trimRoom, withPartners } from './timeline-ops.ts';
+import { applyRoll, applySlide, applySlip, editPoints, insertBlock, multiTrimMoved, nudgeRoom, overwriteMoved, resolveFree, splitAt, touchingNeighbor, trimRoom, withPartners } from './timeline-ops.ts';
 import { rippleMoveGroups, insertPoints } from './ripple-edit.ts';
 import type { RLane, RSeq } from './ripple-edit.ts';
 
@@ -141,5 +141,45 @@ const newId = () => `n${++n}`;
   const r = splitAt(s, 4, () => true, newId);
   const right = (r.tracks || [])[0].clips!.find((c) => c.id !== 'K')!;
   assert.deepEqual((right.motion_keys || []).map((k) => k.t), [2]);
+}
+// 9. 何本か選んで端をまとめて伸び縮み（2026-11-26 本人）
+{
+  const s: RSeq = { tracks: [
+    { type: 'video', clips: [
+      { id: 'X', asset_id: 'v', timeline_start: 0, timeline_end: 5, source_start: 10, source_end: 15, link_id: 'lx' },
+      { id: 'Y', asset_id: 'v', timeline_start: 10, timeline_end: 15, source_start: 2, source_end: 7 },
+      { id: 'G', asset_id: 'g', timeline_start: 20, timeline_end: 25, source_start: 0, source_end: 5, layer: 1 },
+    ] },
+    { type: 'audio', clips: [
+      { id: 'x', asset_id: 'v', timeline_start: 0, timeline_end: 5, source_start: 10, source_end: 15, link_id: 'lx', layer: 0 },
+      { id: 'M', asset_id: 'm', role: 'bgm', timeline_start: 0, timeline_end: 6, source_start: 0, source_end: 6, layer: 1 },
+      { id: 'M2', asset_id: 'm', role: 'bgm', timeline_start: 6, timeline_end: 12, source_start: 0, source_end: 6, layer: 1 },
+    ] },
+  ] };
+  const lanes = new Map<string, RLane>([
+    ['X', { zone: 'visual', layer: 0 }], ['Y', { zone: 'visual', layer: 0 }], ['G', { zone: 'visual', layer: 1 }],
+    ['x', { zone: 'audio', layer: 0 }], ['M', { zone: 'audio', layer: 1 }], ['M2', { zone: 'audio', layer: 1 }],
+  ]);
+  const dur = (c: { asset_id?: unknown }) => (c.asset_id === 'g' ? Infinity : c.asset_id === 'm' ? 6 : 100);
+  // 終わりを +2: X と相方 x、Y、絵 G が全部 2 秒伸びる（素材の時刻も付いてくる）
+  let m = multiTrimMoved(s, ['X', 'x', 'Y', 'G'], 'end', 2, dur, lanes);
+  assert.deepEqual([m.get('X')!.timeline_end, m.get('x')!.timeline_end, m.get('Y')!.timeline_end, m.get('G')!.timeline_end], [7, 7, 17, 27]);
+  assert.equal(m.get('X')!.source_end, 17);
+  assert.equal(m.get('Y')!.source_end, 9);
+  // 終わりを +8: X は選んだ Y の手前（10）で止まり、Y・G はそのまま 8 秒
+  m = multiTrimMoved(s, ['X', 'x', 'Y', 'G'], 'end', 8, dur, lanes);
+  assert.equal(m.get('X')!.timeline_end, 10);
+  assert.equal(m.get('x')!.timeline_end, 10); // 組は同じだけ
+  assert.equal(m.get('Y')!.timeline_end, 23);
+  // 頭を -3: X は 0 より前へ出ない（動かない）、Y は素材の頭（2秒分）まで
+  m = multiTrimMoved(s, ['X', 'x', 'Y'], 'start', -3, dur, lanes);
+  assert.equal(m.has('X'), false);
+  assert.deepEqual([m.get('Y')!.timeline_start, m.get('Y')!.source_start], [8, 0]);
+  // 縮める: 0.1 秒より短くならない
+  m = multiTrimMoved(s, ['M', 'M2'], 'end', -10, dur, lanes);
+  assert.deepEqual([m.get('M')!.timeline_end, m.get('M2')!.timeline_end], [0.1, 6.1]);
+  // 音の素材の終わり（6秒）より先へは伸ばせない
+  m = multiTrimMoved(s, ['M2'], 'end', 3, dur, lanes);
+  assert.equal(m.has('M2'), false);
 }
 console.log('timeline-ops ok');

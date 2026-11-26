@@ -263,6 +263,38 @@ const moveTail = (c: OClip, d: number): Partial<OClip> => ({
   ...(hasSource(c) ? { source_end: r3(Number(c.source_end || 0) + srcAdvance(c, d)) } : {}),
 });
 
+/** 選んだ何本かの同じ側の端を、まとめて同じだけ動かす（2026-11-26 本人「複数クリップ選択して端を伸び縮みさせる時は
+ *  複数クリップまとめてできるようにして」。Premiere・DaVinci と同じ）。組（同じ link_id）は同じだけ動き、組ごとに
+ *  素材の外・0.1秒より短く・0秒より前・同じ段の隣の手前で止まる。動かした物の新しい中身を返す。 */
+export function multiTrimMoved(
+  seq: RSeq, ids: string[], mode: 'start' | 'end', d: number, durOf: DurOf, lanes: Map<string, RLane>, extra?: Placement[],
+  overwrite = false, // Ctrl/⌘ の間は隣に当たっても止めない（上書き）
+): Map<string, Partial<OClip>> {
+  const set = new Set(ids.map(String));
+  const cs = allClips(seq).filter((c) => set.has(String(c.id)));
+  const groups = new Map<string, OClip[]>();
+  for (const c of cs) {
+    const k = c.link_id ? `l:${c.link_id}` : `c:${c.id}`;
+    groups.set(k, [...(groups.get(k) || []), c]);
+  }
+  const out = new Map<string, Partial<OClip>>();
+  for (const g of groups.values()) {
+    let lo = Number.NEGATIVE_INFINITY, hi = Number.POSITIVE_INFINITY;
+    for (const c of g) {
+      const [a, b] = mode === 'start' ? headRoom(c, durOf) : tailRoom(c, durOf);
+      lo = Math.max(lo, a); hi = Math.min(hi, b);
+      // 選んだ物どうしも隣として数える（端を伸ばしても、隣の選んだクリップの頭や終わりは動かないので）
+      const room = overwrite ? { minStart: 0, maxEnd: Number.POSITIVE_INFINITY } : trimRoom(seq, String(c.id), lanes, new Set(g.map((x) => String(x.id))), extra);
+      if (mode === 'start') lo = Math.max(lo, -c.timeline_start, Math.min(room.minStart, c.timeline_start) - c.timeline_start);
+      else hi = Math.min(hi, Math.max(room.maxEnd, c.timeline_end) - c.timeline_end);
+    }
+    const dd = hi < lo ? 0 : Math.min(Math.max(d, lo), hi);
+    if (Math.abs(dd) < 1e-6) continue;
+    for (const c of g) out.set(String(c.id), mode === 'start' ? moveHead(c, dd) : moveTail(c, dd));
+  }
+  return out;
+}
+
 /** ロール: 左のクリップ（と相方）の終わりと右のクリップ（と相方）の頭を一緒に d 秒動かす。全体の長さは変わらない。
  *  動ける範囲に収めた d を返す。 */
 export function applyRoll<S extends RSeq>(seq: S, leftIds: string[], rightIds: string[], d: number, durOf: DurOf): { seq: S; d: number } {

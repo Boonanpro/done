@@ -1,5 +1,6 @@
 'use client';
 
+import { endDanFileDrag, startDanFileDrag } from '@/lib/dan-file-drag';
 import { callDuration, callSide, collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
 import { probeSiteIdbOncePerDay } from '@/lib/idb-probe';
 import { perfLog, roomClickStart } from '@/lib/perf-log';
@@ -482,7 +483,7 @@ const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, mute
       {(images.length > 0 || videos.length > 0 || files.length > 0) && (
         <div className="flex flex-col gap-1.5 my-2">
           <MediaGrid items={[...images.map((url) => ({ url, kind: 'image' as const })), ...videos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
-          {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
+          {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" onDragStart={(e) => startDanFileDrag(e, f)} onDragEnd={endDanFileDrag} className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
         </div>
       )}
       {clean.trim() && <AiShapedText text={clean} onImageClick={onImageClick} muted={muted} live={live} messageId={messageId} shownMedia={[...images, ...videos].join('\n')} />}
@@ -726,6 +727,8 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
               href={f.url}
               target="_blank"
               rel="noopener noreferrer"
+              onDragStart={(e) => startDanFileDrag(e, f)}
+              onDragEnd={endDanFileDrag}
               className="flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/90 px-3 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary md:text-[15px]"
             >
               <FileText className="h-4 w-4 shrink-0" />
@@ -817,6 +820,8 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
               href={f.url}
               target="_blank"
               rel="noopener noreferrer"
+              onDragStart={(e) => startDanFileDrag(e, f)}
+              onDragEnd={endDanFileDrag}
               className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"
             >
               <FileText className="h-4 w-4 shrink-0 text-primary" />

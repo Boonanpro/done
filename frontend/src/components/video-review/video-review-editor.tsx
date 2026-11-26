@@ -40,6 +40,7 @@ import {
   Undo2,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { DAN_FILE_DND_TYPE, endDanFileDrag, mediaKindOfName, type DanDragFile } from '@/lib/dan-file-drag';
 import { CLIP_KIND_STYLE, ClipBox, type ClipBoxFns, type ClipCommentState, type ClipKind } from './timeline-clip';
 import { visualLane } from './lane-order';
 import { perfLog } from '@/lib/perf-log';
@@ -66,7 +67,7 @@ import { isRetiredFont } from './adobe-fonts';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
 import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, riderIds, rippleDeleteMain, rippleMoveGroups, rippleTrim } from './ripple-edit';
-import { applyRoll, applySlide, applySlip, editPoints, insertBlock, overwriteMoved, resolveFree, touchingNeighbor, trimRoom, withPartners, type Placement } from './timeline-ops';
+import { applyRoll, applySlide, applySlip, editPoints, multiTrimMoved, insertBlock, overwriteMoved, resolveFree, touchingNeighbor, trimRoom, withPartners, type Placement } from './timeline-ops';
 
 /** A form control whose value is a timeline setting (slider, number box, select, checkbox…), not
  *  free text. `typing` = only the ones still being typed into (number boxes). */
@@ -3963,30 +3964,41 @@ export function VideoReviewEditor({
   // track at the dropped lane's layer (0 = fullscreen, higher = overlay/PiP) and its AUDIO lands
   // on the 'audio' track, A/V-linked (shared link_id) so they move/trim/delete together. The
   // clip spans the asset's FULL length (no cap) from source 0, so the whole material is placed.
+  // 素材を落とした所に置く。動画は映像と音の組、絵は映像の段に1つ、音は音の段に1つ（2026-11-26 本人「ドラッグアンドドロップでも
+  // 入れれるようにして」。前は動画しか置けず、音や絵は落としても何も起きなかった）。種類と違う段に落とした時は、その種類の
+  // 新しい段に置く（音を映像の段に落としても、映像の段には入れない）。
   const insertSequenceClip = useCallback(
-    (payload: { id: string; kind?: string; duration?: number | string | null; label?: string | null }, dropTime: number, zone: 'visual' | 'audio', layer: number) => {
-      if (zone !== 'visual' || payload.kind !== 'video') return; // video onto a visual lane
+    (payload: { id: string; kind?: string; duration?: number | string | null; label?: string | null }, dropTime: number, zoneArg: 'visual' | 'audio', layerArg: number) => {
+      const kind = payload.kind;
+      if (kind !== 'video' && kind !== 'image' && kind !== 'audio') return;
+      const want: 'visual' | 'audio' = kind === 'audio' ? 'audio' : 'visual';
+      const lanesNow = computeClipLanes(editSequence?.tracks || []);
+      let zone = zoneArg, layer = layerArg;
+      if (zone !== want) {
+        const used = [...lanesNow.values()].filter((l) => l.zone === want).map((l) => l.layer);
+        zone = want;
+        layer = used.length ? Math.max(...used) + 1 : want === 'audio' ? 1 : 0;
+      }
       const rawLen = Number(payload.duration);
-      const len = Number.isFinite(rawLen) && rawLen > 0 ? rawLen : DROP_DEFAULT_LEN;
+      const len = kind !== 'image' && Number.isFinite(rawLen) && rawLen > 0 ? rawLen : DROP_DEFAULT_LEN;
       const start = Math.max(0, Number(dropTime) || 0);
       const ts = Number(start.toFixed(2)), te = Number((start + len).toFixed(2)), se = Number(len.toFixed(2));
-      const linkId = `lk_${makeId()}`;
-      const videoId = `clip_${makeId()}`;
-      const videoClip: SequenceClip = {
-        id: videoId, asset_id: payload.id, label: payload.label || '素材',
-        source_start: 0, source_end: se, timeline_start: ts, timeline_end: te,
-        track: 'video', layer, composition: layer > 0 ? 'overlay' : 'fullscreen', link_id: linkId,
-      };
-      const audioClip: SequenceClip = {
-        id: `clip_${makeId()}`, asset_id: payload.id, label: payload.label || '素材',
-        source_start: 0, source_end: se, timeline_start: ts, timeline_end: te,
-        track: 'audio', layer: 0, role: 'dialogue', link_id: linkId,
-      };
+      const label = payload.label || '素材';
+      const mainNow = mainLayerOf(editSequence?.tracks || [], lanesNow);
+      const toMain = zone === 'visual' && (mainNow === null ? layer === 0 : layer === mainNow);
+      const clips: NonNullable<ClipClipboard>['clips'] = [];
+      if (kind === 'audio') {
+        const role = len <= 3 ? 'sfx' : 'bgm';
+        clips.push({ clip: { id: `clip_${makeId()}`, asset_id: payload.id, label, source_start: 0, source_end: se, timeline_start: ts, timeline_end: te, track: 'audio', layer, role }, trackId: '', trackType: 'audio', zone: 'audio', layer });
+      } else if (kind === 'image') {
+        clips.push({ clip: { id: `clip_${makeId()}`, asset_id: payload.id, label, source_start: 0, source_end: se, timeline_start: ts, timeline_end: te, track: 'video', layer, composition: layer > 0 ? 'overlay' : 'fullscreen' }, trackId: '', trackType: 'video', zone: 'visual', layer, main: toMain });
+      } else {
+        const linkId = `lk_${makeId()}`;
+        clips.push({ clip: { id: `clip_${makeId()}`, asset_id: payload.id, label, source_start: 0, source_end: se, timeline_start: ts, timeline_end: te, track: 'video', layer, composition: layer > 0 ? 'overlay' : 'fullscreen', link_id: linkId }, trackId: '', trackType: 'video', zone: 'visual', layer, main: toMain });
+        clips.push({ clip: { id: `clip_${makeId()}`, asset_id: payload.id, label, source_start: 0, source_end: se, timeline_start: ts, timeline_end: te, track: 'audio', layer: 0, role: 'dialogue', link_id: linkId }, trackId: '', trackType: 'audio', zone: 'audio', layer: 0 });
+      }
       // 置き方は貼り付けと同じ: 詰める ON でメインの段へ落としたら、一番近いつなぎ目（遠ければ落とした所で切って）に
       // 割り込む。それ以外は重なる相手を消さずに空いている段へ（前は重ねて置くだけで、下の物が見えなくなっていた）。
-      const lanesNow = computeClipLanes(editSequence?.tracks || []);
-      const mainNow = mainLayerOf(editSequence?.tracks || [], lanesNow);
-      const toMain = mainNow === null ? layer === 0 : layer === mainNow;
       let at = ts;
       if (rippleOn && toMain && editSequence) {
         const pts = editPoints(editSequence, (c) => { const l = lanesNow.get(String(c.id)); return !(l?.zone === 'visual' && l.layer === mainNow); });
@@ -3996,19 +4008,59 @@ export function VideoReviewEditor({
         for (const p of pts) if (Math.abs(p - at) < Math.abs(near - at)) near = p;
         if (Math.abs(near - at) <= tol) at = near;
       }
-      const src: NonNullable<ClipClipboard> = {
-        clips: [
-          { clip: videoClip, trackId: '', trackType: 'video', zone: 'visual', layer, main: toMain },
-          { clip: audioClip, trackId: '', trackType: 'audio', zone: 'audio', layer: 0 },
-        ],
-        annotations: [],
-        origin: ts,
-        end: te,
-      };
+      const src: NonNullable<ClipClipboard> = { clips, annotations: [], origin: ts, end: te };
       placeClipCopiesRef.current?.(src, at - ts, rippleOn && toMain ? 'insert' : 'free');
+      return Number(len);
     },
     [editSequence, rippleOn, timelineDuration]
   );
+
+  // パソコンのファイル・チャットの添付を、この部屋の素材にしてから置く（素材の一覧を読み直してから置く。波形と再生に要る）。
+  // 何個か落としたら、落とした所から順に後ろへつなげて置く。
+  // タイムラインの外にファイルを落としても、ブラウザがそのファイルを開いてエディターから離れないようにする
+  useEffect(() => {
+    const stop = (e: DragEvent) => { if (e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')) e.preventDefault(); };
+    window.addEventListener('dragover', stop);
+    window.addEventListener('drop', stop);
+    return () => { window.removeEventListener('dragover', stop); window.removeEventListener('drop', stop); };
+  }, []);
+  const importAndInsert = useCallback(async (
+    sources: Array<{ file?: File; dan?: DanDragFile }>, dropTime: number, zone: 'visual' | 'audio', layer: number,
+  ) => {
+    if (!roomId || sources.length === 0) return;
+    const tid = toast.loading(sources.length > 1 ? `${sources.length}個の素材を取り込んでいます…` : '素材を取り込んでいます…');
+    const assets: Array<{ id: string; kind?: string; metadata?: { duration?: number }; filename?: string }> = [];
+    try {
+      for (const s of sources) {
+        let res: Response;
+        if (s.file) {
+          const body = new FormData();
+          body.append('file', s.file, s.file.name);
+          res = await fetch(`/api/v1/production-assets/upload?room_id=${encodeURIComponent(roomId)}`, { method: 'POST', credentials: 'include', body });
+        } else if (s.dan) {
+          res = await fetch('/api/v1/production-assets/import-file', {
+            method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ room_id: roomId, url: s.dan.url, name: s.dan.name }),
+          });
+        } else continue;
+        if (!res.ok) throw new Error((await res.text()).slice(0, 160));
+        assets.push(await res.json());
+      }
+      await onExternalEditRef.current?.();
+      let t = dropTime;
+      for (const a of assets) {
+        // 前に置いた物が画面に入ってから次を置く（置く決め方は今のタイムラインを土台にするので、続けて置くと前の物が消える）
+        await new Promise((r) => setTimeout(r, 60));
+        const len = insertSequenceClipRef.current?.({ id: a.id, kind: a.kind, duration: a.metadata?.duration, label: a.filename }, t, zone, layer);
+        t += Number(len) || DROP_DEFAULT_LEN;
+      }
+      toast.success(assets.length > 1 ? `${assets.length}個の素材を置きました` : '素材を置きました', { id: tid });
+    } catch (error) {
+      toast.error('素材を取り込めませんでした', { id: tid, description: String(error).slice(0, 160) });
+    }
+  }, [roomId]);
+  const insertSequenceClipRef = useRef(insertSequenceClip);
+  useEffect(() => { insertSequenceClipRef.current = insertSequenceClip; }, [insertSequenceClip]);
 
   // ── 効果音を自分で入れる（2026-11-14 本人「使いたい効果音を全部消しちゃった状態では自分で追加する術がない」）──
   // 一覧の音をこの作品の素材にしてから（同じ名前があればそれを使う）、音の段に置く。段は、置く所が空いている
@@ -4081,25 +4133,49 @@ export function VideoReviewEditor({
     return clamp(frac * timelineDuration, 0, timelineDuration);
   }, [timelineDuration]);
 
+  // 引きずっている物の種類（映像の段か音の段か）。引きずっている間は中身を読めないので、素材の一覧とチャットの側が
+  // window に置いた物と、パソコンのファイルの種類（items の type）で決める。分からなければ null（どの段でも受ける）。
+  const dragKindNow = (dt: DataTransfer): 'video' | 'image' | 'audio' | null => {
+    const types = Array.from(dt.types);
+    if (types.includes(SFX_DND_TYPE)) return 'audio';
+    if (types.includes(ASSET_DND_TYPE)) {
+      const k = (window as unknown as { __danDragAsset?: { kind?: string } }).__danDragAsset?.kind;
+      return k === 'audio' || k === 'image' || k === 'video' ? k : 'video';
+    }
+    if (types.includes(DAN_FILE_DND_TYPE)) { const f = window.__danDragFile; return f ? mediaKindOfName(f.name || f.url) || mediaKindOfName(f.url) : null; }
+    if (types.includes('Files')) {
+      const it = Array.from(dt.items || []).find((x) => x.kind === 'file');
+      return it ? mediaKindOfName('', it.type) : null;
+    }
+    return null;
+  };
+  const acceptsDrop = (dt: DataTransfer) => {
+    const types = Array.from(dt.types);
+    return types.includes(SFX_DND_TYPE) || types.includes(ASSET_DND_TYPE) || types.includes(DAN_FILE_DND_TYPE) || types.includes('Files');
+  };
+
   const handleLaneDragOver = useCallback((event: React.DragEvent, lane: TimelineLane) => {
-    const types = Array.from(event.dataTransfer.types);
-    const isSfx = types.includes(SFX_DND_TYPE);
-    if (!isSfx && !types.includes(ASSET_DND_TYPE)) return;
+    if (!acceptsDrop(event.dataTransfer)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
-    if (lane.zone !== (isSfx ? 'audio' : 'visual')) { setDropPreview(null); return; } // 映像は映像の段、効果音は音の段
+    const kind = dragKindNow(event.dataTransfer);
+    const isSfx = Array.from(event.dataTransfer.types).includes(SFX_DND_TYPE);
+    // 効果音は音の段だけ。ほかは種類の段に落ちた時だけ影を出す（違う段に落としたら、その種類の新しい段に置く）
+    if (isSfx && lane.zone !== 'audio') { event.dataTransfer.dropEffect = 'none'; setDropPreview(null); return; }
+    if (kind && lane.zone !== (kind === 'audio' ? 'audio' : 'visual')) { setDropPreview(null); return; }
     const start = dropTimeFromEvent(event.clientX);
     if (start === null) return;
-    const dragged = (typeof window !== 'undefined' ? (window as unknown as { __danDragAsset?: { duration?: number | string | null } }).__danDragAsset : null) || null;
+    const dragged = (window as unknown as { __danDragAsset?: { duration?: number | string | null } }).__danDragAsset || null;
     const rawLen = Number(dragged?.duration);
-    const len = Number.isFinite(rawLen) && rawLen > 0 ? rawLen : DROP_DEFAULT_LEN;
+    const len = kind !== 'image' && Number.isFinite(rawLen) && rawLen > 0 ? rawLen : DROP_DEFAULT_LEN;
     setDropPreview({ zone: lane.zone, layer: lane.layer, start, len });
   }, [dropTimeFromEvent]);
 
   const handleLaneDrop = useCallback(
     (event: React.DragEvent, lane: TimelineLane) => {
       setDropPreview(null);
-      const sfxRaw = event.dataTransfer.getData(SFX_DND_TYPE);
+      const dt = event.dataTransfer;
+      const sfxRaw = dt.getData(SFX_DND_TYPE);
       if (sfxRaw) {
         event.preventDefault();
         const t = dropTimeFromEvent(event.clientX);
@@ -4107,16 +4183,41 @@ export function VideoReviewEditor({
         try { void addSfx(JSON.parse(sfxRaw) as SfxItem, t, lane.layer); } catch { /* 壊れた印は無視 */ }
         return;
       }
-      const raw = event.dataTransfer.getData(ASSET_DND_TYPE);
-      if (!raw) return;
-      event.preventDefault();
-      let payload: { id: string; kind?: string; duration?: number | string | null; label?: string | null };
-      try { payload = JSON.parse(raw); } catch { return; }
-      const dropTime = dropTimeFromEvent(event.clientX);
-      if (dropTime === null) return;
-      insertSequenceClip(payload, dropTime, lane.zone, lane.layer);
+      const raw = dt.getData(ASSET_DND_TYPE);
+      if (raw) {
+        event.preventDefault();
+        let payload: { id: string; kind?: string; duration?: number | string | null; label?: string | null };
+        try { payload = JSON.parse(raw); } catch { return; }
+        const dropTime = dropTimeFromEvent(event.clientX);
+        if (dropTime === null) return;
+        insertSequenceClip(payload, dropTime, lane.zone, lane.layer);
+        return;
+      }
+      // チャットに貼った添付
+      const danRaw = dt.getData(DAN_FILE_DND_TYPE);
+      if (danRaw) {
+        event.preventDefault();
+        endDanFileDrag();
+        let f: DanDragFile;
+        try { f = JSON.parse(danRaw); } catch { return; }
+        const dropTime = dropTimeFromEvent(event.clientX);
+        if (dropTime === null) return;
+        if (!mediaKindOfName(f.name || '') && !mediaKindOfName(f.url)) { toast.error('動画・画像・音のファイルだけ置けます'); return; }
+        void importAndInsert([{ dan: f }], dropTime, lane.zone, lane.layer);
+        return;
+      }
+      // パソコンのファイル（エクスプローラー・Finder から）
+      const files = Array.from(dt.files || []);
+      if (files.length) {
+        event.preventDefault();
+        const dropTime = dropTimeFromEvent(event.clientX);
+        if (dropTime === null) return;
+        const ok = files.filter((f) => mediaKindOfName(f.name, f.type));
+        if (ok.length < files.length) toast.error('動画・画像・音のファイルだけ置けます', { description: files.filter((f) => !ok.includes(f)).map((f) => f.name).join('、').slice(0, 160) });
+        if (ok.length) void importAndInsert(ok.map((file) => ({ file })), dropTime, lane.zone, lane.layer);
+      }
     },
-    [insertSequenceClip, dropTimeFromEvent, addSfx]
+    [insertSequenceClip, dropTimeFromEvent, addSfx, importAndInsert]
   );
 
   // DaVinci/Premiere-style overwrite: place the dragged clip at its new range and trim,
@@ -4708,6 +4809,26 @@ export function VideoReviewEditor({
             for (const p of pts) if (Math.abs(p - rawStart) < Math.abs(P - rawStart)) P = p;
             res = rippleMoveGroups(ripSnap, rip.anns, rip.groups, P, lanesSnap, mainLayer);
             setRippleMarker(P);
+          } else if (rip.groups.length > 1) {
+            // 何本か選んで端を動かした: 一番後ろの組から順に同じだけ伸び縮みさせ、後ろを詰める（前の組を動かすと後ろの組も付いてくる）
+            const allSnap = (ripSnap.tracks || []).flatMap((t) => t.clips || []);
+            const heads = rip.groups.map((g) => ({ g, h: allSnap.find((c) => c.id === g[0]) })).filter((x): x is { g: string[]; h: SequenceClip } => !!x.h)
+              .sort((x, y) => y.h.timeline_start - x.h.timeline_start);
+            let seqN = ripSnap; let annsN = rip.anns;
+            for (const { g, h } of heads) {
+              const asset = sequenceAssetMap.get(String(h.asset_id || ''));
+              const image = asset?.kind === 'image' || (h as { kind?: string }).kind === 'image';
+              const video = !!h.asset_id && !image && Number(h.source_end || 0) > Number(h.source_start || 0) + 1e-6;
+              const sp = Number(h.speed) > 0 ? Number(h.speed) : 1;
+              const dur = Number(asset?.metadata?.duration) || Number(h.source_duration) || Number(h.source_end || 0);
+              const len = h.timeline_end - h.timeline_start;
+              const d = sequenceClipDrag.mode === 'end'
+                ? clamp(delta, -(len - 0.1), video ? Math.max(0, dur - Number(h.source_end || 0)) / sp : Number.POSITIVE_INFINITY)
+                : clamp(delta, -(video ? Number(h.source_start || 0) / sp : image ? h.timeline_start : 0), len - 0.1);
+              const one = rippleTrim(seqN, annsN, g, sequenceClipDrag.mode, d, computeClipLanes(seqN.tracks || []), mainLayer);
+              seqN = one.seq; annsN = one.anns;
+            }
+            res = { seq: seqN, anns: annsN };
           } else {
             const hAsset = sequenceAssetMap.get(String(head.asset_id || ''));
             const hImage = hAsset?.kind === 'image' || (head as { kind?: string }).kind === 'image';
@@ -4761,6 +4882,22 @@ export function VideoReviewEditor({
         for (const g of snapTargets) { const d = Math.abs(t - g); if (d < bd) { bd = d; best = g; } }
         return best;
       };
+      // 何本か選んで端をつかんだら、選んだ全部の同じ側の端を同じだけ伸び縮みさせる（2026-11-26 本人。Premiere と同じ）。
+      // 吸い付きはつかんだクリップの端で決め、それぞれ素材の外・隣の手前で止まる（Ctrl/⌘ の間は上書き）。
+      if (sequenceClipDrag.mode !== 'move' && dragSelectionRef.current.length > 1 && dragSnapshotRef.current) {
+        const snapSeq = dragSnapshotRef.current;
+        const edge = sequenceClipDrag.mode === 'end' ? sequenceClipDrag.originalTimelineEnd : sequenceClipDrag.originalTimelineStart;
+        const d = snap(edge + delta) - edge;
+        const ids = linkAV ? withPartners(snapSeq, dragSelectionRef.current) : [...dragSelectionRef.current];
+        const durOf = (c: { asset_id?: unknown; source_duration?: unknown; kind?: unknown }) => {
+          const asset = sequenceAssetMap.get(String(c.asset_id || ''));
+          if (asset?.kind === 'image' || c.kind === 'image') return Number.POSITIVE_INFINITY;
+          return Number(asset?.metadata?.duration) || Number(c.source_duration) || Number.POSITIVE_INFINITY;
+        };
+        const moved = multiTrimMoved(snapSeq, ids, sequenceClipDrag.mode, d, durOf, computeClipLanes(snapSeq.tracks || []), annPlacementsRef.current, overwriteRef.current);
+        placeMovedSet(snapSeq, moved as Map<string, Partial<SequenceClip>>, new Set(ids));
+        return;
+      }
       // The dragged clip moves/resizes freely; applyDragOverwrite then trims, deletes, or
       // splits any same-lane neighbour it now overlaps (DaVinci/Premiere overwrite).
       if (sequenceClipDrag.mode === 'start') {
@@ -4896,7 +5033,7 @@ export function VideoReviewEditor({
       window.removeEventListener('pointerup', clearDrag);
       window.removeEventListener('pointercancel', clearDrag);
     };
-  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove, snapEnabled, sequenceDuration, currentTime, mainLayer, sequenceAssetMap, buildClipCopies]);
+  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove, snapEnabled, sequenceDuration, currentTime, mainLayer, sequenceAssetMap, buildClipCopies, linkAV, placeMovedSet]);
 
   // Rubber-band (marquee) select: while a right-drag is active, draw the rectangle and on
   // release select every clip bar (data-clip-id) whose on-screen box intersects it. A tiny
