@@ -69,6 +69,7 @@ OWNER_AWAY_SEC = 600
 RESTART_COOLDOWN = 2 * 3600
 RUN_BUDGET = 50 * 60
 EXPORT_TIMEOUT = 40 * 60
+STALE_RUNNING = 2 * EXPORT_TIMEOUT  # 「書き出し中」のままこれだけたった物は止まったとみなす
 
 STATE_DIR = Path(os.environ.get(
     "DESK_KEEP_STATE", str(Path.home() / ".dan/workspace/data/desk-presence-keep")))
@@ -302,7 +303,7 @@ def export_one(s: float, e: float, rec_sec: float) -> tuple[bool, str]:
         if c == 200 and isinstance(info, dict) and not info.get("in_progress"):
             break
     else:
-        return False, f"timeout {exp_id}"
+        return False, f"timeout {exp_id}"  # 書き出し中のまま残った物は reconcile_exports が片付ける
     vp = (info or {}).get("video_path", "")
     dur = ffprobe_duration(f"{FRIGATE}/exports/{Path(vp).name}")
     # 録画にある秒数の9割以上が動画に入っていれば良しとする
@@ -315,8 +316,24 @@ def export_one(s: float, e: float, rec_sec: float) -> tuple[bool, str]:
 def reconcile_exports(st: dict, exports: list[dict]) -> None:
     """途中で止まった実行が残した、まだ確かめていない書き出しを確かめる。足りなければ消す。"""
     verified = set(st.setdefault("verified", []))
+    seen = st.setdefault("running_seen", {})
+    now = time.time()
+    running = {x["id"] for x in exports if x.get("in_progress")}
+    for k in list(seen):
+        if k not in running:
+            del seen[k]
     for s, e, x in export_ranges(exports):
-        if x["id"] in verified or x.get("in_progress"):
+        if x.get("in_progress") and (x.get("name") or "").startswith(NAME_PREFIX):
+            # Frigate が途中で止まると「書き出し中」のまま動画の無い記録が残り、
+            # その区間は書き出し済みに数えられ、日数を下げる処理も待ち続ける。
+            first = seen.setdefault(x["id"], now)
+            if now - first > STALE_RUNNING:
+                code, _ = api("DELETE", f"/api/export/{x['id']}")
+                log("deleted_stale_running", id=x["id"], name=x.get("name"), code=code)
+                if code == 200:
+                    seen.pop(x["id"], None)
+            continue
+        if x["id"] in verified:
             continue
         if not (x.get("name") or "").startswith(NAME_PREFIX):
             continue
@@ -485,7 +502,9 @@ def manage_retention(st: dict, now: float) -> None:
         log("retention_wait_cooldown")
         return
     c, x = api("GET", "/api/exports")
-    if any(e.get("in_progress") for e in (x if isinstance(x, list) else [])):
+    seen = st.get("running_seen", {})
+    if any(e.get("in_progress") and time.time() - seen.get(e["id"], time.time()) <= STALE_RUNNING
+           for e in (x if isinstance(x, list) else [])):
         log("retention_wait_export_running")
         return
     ok = set_continuous_days(int(target))
