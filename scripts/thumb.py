@@ -3,7 +3,7 @@
   python scripts/thumb.py show    <部屋> <作品>                      部品の一覧（奥から手前の順・位置・大きさ・文字）
   python scripts/thumb.py json    <部屋> <作品>                      部品の全部を JSON で
   python scripts/thumb.py set     <部屋> <作品> <部品id> key=値 …     数値・色・文字を直す
-        例: x=820 y+=-30 size=300 fill=#ffe400 stroke_width=22 text="先に\\nビジネス" font=hiragino-w9
+        例: x=820 y+=-30 size=300 fill=#ffe400 stroke_width=22 text="先に\\nビジネス" font=hiragino-w9（Adobe の見出し: adobe-ryo-display / adobe-kozuka-heavy / adobe-neokuro / adobe-shuei-ymincho / adobe-v7-maru）
             hidden=true opacity=0.8 rotation=-4 shadow.blur=12 bg.color=#0a080ed7
             二重の縁: stroke=#ffffff stroke_width=16 outline=#000000 outline_width=30（外の縁。影は外の縁に付く）
             画像は x y w h（scale=1.1 で真ん中を中心に大きさを変える）

@@ -1,3 +1,4 @@
+import { HEADING_FONTS, loadHeadingKit } from '@/components/video-review/adobe-fonts';
 // サムネを部品で持つ形（2026-11-18 本人「サムネの微調整の往復に時間がかかりすぎる。自分で手で直せる・書き込みで
 // 指示できる・その場で変わる様子が見える仕組みがほしい」）。
 //
@@ -80,12 +81,19 @@ export type ThumbInstruction = {
 
 export type ThumbFontId =
   | 'hiragino-w9' | 'hiragino-w8' | 'hiragino-w6'
-  | 'noto-sans' | 'dela-gothic' | 'zen-maru' | 'reggae' | 'mplus-rounded' | 'rocknroll' | 'mincho' | 'toppan-mincho';
+  | 'noto-sans' | 'dela-gothic' | 'zen-maru' | 'reggae' | 'mplus-rounded' | 'rocknroll' | 'mincho' | 'toppan-mincho'
+  | 'adobe-ryo-display' | 'adobe-kozuka-heavy' | 'adobe-neokuro' | 'adobe-shuei-ymincho' | 'adobe-v7-maru';
 
 const OWNER_FONT_BASE = '/api/v1/editor-assistant/scene-vendor/fonts/';
 
-// [表示名, CSS の family, 太さ, ファイル]
-export const THUMB_FONTS: Record<ThumbFontId, { label: string; family: string; weight: number; url: string }> = {
+// [表示名, CSS の family, 太さ, ファイル]。adobe はファイルでなく、本人の Adobe Fonts の Web キットから読む（family はキットの名前）
+// （2026-11-26 本人「フォントとか安っぽすぎる」→ 動画の字幕で使っている Adobe Fonts の見出し書体をサムネでも選べるように）
+type ThumbFontDef = { label: string; family: string; weight: number; url: string; adobe?: boolean };
+const adobeHeading = (id: keyof typeof HEADING_FONTS): ThumbFontDef => {
+  const f = HEADING_FONTS[id];
+  return { label: `${f.label}（Adobe）`, family: f.web, weight: f.weight, url: '', adobe: true };
+};
+export const THUMB_FONTS: Record<ThumbFontId, ThumbFontDef> = {
   'hiragino-w9': { label: 'ヒラギノ角ゴ W9', family: 'HiraginoW9', weight: 900, url: `${OWNER_FONT_BASE}HiraginoSans-W9.otf` },
   'hiragino-w8': { label: 'ヒラギノ角ゴ W8', family: 'HiraginoW8', weight: 800, url: `${OWNER_FONT_BASE}HiraginoSans-W8.otf` },
   'hiragino-w6': { label: 'ヒラギノ角ゴ W6', family: 'HiraginoW6', weight: 600, url: `${OWNER_FONT_BASE}HiraginoSans-W6.otf` },
@@ -97,6 +105,11 @@ export const THUMB_FONTS: Record<ThumbFontId, { label: string; family: string; w
   'rocknroll': { label: 'ロック', family: 'RocknRollOne', weight: 400, url: '/fonts/RocknRollOne-Regular.ttf' },
   'mincho': { label: '明朝', family: 'ShipporiMincho', weight: 800, url: '/fonts/ShipporiMincho-ExtraBold.ttf' },
   'toppan-mincho': { label: '見出し明朝', family: 'ToppanMidashiMincho', weight: 800, url: `${OWNER_FONT_BASE}ToppanBunkyuMidashiMincho-ExtraBold.otf` },
+  'adobe-ryo-display': adobeHeading('ryo-display'),
+  'adobe-kozuka-heavy': adobeHeading('kozuka-heavy'),
+  'adobe-neokuro': adobeHeading('neokuro'),
+  'adobe-shuei-ymincho': adobeHeading('shuei-ymincho'),
+  'adobe-v7-maru': adobeHeading('v7-maru'),
 };
 
 export function thumbFont(id: unknown) {
@@ -104,13 +117,35 @@ export function thumbFont(id: unknown) {
     ? THUMB_FONTS[id as ThumbFontId] : THUMB_FONTS['hiragino-w9'];
 }
 
-// 使っている書体だけを読む（書き出しは読み終わるまで待つ）
+// 使っている書体だけを読む（書き出しは読み終わるまで待つ）。Adobe の書体は使っている文字だけを
+// キットに足してもらう（日本語の書体は文字ごとに届くので、文字を変えるたびに足りない字を足す）
 const loads = new Map<string, Promise<void>>();
+const adobeChars = new Map<string, Set<string>>();
+function loadAdobeChars(family: string, text: string): Promise<void> {
+  const have = adobeChars.get(family) ?? new Set<string>();
+  const add = Array.from(new Set(Array.from(text))).filter((c) => c.trim() && !have.has(c));
+  if (!add.length) return Promise.resolve();
+  return loadHeadingKit().then(async (kit) => {
+    const font = kit.kit.find((k) => k.family === family);
+    if (!font) return;
+    await font.update(add.map((c) => 'U+' + c.codePointAt(0)!.toString(16)).join(','));
+    for (const c of add) have.add(c);
+    adobeChars.set(family, have);
+    await document.fonts.ready;
+  }).catch(() => undefined);
+}
 export function loadThumbFonts(doc: ThumbDoc | null | undefined, timeoutMs = 10000): Promise<void> {
   if (typeof document === 'undefined' || typeof FontFace === 'undefined' || !doc) return Promise.resolve();
   const ids = new Set<string>();
-  for (const p of doc.parts) if (p.type === 'text') ids.add(p.font);
-  return Promise.all([...ids].map((id) => {
+  const adobeText = new Map<string, string>();
+  for (const p of doc.parts) {
+    if (p.type !== 'text') continue;
+    const f = thumbFont(p.font);
+    if (f.adobe) adobeText.set(f.family, (adobeText.get(f.family) || '') + String(p.text ?? ''));
+    else ids.add(p.font);
+  }
+  const waits: Promise<void>[] = [...adobeText].map(([family, text]) => loadAdobeChars(family, text));
+  for (const id of ids) {
     const f = thumbFont(id);
     let p = loads.get(f.url);
     if (!p) {
@@ -121,8 +156,9 @@ export function loadThumbFonts(doc: ThumbDoc | null | undefined, timeoutMs = 100
       })().catch(() => { loads.delete(f.url); });
       loads.set(f.url, p);
     }
-    return Promise.race([p, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
-  })).then(() => undefined);
+    waits.push(p);
+  }
+  return Promise.all(waits.map((p) => Promise.race([p, new Promise<void>((r) => setTimeout(r, timeoutMs))]))).then(() => undefined);
 }
 
 export function emptyThumbDoc(): ThumbDoc {
