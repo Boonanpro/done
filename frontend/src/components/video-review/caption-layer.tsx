@@ -93,16 +93,25 @@ function tokenize(cap: RenderCaption): CaptionWord[] {
   }));
 }
 
-type ColorSpan = { s: number; e: number; color: string };
+type ColorSpan = { s: number; e: number; color?: string; scale?: number };
 
 // 範囲色: idx を含む最後のスパンが勝つ
-function spanColorAt(spans: ColorSpan[] | undefined, idx: number): string | undefined {
+function spanAt(spans: ColorSpan[] | undefined, idx: number): ColorSpan | undefined {
   if (!spans) return undefined;
   for (let i = spans.length - 1; i >= 0; i--) {
     const sp = spans[i];
-    if (idx >= sp.s && idx < sp.e) return sp.color;
+    if (idx >= sp.s && idx < sp.e) return sp;
   }
   return undefined;
+}
+// 範囲の大きさ: 行の他の文字に対する倍率（強調の言葉だけ大きく）
+function spanStyle(sp: ColorSpan | undefined): CSSProperties | undefined {
+  if (!sp) return undefined;
+  const st: CSSProperties = {};
+  if (sp.color) { st.color = sp.color; st.WebkitTextFillColor = sp.color; }
+  const sc = Number(sp.scale);
+  if (Number.isFinite(sc) && sc > 0 && sc !== 1) st.fontSize = `${sc}em`;
+  return st;
 }
 
 // テキストをスパン境界で分割し、色付き区間を <span> で包む。gradient 使用時は
@@ -120,10 +129,10 @@ function renderSpanned(text: string, spans?: ColorSpan[]): React.ReactNode {
     const a = pts[i];
     const b = pts[i + 1];
     if (a >= b) continue;
-    const col = spanColorAt(spans, a);
+    const st = spanStyle(spanAt(spans, a));
     segs.push(
-      col ? (
-        <span key={a} style={{ color: col, WebkitTextFillColor: col }}>
+      st ? (
+        <span key={a} style={st}>
           {text.slice(a, b)}
         </span>
       ) : (
@@ -176,7 +185,9 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
         {tokens.map((tok, i) => {
           const spoken = time >= tok.end;
           const activeWord = time >= tok.start && time < tok.end;
-          const spanCol = spanColorAt(colorSpans, tokenOffsets ? tokenOffsets[i] : 0);
+          const tokSpan = spanAt(colorSpans, tokenOffsets ? tokenOffsets[i] : 0);
+          const spanCol = tokSpan?.color;
+          const spanSize = spanStyle(tokSpan)?.fontSize;
           if (anim === 'typewriter') {
             // reveal: hide tokens not yet reached (keep layout stable via visibility)
             const shown = time >= tok.start;
@@ -185,6 +196,7 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
                 key={i}
                 style={{
                   visibility: shown ? 'visible' : 'hidden',
+                  fontSize: spanSize,
                   color: spanCol,
                   WebkitTextFillColor: spanCol,
                 }}
@@ -200,6 +212,7 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
               key={i}
               style={{
                 display: 'inline-block',
+                fontSize: spanSize,
                 color: col,
                 WebkitTextFillColor: col,
                 opacity: spoken || activeWord ? 1 : 0.45,

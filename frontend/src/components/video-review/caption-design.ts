@@ -161,7 +161,8 @@ export type CaptionDesign = {
   highlightScale?: number;    // karaoke: scale bump on the active word (default 1.12)
   // 選択範囲ごとの文字色。s/e は text の UTF-16 コード単位のインデックス [s, e)。
   // ネイティブエディタの「選択範囲の色」から書かれる。後のスパンが優先。
-  colorSpans?: { s: number; e: number; color: string }[];
+  // Part of the line in another colour and/or size (scale = size relative to the rest of the line).
+  colorSpans?: { s: number; e: number; color?: string; scale?: number }[];
 };
 
 // Caption motion presets. 'pop'/'fade'/'slide' are pure intro animations; 'typewriter' reveals
