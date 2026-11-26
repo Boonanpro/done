@@ -163,7 +163,9 @@ _CAPTION_STYLE = {'type':'object','additionalProperties':False,'properties':{
     'shadow':{'type':'object','additionalProperties':False,'description':'字幕全体の影(px)。外す時はblur:0,dx:0,dy:0。',
               'properties':{'color':{'type':'string'},'blur':{'type':'number'},'dx':{'type':'number'},'dy':{'type':'number'}}},
     'skew':{'type':'number','description':'箱ごと斜めにする角度(度)。負で上が右へ傾く(-9で赤の強調の斜め)。±30まで。0でまっすぐ。'},
-    'letterSpacing':{'type':'number','description':'字間。文字の大きさに対する比率(0.02で少し広げる)。'}
+    'letterSpacing':{'type':'number','description':'字間。文字の大きさに対する比率(0.02で少し広げる)。'},
+    'emphasis':{'type':['array','null'],'description':'字幕の中の一部の言葉だけ色・大きさを変える。[{text:"24年",color:"#e3141f",scale:1.4}]。textは字幕の本文にある言葉そのまま(同じ言葉が2回あれば並べた順に前から当てる)。scaleはその行の他の文字に対する倍率。渡すと前の強調を置き換え、[]で外す。',
+                'items':{'type':'object','additionalProperties':False,'properties':{'text':{'type':'string'},'color':{'type':'string'},'scale':{'type':'number'}},'required':['text']}}
 }}
 
 @app.list_tools()
