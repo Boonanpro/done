@@ -1,8 +1,10 @@
+import { createContext } from 'react';
 import type { CaptionDesign } from './caption-design';
 
 type Span = NonNullable<CaptionDesign['colorSpans']>[number];
 export type WordRange = Pick<Span, 's' | 'e'>;
-type WordLook = Pick<Span, 'color' | 'scale'>;
+export type WordLook = Omit<Span, 's' | 'e'>;
+const attributes = ['color', 'scale', 'font', 'bold', 'outlineColor', 'outlineWidth'] as const;
 
 export function styleWords(spans: Span[] = [], range: WordRange, patch: WordLook): Span[] {
   const cuts = Array.from(new Set([range.s, range.e, ...spans.flatMap(sp => [sp.s, sp.e])])).sort((a, b) => a - b);
@@ -11,11 +13,11 @@ export function styleWords(spans: Span[] = [], range: WordRange, patch: WordLook
   for (let i = 1; i < cuts.length; i++) {
     const s = cuts[i - 1], e = cuts[i];
     const old = topFirst.find(sp => sp.s <= s && s < sp.e);
-    const look = { color: old?.color, scale: old?.scale, ...(range.s <= s && s < range.e ? patch : {}) };
-    if (!look.color && look.scale == null) continue;
+    const look = { ...old, ...(range.s <= s && s < range.e ? patch : {}), s, e };
+    if (!attributes.some(key => look[key] != null)) continue;
     const last = result[result.length - 1];
-    if (last && last.e === s && last.color === look.color && last.scale === look.scale) last.e = e;
-    else result.push({ s, e, ...look });
+    if (last && last.e === s && attributes.every(key => last[key] === look[key])) last.e = e;
+    else result.push(look);
   }
   return result;
 }
@@ -34,15 +36,12 @@ export function moveWordStyles(spans: Span[], before: string, after: string): Sp
   });
 }
 
-export function WordControls({ design, range, change }: {
-  design: CaptionDesign; range: WordRange; change: (look: WordLook) => void;
-}) {
-  const span = [...(design.colorSpans || [])].reverse().find(sp => sp.s <= range.s && range.s < sp.e);
-  const scale = span?.scale ?? 1;
-  return <div className="flex flex-wrap items-center gap-2 text-xs">
-    <label>選択文字の色 <input aria-label="選択文字の色" type="color" value={span?.color || design.color || '#ffffff'}
-      className="h-6 w-8 align-middle" onChange={e => change({color: e.target.value})} /></label>
-    <label>大きさ {Math.round(scale * 100)}% <input aria-label="選択文字の大きさ" type="range" min="0.5" max="2.5" step="0.05"
-      className="w-20 align-middle" value={scale} onChange={e => change({scale: Number(e.target.value)})} /></label>
-  </div>;
-}
+export type CaptionEdit = {
+  id: string;
+  point: { x: number; y: number };
+  range: WordRange | null;
+  onText: (text: string) => void;
+  onRange: (range: WordRange) => void;
+  onExit: () => void;
+};
+export const CaptionEditContext = createContext<CaptionEdit | null>(null);

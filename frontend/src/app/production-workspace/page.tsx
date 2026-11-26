@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 
+import { NewBuildNotice } from '@/components/layout/new-build-notice';
 import { EditorSplash, ProductionStudio } from '@/components/production/editor-dan-chat';
 
 import { appIntentUrl } from './open-in-app';
@@ -29,7 +30,11 @@ function ProductionWorkspaceInner() {
   if (toApp === undefined || toApp) return <EditorSplash />;
 
   return (
-    <ProductionStudio roomId={roomId} />
+    <>
+      <ProductionStudio roomId={roomId} />
+      {/* An editor window may be playing, composing, or still saving its timeline. */}
+      <NewBuildNotice manualOnly />
+    </>
   );
 }
 

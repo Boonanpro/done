@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useMemo } from 'react';
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { CaptionEditContext, type CaptionEdit } from './caption-word-edit';
 import { HEADING_FONTS, loadHeadingKit } from './adobe-fonts';
 import type { CSSProperties } from 'react';
 import {
   CAPTION_FONT_FACE_CSS,
-  type CaptionDesign,
+  type CaptionDesign, type CaptionSpan, captionFont,
   captionAnchorStyle,
   captionBoxStyle,
   captionTextStyle,
@@ -70,7 +71,7 @@ function introStyle(design: CaptionDesign, local: number, outH: number): CSSProp
 // Split text into reveal/highlight units. Uses per-word timings when present (Whisper); otherwise
 // keeps ASCII words whole + CJK per character, with even timing across the caption.
 function tokenize(cap: RenderCaption): CaptionWord[] {
-  if (cap.words && cap.words.length) return cap.words;
+  if (cap.words?.length && cap.words.map(w => w.text).join('').replace(/\s/g, '') === cap.text.replace(/\s/g, '')) return cap.words;
   const units: string[] = [];
   const text = cap.text;
   let i = 0;
@@ -93,7 +94,7 @@ function tokenize(cap: RenderCaption): CaptionWord[] {
   }));
 }
 
-type ColorSpan = { s: number; e: number; color?: string; scale?: number };
+type ColorSpan = CaptionSpan;
 
 // 範囲色: idx を含む最後のスパンが勝つ
 function spanAt(spans: ColorSpan[] | undefined, idx: number): ColorSpan | undefined {
@@ -109,38 +110,161 @@ function spanStyle(sp: ColorSpan | undefined): CSSProperties | undefined {
   if (!sp) return undefined;
   const st: CSSProperties = {};
   if (sp.color) { st.color = sp.color; st.WebkitTextFillColor = sp.color; }
+  if (sp.font) {
+    const font = captionFont(sp.font);
+    st.fontFamily = font.css + ', sans-serif';
+    st.fontWeight = font.weight;
+  }
+  if (sp.bold != null) st.fontWeight = sp.bold ? 900 : 400;
+  if (sp.outlineWidth != null) st.WebkitTextStrokeWidth = (0.085 * sp.outlineWidth) + 'em';
+  if (sp.outlineColor) st.WebkitTextStrokeColor = sp.outlineColor;
   const sc = Number(sp.scale);
-  if (Number.isFinite(sc) && sc > 0 && sc !== 1) st.fontSize = `${sc}em`;
+  if (Number.isFinite(sc) && sc >= 0 && sc !== 1) st.fontSize = `${sc}em`;
   return st;
 }
 
 // テキストをスパン境界で分割し、色付き区間を <span> で包む。gradient 使用時は
 // WebkitTextFillColor が transparent になっているため両方上書きする。
-function renderSpanned(text: string, spans?: ColorSpan[]): React.ReactNode {
-  if (!spans || !spans.length) return text;
-  const cuts = new Set<number>([0, text.length]);
-  for (const sp of spans) {
-    cuts.add(Math.max(0, Math.min(text.length, sp.s)));
-    cuts.add(Math.max(0, Math.min(text.length, sp.e)));
+function textRuns(text: string, spans: ColorSpan[] = [], offset = 0) {
+  const limit = offset + text.length;
+  const cuts = new Set([offset, limit]);
+  for (const span of spans) {
+    if (offset < span.s && span.s < limit) cuts.add(span.s);
+    if (offset < span.e && span.e < limit) cuts.add(span.e);
   }
-  const pts = [...cuts].sort((a, b) => a - b);
-  const segs: React.ReactNode[] = [];
-  for (let i = 0; i + 1 < pts.length; i++) {
-    const a = pts[i];
-    const b = pts[i + 1];
-    if (a >= b) continue;
-    const st = spanStyle(spanAt(spans, a));
-    segs.push(
-      st ? (
-        <span key={a} style={st}>
-          {text.slice(a, b)}
-        </span>
-      ) : (
-        text.slice(a, b)
-      ),
-    );
+  const points = [...cuts].sort((a, b) => a - b);
+  return points.slice(0, -1).map((start, i) => ({
+    start, text: text.slice(start - offset, points[i + 1] - offset), style: spanStyle(spanAt(spans, start)),
+  }));
+}
+
+function renderSpanned(text: string, spans?: ColorSpan[], offset = 0, highlight?: string) {
+  if (!spans?.length) return text;
+  return textRuns(text, spans, offset).map(run =>
+    run.style ? <span key={run.start} style={highlight ? { ...run.style, color: highlight, WebkitTextFillColor: highlight } : run.style}>{run.text}</span> : run.text);
+}
+
+function offsets(el: HTMLElement) {
+  const sel = window.getSelection();
+  if (!sel?.rangeCount || !el.contains(sel.anchorNode) || !el.contains(sel.focusNode)) return null;
+  const offset = (node: Node, n: number) => {
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    r.setEnd(node, n);
+    return r.toString().length;
+  };
+  return [offset(sel.anchorNode!, sel.anchorOffset), offset(sel.focusNode!, sel.focusOffset)] as const;
+}
+
+function textPoint(el: HTMLElement, offset: number): [Node, number] {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const length = node.textContent?.length ?? 0;
+    if (offset <= length) return [node, offset];
+    offset -= length;
   }
-  return segs;
+  return [el, el.childNodes.length];
+}
+
+// The browser owns the live DOM (and IME composition). Repaint style runs on a
+// committed change, retaining both ends of a backwards or forwards selection.
+function EditableCaption({ cap, style, edit }: { cap: RenderCaption; style: CSSProperties; edit: CaptionEdit }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  const composing = useRef(false);
+  const point = useRef(edit.point);
+  const pendingCaret = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current!;
+    if (composing.current) return;
+    const caret = pendingCaret.current;
+    pendingCaret.current = null;
+    const selection = caret == null ? offsets(el) : [caret, caret];
+    const children: Node[] = textRuns(cap.text, cap.design?.colorSpans).map(run => {
+      if (!run.style) return document.createTextNode(run.text);
+      const span = document.createElement('span');
+      span.textContent = run.text;
+      Object.assign(span.style, run.style);
+      return span;
+    });
+    // A trailing line break needs a caret stop on the empty final line.
+    if (cap.text.endsWith('\n')) children.push(document.createElement('br'));
+    if (caret == null && el.childNodes.length === children.length && children.every((node, i) => node.isEqualNode(el.childNodes[i]))) return;
+    el.replaceChildren(...children);
+    if (selection && document.activeElement === el) {
+      window.getSelection()?.setBaseAndExtent(...textPoint(el, selection[0]), ...textPoint(el, selection[1]));
+    }
+  }, [cap.text, cap.design?.colorSpans]);
+  useLayoutEffect(() => {
+    const el = ref.current!;
+    el.focus({ preventScroll: true });
+    const r = document.caretRangeFromPoint?.(point.current.x, point.current.y);
+    if (r && el.contains(r.startContainer)) {
+      window.getSelection()?.collapse(r.startContainer, r.startOffset);
+    }
+  }, []);
+  useLayoutEffect(() => {
+    // Keep the chosen letters marked when focus moves to an inspector control.
+    if (!edit.range || !window.CSS?.highlights || !window.Highlight) return;
+    const el = ref.current!;
+    const r = document.createRange();
+    r.setStart(...textPoint(el, edit.range.s));
+    r.setEnd(...textPoint(el, edit.range.e));
+    CSS.highlights.set('caption-selection', new Highlight(r));
+    return () => { CSS.highlights.delete('caption-selection'); };
+  }, [edit.range, cap.text, cap.design?.colorSpans]);
+  useEffect(() => {
+    const el = ref.current!;
+    const replaceSelection = (text: string) => {
+      const ends = offsets(el);
+      if (!ends) return;
+      const start = Math.min(...ends), end = Math.max(...ends);
+      const caret = start + text.length;
+      pendingCaret.current = caret;
+      edit.onText(cap.text.slice(0, start) + text + cap.text.slice(end));
+      edit.onRange({ s: caret, e: caret });
+    };
+    // Native editable paragraphs add a second newline as a caret placeholder
+    // after Enter. Store the authored newline exactly once, including on mobile.
+    const beforeInput = (e: InputEvent) => {
+      if (e.isComposing || !['insertParagraph', 'insertLineBreak'].includes(e.inputType)) return;
+      e.preventDefault();
+      replaceSelection('\n');
+    };
+    const paste = (e: ClipboardEvent) => {
+      if (!e.clipboardData) return;
+      e.preventDefault();
+      replaceSelection(e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n'));
+    };
+    el.addEventListener('beforeinput', beforeInput);
+    el.addEventListener('paste', paste);
+    return () => {
+      el.removeEventListener('beforeinput', beforeInput);
+      el.removeEventListener('paste', paste);
+    };
+  }, [cap.text, edit]);
+  function reportRange() {
+    const el = ref.current!;
+    if (document.activeElement !== el) return;
+    const ends = offsets(el);
+    if (ends) edit.onRange({ s: Math.min(...ends), e: Math.max(...ends) });
+  }
+  function commit() {
+    const el = ref.current!;
+    if (!composing.current) edit.onText(el.textContent || '');
+    reportRange();
+  }
+  return <p ref={ref} contentEditable="plaintext-only" role="textbox" aria-label="テロップ本文"
+    aria-multiline spellCheck={false}
+    style={{ ...style, pointerEvents: 'auto', userSelect: 'text', cursor: 'text', outline: 'none', minWidth: '0.35em', minHeight: '1em', caretColor: 'currentColor' }}
+    onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}
+    onSelect={reportRange} onPointerUp={reportRange} onKeyUp={reportRange}
+    onCompositionStart={() => { composing.current = true; }}
+    onCompositionEnd={() => { composing.current = false; commit(); }} onInput={commit}
+    onKeyDown={e => {
+      e.stopPropagation();
+      if (e.key === 'Escape' && !e.nativeEvent.isComposing) { e.preventDefault(); edit.onExit(); }
+    }} />;
 }
 
 // One caption box (position/animation/karaoke). Extracted so the layer can draw EVERY
@@ -148,6 +272,7 @@ function renderSpanned(text: string, spans?: ColorSpan[]): React.ReactNode {
 // (e.g. a side-super lane above the subtitle lane) hide each other in the preview.
 function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: number; outW: number; outH: number }) {
   const design: CaptionDesign = cap.design || {};
+  const edit = useContext(CaptionEditContext);
   const anim = design.animation;
   const wordLevel = anim === 'typewriter' || anim === 'karaoke';
   const tokens = useMemo(() => (wordLevel ? tokenize(cap) : null), [cap, wordLevel]);
@@ -179,15 +304,16 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
   }, [tokens, cap.text]);
 
   let content: React.ReactNode;
-  if (tokens) {
+  if (edit && edit.id === cap.id) {
+    content = <EditableCaption cap={cap} style={textStyle} edit={edit} />;
+  } else if (tokens) {
     content = (
       <p style={textStyle}>
         {tokens.map((tok, i) => {
           const spoken = time >= tok.end;
           const activeWord = time >= tok.start && time < tok.end;
-          const tokSpan = spanAt(colorSpans, tokenOffsets ? tokenOffsets[i] : 0);
-          const spanCol = tokSpan?.color;
-          const spanSize = spanStyle(tokSpan)?.fontSize;
+          const offset = tokenOffsets?.[i] ?? 0;
+          const runs = renderSpanned(tok.text, colorSpans, offset, anim === 'karaoke' && activeWord ? highlight : undefined);
           if (anim === 'typewriter') {
             // reveal: hide tokens not yet reached (keep layout stable via visibility)
             const shown = time >= tok.start;
@@ -196,23 +322,19 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
                 key={i}
                 style={{
                   visibility: shown ? 'visible' : 'hidden',
-                  fontSize: spanSize,
-                  color: spanCol,
-                  WebkitTextFillColor: spanCol,
                 }}
               >
-                {tok.text}
+                {runs}
               </span>
             );
           }
           // karaoke: dim upcoming words, highlight the one being spoken
-          const col = activeWord ? highlight : spanCol;
+          const col = activeWord ? highlight : undefined;
           return (
             <span
               key={i}
               style={{
                 display: 'inline-block',
-                fontSize: spanSize,
                 color: col,
                 WebkitTextFillColor: col,
                 opacity: spoken || activeWord ? 1 : 0.45,
@@ -220,7 +342,7 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
                 transition: 'none',
               }}
             >
-              {tok.text}
+              {runs}
             </span>
           );
         })}
@@ -257,7 +379,9 @@ export function CaptionLayer({
   fps?: number;
   hiddenCaptionIds?: string[];
 }) {
-  const usesHeadingFont = captions.some(c => c.design?.font && Object.hasOwn(HEADING_FONTS, c.design.font));
+  const editingId = useContext(CaptionEditContext)?.id;
+  const usesHeadingFont = captions.some(c => [c.design?.font, ...(c.design?.colorSpans ?? []).map(s => s.font)]
+    .some(font => font && Object.hasOwn(HEADING_FONTS, font)));
   useEffect(() => {
     if (usesHeadingFont) void loadHeadingKit().catch(() => {});
   }, [usesHeadingFont]);
@@ -268,13 +392,13 @@ export function CaptionLayer({
   const actives = useMemo(() => {
     const hidden = new Set(hiddenCaptionIds);
     return captions.filter(
-      (c) => c.text?.trim() && !hidden.has(c.id || '') && isCaptionActive(c, time, fps),
+      (c) => (c.text?.trim() || (editingId && c.id === editingId)) && !hidden.has(c.id || '') && isCaptionActive(c, time, fps),
     );
-  }, [captions, fps, hiddenCaptionIds, time]);
+  }, [captions, fps, hiddenCaptionIds, time, editingId]);
 
   return (
     <div style={{ position: 'relative', width: outW, height: outH, overflow: 'hidden', pointerEvents: 'none' }}>
-      <style>{CAPTION_FONT_FACE_CSS}</style>
+      <style>{CAPTION_FONT_FACE_CSS}{editingId && '::highlight(caption-selection){background-color:rgba(50,145,255,.42)}'}</style>
       {actives.map((cap, i) => (
         <SingleCaption key={cap.id || i} cap={cap} time={time} outW={outW} outH={outH} />
       ))}

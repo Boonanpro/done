@@ -83,7 +83,7 @@ export const CAPTION_OWNER_FONT_FILES: Partial<Record<CaptionFontId, [string, st
 // Font files the given captions need: every bundled face plus the owner fonts they name.
 export function captionFontFilesFor(designs: ReadonlyArray<CaptionDesign | undefined | null>): Array<[string, string, string]> {
   const out: Array<[string, string, string]> = [...CAPTION_FONT_FILES];
-  for (const d of designs) {
+  for (const d of designs.flatMap(d => [d, ...(d?.colorSpans ?? [])])) {
     const f = d && typeof d.font === 'string' && Object.prototype.hasOwnProperty.call(CAPTION_OWNER_FONT_FILES, d.font)
       ? CAPTION_OWNER_FONT_FILES[d.font as CaptionFontId] : undefined;
     if (f && !out.includes(f)) out.push(f);
@@ -133,7 +133,13 @@ ${Object.values(CAPTION_OWNER_FONT_FILES).map((f) => `@font-face{font-family:'${
 
 // Designed caption look. All fields optional; an empty design renders as a clean white
 // Noto-Sans caption with a black outline (a sane default, not the old plain Yu Gothic).
+export type CaptionSpan = {
+  s: number; e: number; color?: string; scale?: number;
+  font?: CaptionFontId; bold?: boolean; outlineColor?: string; outlineWidth?: number;
+};
+
 export type CaptionDesign = {
+  bold?: boolean;
   font?: CaptionFontId;
   color?: string;             // text fill (ignored when gradient is set)
   gradient?: [string, string];// vertical gradient fill (top, bottom)
@@ -162,7 +168,7 @@ export type CaptionDesign = {
   // 選択範囲ごとの文字色。s/e は text の UTF-16 コード単位のインデックス [s, e)。
   // ネイティブエディタの「選択範囲の色」から書かれる。後のスパンが優先。
   // Part of the line in another colour and/or size (scale = size relative to the rest of the line).
-  colorSpans?: { s: number; e: number; color?: string; scale?: number }[];
+  colorSpans?: CaptionSpan[];
 };
 
 // Caption motion presets. 'pop'/'fade'/'slide' are pure intro animations; 'typewriter' reveals
@@ -261,7 +267,7 @@ export function captionTextStyle(design: CaptionDesign, outH: number): CSSProper
   const style: CSSProperties = {
     margin: 0,
     fontFamily: `${fontDef.css}, "Yu Gothic UI", sans-serif`,
-    fontWeight: fontDef.weight,
+    fontWeight: design.bold === false ? 400 : fontDef.weight,
     fontSize: `${Math.round(fs)}px`,
     letterSpacing: `${(num(design.letterSpacing, 0) * fs).toFixed(2)}px`,
     whiteSpace: 'pre-wrap',
