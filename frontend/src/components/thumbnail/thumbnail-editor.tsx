@@ -181,6 +181,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const [startDoc] = useState(() => cachedThumbDoc(contentId));
   const [doc, setDoc] = useState<ThumbDoc | null>(startDoc);
   const docRef = useRef<ThumbDoc | null>(null);
+  const metaBefore = useRef<ThumbDoc | null>(null); // タイトル・メモの欄を打ち始めた時の形（離れた時に元に戻すへ1手で積む）
   docRef.current = doc;
   const baseRev = useRef<number>(startDoc ? startDoc.rev ?? 0 : -1);
   // 手元の形の元にした保存の形（ほかの所＝ダン・別の画面の直しを、手元の直しと重ね合わせる時の基準）
@@ -2116,6 +2117,50 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
     </>
   );
 
+  // 絵のすぐ下のタイトルとメモ（2026-11-26 本人「画像の下にタイトルを入れて見たり編集できる文字スペース作ってって以前言ったけど
+  // まだできてないよね」）。「並べる」を押さなくても、いつもの直す画面で絵の下に出す。部品の直しと同じ形の保存に載せるので、
+  // ダンの直しとは重ねて保存される。元に戻すは、欄を離れた時に1手として積む
+  const editMeta = (field: 'title' | 'plan_note', value: string) => {
+    const d = docRef.current;
+    if (!d) return;
+    if (!metaBefore.current) metaBefore.current = clone(d);
+    const next = { ...d, [field]: value } as ThumbDoc;
+    docRef.current = next;
+    setDoc(next);
+    scheduleSave();
+  };
+  const endMeta = (field: 'title' | 'plan_note') => {
+    const b = metaBefore.current;
+    metaBefore.current = null;
+    const d = docRef.current;
+    if (!b || !d || (b[field] || '') === (d[field] || '')) return;
+    // 元に戻すのは自分が打った欄だけ（打っている間にダンが直した所は戻さない）
+    undoStack.current.push({ before: { ...clone(d), [field]: b[field] || '' } as ThumbDoc, after: clone(d) });
+    if (undoStack.current.length > UNDO_MAX) undoStack.current.shift();
+    redoStack.current = [];
+    keepUndo();
+    bump((n) => n + 1);
+  };
+  const metaField = 'w-full resize-none rounded-md border border-border bg-background px-2.5 py-1.5 text-sm leading-snug outline-none focus:border-sky-500';
+  const metaFields = doc ? (
+    <div className={compact ? 'space-y-2 px-3 pb-2 pt-1' : 'mx-auto grid w-full max-w-[1100px] grid-cols-[3fr_2fr] gap-3'} data-thumb-meta>
+      <label className="block min-w-0">
+        <span className="mb-0.5 flex items-center text-[11px] font-medium text-muted-foreground">
+          タイトル<span className="ml-auto tabular-nums">{(doc.title || '').length}文字</span>
+        </span>
+        <textarea rows={2} value={doc.title || ''} placeholder="YouTube に出すタイトル"
+          onChange={(e) => editMeta('title', e.target.value)} onBlur={() => endMeta('title')}
+          className={`${metaField} text-[15px] font-semibold`} data-thumb-meta-title />
+      </label>
+      <label className="block min-w-0">
+        <span className="mb-0.5 block text-[11px] font-medium text-muted-foreground">メモ（企画・冒頭5秒など）</span>
+        <textarea rows={2} value={doc.plan_note || ''} placeholder="この案の企画の一言、冒頭5秒・30秒で言うこと"
+          onChange={(e) => editMeta('plan_note', e.target.value)} onBlur={() => endMeta('plan_note')}
+          className={metaField} data-thumb-meta-note />
+      </label>
+    </div>
+  ) : null;
+
   const stage = (
     <div className={`relative min-h-0 min-w-0 ${compact ? 'w-full' : 'h-full w-full'}`}>
     <div ref={stageWrap} className={`min-h-0 min-w-0 overflow-auto ${compact ? 'w-full' : 'h-full w-full'}`}
@@ -2240,6 +2285,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         ) : (
           <>
         <div className="shrink-0">{stage}</div>
+        {!phoneChatOpen ? <div className="shrink-0">{metaFields}</div> : null}
         {strip ? <div className="shrink-0 border-b border-border">{strip}</div> : null}
           </>
         )}
@@ -2285,6 +2331,7 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
         <>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-muted/40">
           <div className="min-h-0 flex-1 p-6 pb-3">{stage}</div>
+          {metaFields ? <div className="shrink-0 px-6 pb-3">{metaFields}</div> : null}
           {strip ? <div className="shrink-0 border-t border-border bg-background/70">{strip}</div> : null}
         </div>
         <aside className="w-72 shrink-0 space-y-4 overflow-y-auto border-l border-border p-3" data-thumb-layers-scroll>
