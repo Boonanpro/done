@@ -77,6 +77,7 @@ function writeUndo(key: string, undo: UndoStep[], redo: UndoStep[]) {
 }
 // 部品のコピー・貼り付け（Ctrl+C / X / V）。同じ動画のほかの案へも貼れるよう、この端末に控え、OS のクリップボードにも載せる
 const CLIP_MARK = 'dan-thumb-parts:';
+const OUTPUT_VIEW_KEY = 'thumb-output-view';
 const CLIP_KEY = 'thumb-clipboard';
 function readClip(text?: string | null): ThumbPart[] | null {
   try {
@@ -253,7 +254,18 @@ export function ThumbnailEditor({ roomId, contentId, title, compact = false, pho
   const [finishJob, setFinishJob] = useState<ThumbFinishJob | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
   // 出力の形だけを見る（枠の外を切る）。既定は枠の外にはみ出た部品も見えて、つかめる作業台
-  const [outputView, setOutputView] = useState(false);
+  // 案を切り替えても・開き直してもオン/オフを覚えておく（2026-11-26 本人「横のサムネに切り替えて戻るとオフになる」）
+  const [outputView, setOutputViewState] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    try { return window.localStorage.getItem(OUTPUT_VIEW_KEY) === '1'; } catch { return false; }
+  });
+  const setOutputView = useCallback((next: boolean | ((v: boolean) => boolean)) => {
+    setOutputViewState((v) => {
+      const on = typeof next === 'function' ? next(v) : next;
+      try { if (on) window.localStorage.setItem(OUTPUT_VIEW_KEY, '1'); else window.localStorage.removeItem(OUTPUT_VIEW_KEY); } catch { /* 覚えられないだけ */ }
+      return on;
+    });
+  }, []);
   // 部品・書き込みに付けるコメントの欄（台本の画面と同じく、その場に出る）。part_id が無ければペンの書き込みへのコメント
   const [composer, setComposer] = useState<{ partIds: string[] } | null>(null);
   const patternActions = useRef<ThumbPatternActions | null>(null);
