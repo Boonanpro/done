@@ -51,9 +51,12 @@ export function loadHeadingKit(): Promise<Kit> {
 
 // A second caption in the same export page can require characters absent from the first subset.
 // Wait for the selected Adobe face to finish adding those glyphs before capturing the frame.
-export async function prepareHeadingText(captions: {text: string; design?: {font?: string}}[]) {
+export async function prepareHeadingText(captions: {text: string; design?: {font?: string; colorSpans?: {s: number; e: number; font?: string}[]}}[]) {
   const ranges = new Map<string, Set<string>>();
-  for (const {text, design} of captions) {
+  const texts = captions.flatMap(c => [
+    c, ...(c.design?.colorSpans || []).filter(s => s.font).map(s => ({ text: c.text.slice(s.s, s.e), design: s })),
+  ]);
+  for (const {text, design} of texts) {
     if (!design?.font || !Object.hasOwn(HEADING_FONTS, design.font)) continue;
     const font = HEADING_FONTS[design.font as keyof typeof HEADING_FONTS];
     const chars = ranges.get(font.web) ?? new Set<string>();

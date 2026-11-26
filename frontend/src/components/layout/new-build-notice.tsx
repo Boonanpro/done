@@ -14,7 +14,7 @@ const CHECK_MS = 60_000;
  * 本人の画面に出なかった）。入れ替わりを見つけたら、タブが裏にある間に読み直す。前に出て
  * いる時は、入力中の文字を消さないよう勝手には読み直さず、読み直すボタンを出す。
  */
-export function NewBuildNotice() {
+export function NewBuildNotice({ manualOnly = false }: { manualOnly?: boolean } = {}) {
   const [stale, setStale] = useState(false);
 
   useEffect(() => {
@@ -23,7 +23,7 @@ export function NewBuildNotice() {
     const check = async () => {
       // 見つけた後も、裏にある間は会話が落ち着いた所で読み直す（会話の入力中・送信中・ダンの作業中は待つ。lib/chat-outbox.ts）
       if (found) {
-        if (document.visibilityState === 'hidden' && !chatBusy()) window.location.reload();
+        if (!manualOnly && document.visibilityState === 'hidden' && !chatBusy()) window.location.reload();
         return;
       }
       try {
@@ -32,7 +32,7 @@ export function NewBuildNotice() {
         const { build } = (await res.json()) as { build?: string };
         if (build && build !== LOADED_BUILD) {
           found = true;
-          if (document.visibilityState === 'hidden' && !chatBusy()) window.location.reload();
+          if (!manualOnly && document.visibilityState === 'hidden' && !chatBusy()) window.location.reload();
           else setStale(true);
         }
       } catch {
@@ -40,7 +40,7 @@ export function NewBuildNotice() {
       }
     };
     const onVisibility = () => {
-      if (document.visibilityState === 'hidden' && found && !chatBusy()) window.location.reload();
+      if (!manualOnly && document.visibilityState === 'hidden' && found && !chatBusy()) window.location.reload();
       else if (document.visibilityState === 'visible') void check();
     };
     void check();
@@ -50,7 +50,7 @@ export function NewBuildNotice() {
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, []);
+  }, [manualOnly]);
 
   if (!stale) return null;
   return (

@@ -64,7 +64,7 @@ import { MotionPanel } from './motion-panel';
 import { isOneForm, motionAt, setKeyAt, sortedKeys, type MotionKey } from './placement';
 import { AdobeFontChoices } from './adobe-font-choices';
 import { isRetiredFont } from './adobe-fonts';
-import { WordControls, moveWordStyles, styleWords, type WordRange } from './caption-word-edit';
+import { CaptionEditContext, moveWordStyles, styleWords, type WordLook, type WordRange } from './caption-word-edit';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
 import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, riderIds, rippleDeleteMain, rippleMoveGroups, rippleTrim } from './ripple-edit';
@@ -1428,12 +1428,12 @@ export function VideoReviewEditor({
     return null;
   }, [editSequence, selectedSequenceClipId]);
   const [wordSelection, setWordSelection] = useState<(WordRange & { id: string }) | null>(null);
-  const [inlineCaption, setInlineCaption] = useState<{ id: string; top: number } | null>(null);
+  const [inlineCaption, setInlineCaption] = useState<{ id: string; point: { x: number; y: number } } | null>(null);
   const activeWords = wordSelection?.id === selectedSequenceClip?.id && wordSelection && wordSelection.e > wordSelection.s ? wordSelection : null;
   useEffect(() => {
     setWordSelection(null);
     setInlineCaption(null);
-  }, [selectedSequenceClipId, currentTime, playing]);
+  }, [currentTime, playing]);
 
   // 選んだクリップを最後に動かした人（みきさんの手／どのダンの作業）・いつ・何を（2026-11-15 本人
   // 「誰が動かしたかどうか分からないなら分かるようにしないと」）。保存は少し遅れて届くので、変わるたびに少し待って読み直す。
@@ -1850,7 +1850,7 @@ export function VideoReviewEditor({
       for (const c of tr.clips || []) {
         if (c.track !== 'caption') continue;
         const text = (c as unknown as { text?: string }).text;
-        if (typeof text !== 'string' || !text.trim()) continue;
+        if (typeof text !== 'string') continue;
         out.push({
           id: String(c.id),
           text: String(text),
@@ -2349,6 +2349,8 @@ export function VideoReviewEditor({
   }, []);
 
   const selectSequenceClip = useCallback((id: string, additive = false) => {
+    setInlineCaption(current => current?.id === id && !additive ? current : null);
+    setWordSelection(null);
     setSelectedId(null);
     setSelectedIds([]);
     setSelectedSequenceClipIds((current) => {
@@ -3056,7 +3058,7 @@ export function VideoReviewEditor({
   const editorRootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (new URLSearchParams(window.location.search).get('keyfix') === '0') return; // 比べる時だけ前の作り
-    const TEXT = 'input, textarea, select, [contenteditable="true"], [contenteditable=""]';
+    const TEXT = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
     const onDown = (event: PointerEvent) => {
       const root = editorRootRef.current;
       const target = event.target as HTMLElement | null;
@@ -3085,7 +3087,7 @@ export function VideoReviewEditor({
       // 直して Ctrl+Z が効かなかった). Text boxes (clip name, caption text, chat) keep their own undo.
       if (undoKey && isValueControl(target) && editorRootRef.current?.contains(target)) {
         (target as HTMLElement).blur();
-      } else if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      } else if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
       if (modKey && event.key.toLowerCase() === 'z') {
         event.preventDefault();
         if (event.shiftKey) redo();
@@ -3200,7 +3202,7 @@ export function VideoReviewEditor({
     const handleKeyUp = (event: KeyboardEvent) => {
       if (event.code !== 'Space') return;
       const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return;
+      if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
       if (target?.closest('button, [role="button"], summary, a[href]')) event.preventDefault();
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -3653,13 +3655,13 @@ export function VideoReviewEditor({
     [pendingAnnotation]
   );
 
-  const updateSequenceClips = useCallback((clipIds: Set<string>, patch: Partial<SequenceClip>) => {
+  const updateSequenceClips = useCallback((clipIds: Set<string>, patch: Partial<SequenceClip> | ((clip: SequenceClip) => Partial<SequenceClip>)) => {
     if (clipIds.size === 0) return;
     setEditSequence((current) => {
       if (!current) return current;
       const tracks = (current.tracks || []).map((track) => ({
         ...track,
-        clips: (track.clips || []).map((clip) => (clipIds.has(String(clip.id)) ? { ...clip, ...patch } : clip)),
+        clips: (track.clips || []).map((clip) => (clipIds.has(String(clip.id)) ? { ...clip, ...(typeof patch === 'function' ? patch(clip) : patch) } : clip)),
       }));
       const nextDuration = Math.max(0, ...tracks.flatMap((track) => (track.clips || []).map((clip) => clip.timeline_end || 0)));
       return { ...current, duration: Number(nextDuration.toFixed(3)), tracks };
@@ -3677,8 +3679,20 @@ export function VideoReviewEditor({
     updateSequenceClips(ids, patch);
   }, [selectedSequenceClipId, selectedSequenceClipIds, updateSequenceClips]);
 
+  useEffect(() => {
+    if (!inlineCaption && !activeWords) return;
+    const outside = (event: PointerEvent) => {
+      if ((event.target as Element)?.closest('[data-caption-design], [contenteditable], textarea[placeholder="テロップ本文"]')) return;
+      setInlineCaption(null);
+      setWordSelection(null);
+    };
+    document.addEventListener('pointerdown', outside, true);
+    return () => document.removeEventListener('pointerdown', outside, true);
+  }, [inlineCaption, activeWords]);
+
+  const exitCaptionEdit = () => { setInlineCaption(null); setWordSelection(null); };
   function selectWords(field: HTMLTextAreaElement) {
-    if (selectedSequenceClip) setWordSelection({ id: selectedSequenceClip.id, s: field.selectionStart, e: field.selectionEnd });
+    if (selectedSequenceClip && document.activeElement === field) setWordSelection({ id: selectedSequenceClip.id, s: field.selectionStart, e: field.selectionEnd });
   }
 
   function editCaptionText(value: string) {
@@ -3690,16 +3704,26 @@ export function VideoReviewEditor({
     } else updateSelectedSequenceClip({ text: value });
   }
 
-  function changeWordLook(patch: { color?: string; scale?: number }) {
-    if (!activeWords || !selectedSequenceClip) return;
-    updateSequenceClip(selectedSequenceClip.id, { style: { ...selectedSequenceClip.style,
-      colorSpans: styleWords(selectedSequenceClip.style?.colorSpans, activeWords, patch) } });
+  function setCaptionLetters(patch: WordLook, whole: Partial<CaptionStyle> = patch) {
+    if (!selectedSequenceClip) return;
+    if (activeWords) {
+      const style = selectedSequenceClip.style || {};
+      updateSequenceClip(selectedSequenceClip.id, { style: { ...style,
+        colorSpans: styleWords(style.colorSpans, activeWords, patch) } });
+      return;
+    }
+    // Keep unrelated emphasis and each selected caption's own base design.
+    const ids = new Set(selectedSequenceClipIds.length ? selectedSequenceClipIds : [selectedSequenceClip.id]);
+    const cleared = Object.fromEntries(Object.keys(patch).map(key => [key, undefined]));
+    updateSequenceClips(ids, clip => {
+      const style = clip.style || {};
+      return { style: { ...style, ...whole,
+        ...(style.colorSpans?.length ? { colorSpans: styleWords(style.colorSpans, { s: 0, e: clip.text?.length ?? 0 }, cleared) } : {}),
+      } };
+    });
   }
   const selectedWordLook = activeWords ? [...(selectedSequenceClip?.style?.colorSpans || [])].reverse()
     .find(span => span.s <= activeWords.s && activeWords.s < span.e) : null;
-  const wordControls = activeWords && selectedSequenceClip ? <WordControls
-    design={selectedSequenceClip.style || {}} range={activeWords} change={changeWordLook} /> : null;
-
   // --- pop-out effect preview: when 飛び出し is applied/changed, prepare a browser-playable
   // alpha overlay (matted person breaking out of the wipe box) once, so the editor preview can
   // show it without per-frame matting. Keyed by clip id; the SAME layer is used at export. ---
@@ -4463,7 +4487,7 @@ export function VideoReviewEditor({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return;
+      if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
       if (!(event.ctrlKey || event.metaKey)) return;
       const k = event.key.toLowerCase();
       if (k !== 'c' && k !== 'x' && k !== 'v' && k !== 'd') return;
@@ -5784,13 +5808,15 @@ export function VideoReviewEditor({
 
   // 映像の部分（PC とスマホの両方の形で同じ物を使う）
   const stageNode = (
+    <CaptionEditContext.Provider value={inlineCaption && inlineCaption.id === selectedSequenceClip?.id && !playing ? {
+      ...inlineCaption, range: activeWords, onText: editCaptionText, onRange: range => setWordSelection({ id: inlineCaption.id, ...range }), onExit: exitCaptionEdit,
+    } : null}>
       <div
         ref={stageRef}
         className={`relative h-full max-h-full max-w-full overflow-hidden ${nativeShell ? '' : 'bg-black'}`}
         style={{ aspectRatio: previewAspect }}
         onDoubleClickCapture={event => {
-          if (playing || tool !== 'select' || (event.target as HTMLElement).closest('[data-inline-caption]')) return;
-          const rect = event.currentTarget.getBoundingClientRect();
+          if (playing || tool !== 'select' || (event.target as HTMLElement).closest('[contenteditable]')) return;
           const caption = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[data-caption-id]')).reverse().find(el => {
             const r = el.getBoundingClientRect();
             return event.clientX >= r.left && event.clientX < r.right && event.clientY >= r.top && event.clientY < r.bottom;
@@ -5799,7 +5825,8 @@ export function VideoReviewEditor({
           if (!id || !caption) return;
           event.stopPropagation();
           selectSequenceClip(id);
-          setInlineCaption({id, top: (caption.getBoundingClientRect().top - rect.top) / rect.height});
+          setWordSelection(null);
+          setInlineCaption({id, point: { x: event.clientX, y: event.clientY }});
         }}
         onContextMenu={(event) => event.preventDefault()}
       >
@@ -5846,21 +5873,6 @@ export function VideoReviewEditor({
             skimFrom={compact ? 4 : 5}
           />
         )}
-        {inlineCaption && selectedSequenceClip?.id === inlineCaption.id && !playing ? (
-          <div data-inline-caption className="absolute left-[3%] right-[3%] z-50 rounded border border-sky-400 bg-background p-2 text-foreground shadow"
-            style={{ top: `clamp(0px, ${inlineCaption.top * 100}%, calc(100% - 110px))` }}
-            onPointerDown={e => e.stopPropagation()} onKeyDown={e => {
-              if (e.key === 'Escape' && !e.nativeEvent.isComposing) { e.preventDefault(); setInlineCaption(null); setWordSelection(null); }
-            }}>
-            <Textarea autoFocus rows={2} aria-label="プレビュー内のテロップ本文"
-              className="min-h-10 resize-none text-center text-base leading-tight" value={selectedSequenceClip.text || ''}
-              onChange={e => editCaptionText(e.target.value)} onSelect={e => selectWords(e.currentTarget)} />
-            <div className="mt-1 flex items-center justify-between gap-2">{wordControls}
-              <button type="button" aria-label="文字編集を終了" className="ml-auto rounded bg-secondary px-2 py-1 text-xs"
-                onClick={() => { setInlineCaption(null); setWordSelection(null); }}>完了</button>
-            </div>
-          </div>
-        ) : null}
         {playing && playRate !== 1 && !(compact && phoneControls) ? (
           <div className="pointer-events-none absolute right-2 top-2 z-30 rounded bg-black/70 px-2 py-0.5 text-sm font-semibold text-white" data-testid="play-rate">
             {rateText(playRate)}
@@ -6109,6 +6121,7 @@ export function VideoReviewEditor({
               final render); no separate HTML overlay needed here. */}
         </div>
       </div>
+    </CaptionEditContext.Provider>
   );
 
   const phoneView = () => {
@@ -7091,16 +7104,24 @@ export function VideoReviewEditor({
                       <Textarea
                         value={selectedSequenceClip.text || ''}
                         onChange={e => editCaptionText(e.target.value)}
+                        onFocus={e => { setInlineCaption(null); selectWords(e.currentTarget); }}
                         onSelect={e => selectWords(e.currentTarget)}
+                        onBlur={e => {
+                          if ((e.relatedTarget as Element | null)?.closest('[data-caption-design]')) {
+                            setWordSelection({ id: selectedSequenceClip.id, s: e.currentTarget.selectionStart, e: e.currentTarget.selectionEnd });
+                          }
+                        }}
                         rows={3}
                         placeholder="テロップ本文"
                       />
                       {(() => {
                         const st = selectedSequenceClip.style || {};
+                        const letters = { ...st, ...selectedWordLook };
+                        const size = (st.fontSize ?? 1) * (selectedWordLook?.scale ?? 1);
                         const setStyle = (patch: Partial<CaptionStyle>) =>
                           updateSelectedSequenceClip({ style: { ...st, ...patch } });
                         return (
-                          <div className="space-y-2 rounded-md border border-border p-2">
+                          <div data-caption-design className="space-y-2 rounded-md border border-border p-2">
                             <div className="text-xs font-medium text-muted-foreground">テロップのデザイン</div>
                             <style>{CAPTION_FONT_FACE_CSS}</style>
                             <div className="space-y-1">
@@ -7170,15 +7191,15 @@ export function VideoReviewEditor({
                             </div>
                             <details className="rounded border p-2">
                               <summary className="cursor-pointer text-xs">太い見出し書体を見比べる</summary>
-                              <AdobeFontChoices headingsOnly text={selectedSequenceClip.text || ''} selected={String(st.font || '')}
-                                onSelect={font => setStyle({ font })}/>
+                              <AdobeFontChoices headingsOnly text={selectedSequenceClip.text || ''} selected={String(letters.font || '')}
+                                onSelect={font => setCaptionLetters({ font })}/>
                             </details>
                             <div className="grid grid-cols-2 gap-2">
                               <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
                                 フォント
                                 <select
-                                  value={(st.font as CaptionFontId) || 'noto-sans'}
-                                  onChange={(e) => setStyle({ font: e.target.value as CaptionFontId })}
+                                  value={(letters.font as CaptionFontId) || 'noto-sans'}
+                                  onChange={(e) => setCaptionLetters({ font: e.target.value as CaptionFontId })}
                                   className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
                                 >
                                   {(Object.keys(CAPTION_FONTS) as CaptionFontId[]).filter(id => !isRetiredFont(id) || id === st.font).map((id) => (
@@ -7241,11 +7262,11 @@ export function VideoReviewEditor({
                             </div>
                             <div className="grid grid-cols-2 gap-2">
                               <label className="flex items-center gap-2 text-xs">
-                                {activeWords ? '選択部分の色' : '文字色'}
+                                文字色
                                 <input
                                   type="color"
                                   value={(activeWords && selectedWordLook?.color) || st.color || '#ffffff'}
-                                  onChange={(e) => activeWords ? changeWordLook({ color: e.target.value }) : setStyle({ color: e.target.value })}
+                                  onChange={(e) => setCaptionLetters({ color: e.target.value }, { color: e.target.value, gradient: undefined })}
                                   className="h-6 w-8 rounded border border-input bg-background"
                                 />
                               </label>
@@ -7253,21 +7274,21 @@ export function VideoReviewEditor({
                                 フチ色
                                 <input
                                   type="color"
-                                  value={st.outlineColor || '#000000'}
-                                  onChange={(e) => setStyle({ outlineColor: e.target.value })}
+                                  value={letters.outlineColor || '#000000'}
+                                  onChange={(e) => setCaptionLetters({ outlineColor: e.target.value })}
                                   className="h-6 w-8 rounded border border-input bg-background"
                                 />
                               </label>
                             </div>
                             <label className="block text-xs">
-                              {activeWords ? '選択部分の大きさ' : '大きさ'} {Math.round((activeWords ? selectedWordLook?.scale ?? 1 : st.fontSize ?? 1) * 100)}%
+                              大きさ {Math.round(size * 100)}%
                               <input
                                 type="range"
-                                min={activeWords ? 0.5 : 0}
+                                min="0"
                                 max="2.5"
-                                step={activeWords ? 0.05 : 0.1}
-                                value={activeWords ? selectedWordLook?.scale ?? 1 : st.fontSize ?? 1}
-                                onChange={(e) => activeWords ? changeWordLook({ scale: Number(e.target.value) }) : setStyle({ fontSize: Number(e.target.value) })}
+                                step="0.05"
+                                value={size}
+                                onChange={(e) => setCaptionLetters({ scale: Number(e.target.value) / (st.fontSize || 1) }, { fontSize: Number(e.target.value) })}
                                 className="w-full"
                               />
                             </label>
@@ -7297,14 +7318,14 @@ export function VideoReviewEditor({
                               ))}
                             </div>
                             <label className="block text-xs">
-                              フチの太さ {Math.round((st.outlineWidth ?? 1) * 100)}%
+                              フチの太さ {Math.round((letters.outlineWidth ?? 1) * 100)}%
                               <input
                                 type="range"
                                 min="0"
                                 max="3"
                                 step="0.25"
-                                value={st.outlineWidth ?? 1}
-                                onChange={(e) => setStyle({ outlineWidth: Number(e.target.value) })}
+                                value={letters.outlineWidth ?? 1}
+                                onChange={(e) => setCaptionLetters({ outlineWidth: Number(e.target.value) })}
                                 className="w-full"
                               />
                             </label>
@@ -7312,8 +7333,8 @@ export function VideoReviewEditor({
                               <label className="flex items-center gap-1 text-xs">
                                 <input
                                   type="checkbox"
-                                  checked={st.bold !== false}
-                                  onChange={(e) => setStyle({ bold: e.target.checked })}
+                                  checked={letters.bold !== false}
+                                  onChange={(e) => setCaptionLetters({ bold: e.target.checked })}
                                 />
                                 太字
                               </label>

@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import type { EditSequence, SequenceAsset, SequenceClip } from './video-review-editor';
+import { useContext } from 'react';
+import { CaptionEditContext } from './caption-word-edit';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import type { CaptionDesign } from './caption-design';
 import { FrameSourceManager, webCodecsSupported } from './frame-source';
@@ -441,7 +443,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const renderCaptions = useMemo<RenderCaption[]>(
     () =>
       captionClips
-        .filter((c) => typeof c.text === 'string' && c.text.trim())
+        .filter((c) => typeof c.text === 'string')
         .map((c) => ({
           id: String(c.id),
           text: String(c.text),
@@ -2002,6 +2004,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   }, [onPick, hitsAt, pointAt]);
 
   useEffect(() => { pickAtRef.current = pickAt; }, [pickAt]);
+  const editingCaption = useContext(CaptionEditContext);
   const box = selectedBox?.rect;
   const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
 
@@ -2079,7 +2082,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           </div>
         ) : null;
       })}
-      {capBox ? (
+      {capBox && !editingCaption ? (
         <div
           data-caption-select-box
           className="absolute cursor-move rounded-sm border-2 border-sky-400 bg-sky-400/10"
