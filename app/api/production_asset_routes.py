@@ -6296,7 +6296,8 @@ async def register_asset(
     if data.source_type in {"local_path", "nas_path", "upload", "generated"}:
         resolved = _resolve_local_uri(clean_uri)
         local_path = str(resolved)
-        if kind in {"video", "image"}:
+        if kind in {"video", "image", "audio"}:
+            # 音は長さを知るため（引きずって置いた時のクリップの長さ。2026-11-26 音が5秒で置かれていた）
             # 不変条件: 登録された素材は必ず実寸(width/height)を持つ。
             # クリップの「素材の形を保つ」計算がこの実寸を基準にするため、
             # 欠落するとキャンバス形式切替で素材が歪む(2026-08-21実発生)。
@@ -7226,6 +7227,46 @@ async def upload_asset(
     metadata["upload_size"] = size
     asset["metadata"] = metadata
     _update_asset(room_id, asset["id"], {"filename": original_name, "metadata": metadata})
+    return asset
+
+
+class ImportFileRequest(BaseModel):
+    room_id: str
+    url: str
+    name: str | None = None
+
+
+@router.post("/import-file", response_model=ProductionAsset)
+async def import_chat_file(
+    data: ImportFileRequest,
+    background_tasks: BackgroundTasks,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """チャットに貼ったダンのファイル（/api/v1/files/<名前>）を、この部屋の素材にする（2026-11-26 本人
+    「ドラッグアンドドロップでも入れれるようにして」。チャットの添付をタイムラインへ引きずった時）。"""
+    value = data.url.strip()
+    path = urllib.parse.unquote(urllib.parse.urlparse(value).path if "://" in value else value.split("?", 1)[0])
+    if not path.startswith("/api/v1/files/"):
+        raise HTTPException(status_code=400, detail="not a Dan file")
+    name = path[len("/api/v1/files/"):].strip("/")
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        raise HTTPException(status_code=400, detail="bad file name")
+    root = UPLOADS_DIR.resolve()
+    src = (root / name).resolve()
+    if src.parent != root or not src.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    if _kind_for(name) not in {"video", "image", "audio"}:
+        raise HTTPException(status_code=400, detail="not a video, image or audio file")
+    saved = _room_dir(data.room_id) / f"{uuid.uuid4()}{src.suffix.lower()}"
+    try:
+        os.link(src, saved)
+    except OSError:
+        shutil.copy2(src, saved)
+    request = RegisterAssetRequest(room_id=data.room_id, uri=str(saved), source_type="upload", make_proxy=True)
+    asset = await register_asset(request, background_tasks, current_user)
+    filename = (data.name or "").strip() or name
+    asset["filename"] = filename
+    _update_asset(data.room_id, asset["id"], {"filename": filename})
     return asset
 
 

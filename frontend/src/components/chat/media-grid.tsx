@@ -4,6 +4,7 @@ import { useState, useRef, type ReactNode } from 'react';
 import { Play } from 'lucide-react';
 import {MediaViewer, collectChatMedia, mediaKind, type GalleryItem} from './media-viewer';
 import { imageRequest, isPagePath, playableVideo } from '@/lib/chat-media';
+import { endDanFileDrag, startDanFileDrag } from '@/lib/dan-file-drag';
 
 /**
  * 複数の画像・動画を LINE 式にまとめて表示する共通部品。
@@ -42,7 +43,7 @@ export function MediaGrid({
 
   const open=(item:MediaItem)=>{trigger.current=document.activeElement as HTMLElement;setViewing({items:collectChatMedia(root.current,items),url:item.url})};
   const viewer=viewing?<MediaViewer items={viewing.items} initialUrl={viewing.url} onClose={()=>setViewing(null)} returnFocus={trigger.current}/>:null;
-  if(items.length===1){const it=items[0];return <div ref={root} data-media-items={JSON.stringify(items)} className={`my-1 ${className}`}><button type="button" aria-label={it.name||(it.kind==='video'?'動画を再生':'画像を開く')} className="relative block max-w-full overflow-hidden rounded-xl border border-border/50" onClick={()=>open(it)}>{it.kind==='video'?<><video src={it.url} muted playsInline preload="metadata" className="max-h-[300px] max-w-full"/><span className="absolute inset-0 flex items-center justify-center"><span className="rounded-full bg-black/55 p-3"><Play className="h-6 w-6 fill-white text-white"/></span></span></>:<img src={it.url} alt={it.name||'添付画像'} {...imageRequest(it.url)} onError={lost(it.url)} className="max-h-64 max-w-full object-contain"/>}</button>{viewer}</div>}
+  if(items.length===1){const it=items[0];return <div ref={root} data-media-items={JSON.stringify(items)} className={`my-1 ${className}`}><button type="button" draggable onDragStart={(e)=>startDanFileDrag(e,{url:it.url,name:it.name||''})} onDragEnd={endDanFileDrag} aria-label={it.name||(it.kind==='video'?'動画を再生':'画像を開く')} className="relative block max-w-full overflow-hidden rounded-xl border border-border/50" onClick={()=>open(it)}>{it.kind==='video'?<><video src={it.url} muted playsInline preload="metadata" className="max-h-[300px] max-w-full"/><span className="absolute inset-0 flex items-center justify-center"><span className="rounded-full bg-black/55 p-3"><Play className="h-6 w-6 fill-white text-white"/></span></span></>:<img src={it.url} alt={it.name||'添付画像'} {...imageRequest(it.url)} onError={lost(it.url)} className="max-h-64 max-w-full object-contain"/>}</button>{viewer}</div>}
 
   const visible = expanded ? items : items.slice(0, MAX_TILES);
   const hidden = items.length - visible.length;
@@ -53,6 +54,9 @@ export function MediaGrid({
       <button
         key={`${it.url}-${i}`}
         type="button"
+        draggable
+        onDragStart={(e) => startDanFileDrag(e, { url: it.url, name: it.name || '' })}
+        onDragEnd={endDanFileDrag}
         onClick={() => (isLast ? setExpanded(true) : open(it))}
         className={`relative overflow-hidden bg-muted rounded-lg ${extraClass}`}
         aria-label={it.kind === 'video' ? '動画を再生' : '画像を開く'}

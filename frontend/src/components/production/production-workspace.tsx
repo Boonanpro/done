@@ -873,9 +873,9 @@ export function ProductionWorkspace({
                     {selectedSourceAssets.map((asset) => (
                       <div
                         key={asset.id}
-                        draggable={asset.kind === 'video'}
+                        draggable={asset.kind === 'video' || asset.kind === 'image' || asset.kind === 'audio'}
                         onDragStart={(event) => {
-                          if (asset.kind !== 'video') return;
+                          if (asset.kind !== 'video' && asset.kind !== 'image' && asset.kind !== 'audio') return;
                           // payload shape matches the editor's ASSET_DND_TYPE consumer
                           const payload = {
                             id: asset.id,
@@ -892,8 +892,8 @@ export function ProductionWorkspace({
                         onDragEnd={() => {
                           delete (window as unknown as { __danDragAsset?: unknown }).__danDragAsset;
                         }}
-                        title={asset.kind === 'video' ? 'ドラッグでタイムラインに追加' : undefined}
-                        className={`overflow-hidden rounded border border-border bg-muted/30 ${asset.kind === 'video' ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                        title={asset.kind === 'video' || asset.kind === 'image' || asset.kind === 'audio' ? 'ドラッグでタイムラインに追加' : undefined}
+                        className={`overflow-hidden rounded border border-border bg-muted/30 ${asset.kind === 'video' || asset.kind === 'image' || asset.kind === 'audio' ? 'cursor-grab active:cursor-grabbing' : ''}`}
                       >
                         <div className="flex aspect-video items-center justify-center bg-muted">
                           {asset.thumbnail_url || asset.kind === 'video' || asset.kind === 'image' ? (
