@@ -22,7 +22,12 @@ NICE = 15
 
 
 def _ps():
-    out = subprocess.run(['ps', '-Ao', 'pid=,ppid=,command='], capture_output=True, text=True, timeout=10).stdout
+    # A Mac busy with a render can take longer than this to list its processes: then nothing is found this time
+    # (callers look again or leave things as they are). Raising here ended the very render it was checking (2026-11-27).
+    try:
+        out = subprocess.run(['ps', '-Ao', 'pid=,ppid=,command='], capture_output=True, text=True, timeout=30).stdout
+    except subprocess.TimeoutExpired:
+        return []
     rows = []
     for line in out.splitlines():
         parts = line.strip().split(None, 2)
@@ -50,18 +55,57 @@ def _cores_for(project):
     return [pid for pid, _, cmd in _ps() if 'aerendercore' in cmd and str(project) in cmd]
 
 
+def _project_of(cmd):
+    return next((tok for tok in cmd.split() if tok.endswith('render.aep')), None)
+
+
 def sweep_orphans():
-    """Stop After Effects left behind by renders whose Python already ended: a render core for a scratch folder that is
-    gone, and private workers (-m -noui) that launchd adopted. Returns the stopped pids."""
-    stopped = []
-    for pid, ppid, cmd in _ps():
-        orphan_core = 'aerendercore' in cmd and str(SHELF / 'render-') in cmd and not any(
-            Path(tok).parent.exists() for tok in cmd.split() if tok.endswith('render.aep'))
-        orphan_worker = ppid == 1 and '/Contents/MacOS/After Effects -m -noui' in cmd
-        if orphan_core or orphan_worker:
-            _kill(pid)
-            stopped.append(pid)
-    return stopped
+    """Stop After Effects left behind by renders whose Python already ended. Returns the stopped pids.
+
+    - aerender whose caller is gone (launchd adopted it, ppid 1), and the aerender it started;
+    - a render core (aerendercore, always launchd's child) whose project no live aerender is rendering;
+    - private workers (-m -noui) that launchd adopted.
+    2026-11-25: the caller of two renders ended but its scratch folders stayed, so "the folder is gone" missed both and
+    they held ~4GB with the swap full. The After Effects the owner opens on screen (no -m/-noui) is never touched."""
+    rows = _ps()
+    by_pid = {pid: (ppid, cmd) for pid, ppid, cmd in rows}
+    wrappers = {pid for pid, _, cmd in rows if '/aerender ' in cmd + ' ' and 'aerendercore' not in cmd and '-project' in cmd}
+
+    def adopted(pid):
+        seen = set()
+        while pid in wrappers and pid not in seen:
+            seen.add(pid)
+            ppid = by_pid[pid][0]
+            if ppid == 1:
+                return True
+            pid = ppid
+        return False
+
+    orphans = [pid for pid in wrappers if adopted(pid)]
+    live_projects = {_project_of(by_pid[pid][1]) for pid in wrappers if pid not in orphans}
+    for pid, ppid, cmd in rows:
+        core = 'aerendercore' in cmd and str(SHELF / 'render-') in cmd and _project_of(cmd) not in live_projects
+        worker = ppid == 1 and '/Contents/MacOS/After Effects -m -noui' in cmd
+        if core or worker:
+            orphans.append(pid)
+    for pid in orphans:
+        _kill(pid)
+    return orphans
+
+
+def sweep_scratch(max_idle=2 * 3600):
+    """Remove render-* scratch folders no After Effects process uses and nothing inside changed for max_idle seconds
+    (a killed render leaves its folder behind; renders time out after 30 minutes). Returns the removed folders."""
+    in_use = ' '.join(cmd for _, _, cmd in _ps())
+    removed = []
+    for folder in SHELF.glob('render-*'):
+        if not folder.is_dir() or str(folder) in in_use:
+            continue
+        newest = max([folder.stat().st_mtime] + [f.stat().st_mtime for f in folder.rglob('*') if f.exists()])
+        if time.time() - newest > max_idle:
+            shutil.rmtree(folder, ignore_errors=True)
+            removed.append(folder)
+    return removed
 
 
 @contextlib.contextmanager
@@ -244,3 +288,10 @@ def render(item, values, folder, *, font='SourceHanSansJP-Bold', text_scale=1.0,
             raise RuntimeError('透明度または書き出した尺が指定と一致しません')
         os.replace(path, output)
     return output
+
+
+if __name__ == '__main__':
+    # launchd com.dan.ae-sweep runs this every 5 minutes; it prints only when it stopped or removed something.
+    stopped, removed = sweep_orphans(), sweep_scratch()
+    if stopped or removed:
+        print(time.strftime('%Y-%m-%d %H:%M:%S'), 'stopped', stopped, 'removed', [f.name for f in removed], flush=True)

@@ -25,19 +25,42 @@ class AeSlotTests(unittest.TestCase):
             [t.start() for t in threads]; [t.join() for t in threads]
         self.assertEqual(peak[0], 1)
 
-    def test_orphans_are_render_cores_of_gone_folders_and_adopted_workers(self):
+    def test_orphans_are_renders_whose_caller_ended_and_their_cores(self):
         with tempfile.TemporaryDirectory() as d, patch.object(e, 'SHELF', Path(d)):
-            live = Path(d, 'render-live'); live.mkdir()
-            app = '/Applications/Adobe After Effects 2027/Adobe After Effects 2027.app/Contents/'
-            rows = [(10, 1, app + f'aerendercore.app/Contents/MacOS/aerendercore -noui -project {d}/render-gone/render.aep -rqindex 1'),
-                    (11, 1, app + f'aerendercore.app/Contents/MacOS/aerendercore -noui -project {live}/render.aep -rqindex 1'),
+            ae = '/Applications/Adobe After Effects 2027/'
+            app = ae + 'Adobe After Effects 2027.app/Contents/'
+            core = app + 'aerendercore.app/Contents/MacOS/aerendercore -noui -project {}/render.aep -rqindex 1'
+            wrap = ae + 'aerender -project {}/render.aep -rqindex 1'
+            rows = [(20, 1, wrap.format(f'{d}/render-left')),        # caller ended (2026-11-25), folder still there
+                    (21, 20, wrap.format(f'{d}/render-left')),       # the aerender it started
+                    (22, 1, core.format(f'{d}/render-left')),
+                    (30, 500, wrap.format(f'{d}/render-live')),      # Python 500 is still waiting on it
+                    (31, 30, wrap.format(f'{d}/render-live')),
+                    (32, 1, core.format(f'{d}/render-live')),
+                    (10, 1, core.format(f'{d}/render-gone')),        # nothing renders it any more
                     (12, 1, app + 'MacOS/After Effects -m -noui -ApplePersistenceIgnoreState YES'),
                     (13, 500, app + 'MacOS/After Effects -m -noui -ApplePersistenceIgnoreState YES'),
-                    (14, 1, app + 'MacOS/After Effects')]
+                    (14, 1, app + 'MacOS/After Effects')]           # the one the owner opens on screen
             killed = []
             with patch.object(e, '_ps', return_value=rows), patch.object(e, '_kill', killed.append):
-                self.assertEqual(e.sweep_orphans(), [10, 12])
-        self.assertEqual(killed, [10, 12])
+                stopped = e.sweep_orphans()
+        self.assertEqual(sorted(stopped), [10, 12, 20, 21, 22])
+        self.assertEqual(sorted(killed), [10, 12, 20, 21, 22])
+
+    def test_scratch_folders_go_only_when_unused_and_quiet(self):
+        import os
+        with tempfile.TemporaryDirectory() as d, patch.object(e, 'SHELF', Path(d)):
+            old, busy, fresh = (Path(d, n) for n in ('render-old', 'render-busy', 'render-fresh'))
+            for f in (old, busy, fresh):
+                f.mkdir(); (f / 'render.aep').write_text('x')
+            for f in (old, busy):
+                for x in (f, f / 'render.aep'):
+                    os.utime(x, (time.time() - 3 * 3600,) * 2)
+            rows = [(5, 1, f'aerendercore -project {busy}/render.aep')]
+            with patch.object(e, '_ps', return_value=rows):
+                removed = e.sweep_scratch()
+            self.assertEqual(removed, [old])
+            self.assertFalse(old.exists()); self.assertTrue(busy.exists()); self.assertTrue(fresh.exists())
 
     def test_render_core_is_stopped_with_the_render(self):
         project = Path('/tmp/render-x/render.aep')
@@ -60,3 +83,11 @@ class AeSlotTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_a_slow_process_list_finds_nothing_instead_of_ending_the_render(monkeypatch):
+    import subprocess
+    from app.services import envato_shelf as e
+    def slow(*a, **k): raise subprocess.TimeoutExpired(a[0], k.get('timeout'))
+    monkeypatch.setattr(e.subprocess, 'run', slow)
+    assert e._ps() == [] and e.sweep_orphans() == []
