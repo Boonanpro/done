@@ -4,18 +4,32 @@
 // クリップを押された時に picking を見て、そのクリップを会話の「画面から添えた物」（chat-attach-store）に入れて stop する。
 import { create } from 'zustand';
 
+export type ClipMention = { label: string; detail: string };
+
 type State = {
   /** @ を押した会話の部屋（projectId）。null なら選んでもメンションしない */
   picking: string | null;
-  start: (projectId: string) => void;
+  /** 選ばれたクリップを受け取る会話の入力欄（カーソルの所に @… を入れる。2026-11-27 本人「チャット内に紛れさせてほしい」） */
+  onPick: ((m: ClipMention) => void) | null;
+  start: (projectId: string, onPick: (m: ClipMention) => void) => void;
+  pick: (m: ClipMention) => void;
   stop: () => void;
 };
 
-export const useClipMentionStore = create<State>((set) => ({
+export const useClipMentionStore = create<State>((set, get) => ({
   picking: null,
-  start: (projectId) => set({ picking: projectId }),
-  stop: () => set({ picking: null }),
+  onPick: null,
+  start: (projectId, onPick) => set({ picking: projectId, onPick }),
+  pick: (m) => { const f = get().onPick; set({ picking: null, onPick: null }); f?.(m); },
+  stop: () => set({ picking: null, onPick: null }),
 }));
+
+/** 本文に残っている @… の札の中身を、ダンにだけ渡す形（<dan-context> は画面に出ない）で本文の後ろに足す。 */
+export function composeMentions(text: string, mentions: ReadonlyMap<string, string>): string {
+  const used = [...mentions].filter(([label]) => text.includes(label));
+  if (!used.length) return text;
+  return `${text}\n\n<dan-context>\nkind: clip-mention\nnote: 本文の「@種類「中身」時刻」は、みきさんがタイムラインから選んだクリップ。その直後の言葉がそのクリップへの指示。\n${used.map(([label, d]) => `${label}\n${d}`).join('\n')}\n</dan-context>`;
+}
 
 /** エディターがこの窓にあるか（会話欄に @ を出すかどうか）。エディターが開いている間だけ数える。 */
 type EditorPresence = { editors: number; enter: () => void; leave: () => void };
@@ -45,12 +59,12 @@ export type MentionableClip = {
 };
 
 /** 札に出す短い名前と、ダンに渡す中身。kind はエディターの段の種類（video/audio/caption/effect…）。 */
-export function describeClipMention(clip: MentionableClip, kind: string, lane?: number | null): { label: string; detail: string } {
+export function describeClipMention(clip: MentionableClip, kind: string, lane?: number | null, nameHint?: string | null): { label: string; detail: string } {
   const words = (clip.ae_text?.values || []).join(' / ') || clip.text || '';
-  const name = words || clip.label || clip.asset_id || clip.id;
+  const name = words || nameHint || clip.label || clip.asset_id || clip.id;
   const kindJa: Record<string, string> = { video: '映像', image: '画像', audio: '音', caption: '字幕', effect: '効果' };
   const k = kindJa[clip.type === 'image' ? 'image' : kind] || kind;
-  const short = String(name).replace(/\s+/g, ' ').slice(0, 18);
+  const short = String(name).replace(/\s+/g, ' ').slice(0, 14);
   const label = `@${k}「${short}」${fmt(clip.timeline_start)}`;
   const detail = [
     `- メンションしたクリップ: clip_id=${clip.id}`,

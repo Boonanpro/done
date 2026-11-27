@@ -16,8 +16,8 @@ watches:
   - frontend/src/components/chat/chat-shapes.tsx
   - frontend/src/lib/chat-shapes/*.ts
   - frontend/src/app/globals.css
-fingerprint: 091650d2b871e237
-described: 2df4acb872827159
+fingerprint: cb8bd8b1e0c8ea91
+described: 8ccb527eee0c5bfa
 last_review: "2026-11-24 説明は変えない: 倍率の上限と下限でボタンを止める。操作方法は同じ。"
 ---
 # ダンのチャット
@@ -31,7 +31,7 @@ last_review: "2026-11-24 説明は変えない: 倍率の上限と下限でボ�
 - `live-rows` 作業中に、ダンが progress で書いた数行と、道具の説明の行が出る。GPTも作業の対象・目的と確認した結果を伝える。説明がない操作でも、ファイル確認・編集・テスト・ビルドなど実際の操作を表示する。終わるとたたまれる。
 - `summon-banner` ダンが本人を今すぐ呼んでいる間（振込の承認・認証コードなど。summon の道具）、どのページでも画面の上に琥珀色の帯で理由が出て、3秒ごとに音が鳴る。押すとその部屋が開き、呼び出しが止まる。
 - `model-switcher` 選択したモデルで実行する。利用上限時はClaudeとGPTの間で作業記録を引き継いで切り替え、切替中の表示を出す。両方が上限の場合は停止理由を表示する。
-- `chat-input` 下の欄。送ると、作業中でも追い連絡として届く。送った文はダンに届くまで端末に控え、通信が切れたり画面を読み直したりしても、同じ文を自動で送り直す（2回は届かない）。届くまでの間、自分の吹き出しの下に「まだ届いていません・届くまで送り直しています」と出る。10分たっても届かない文は送らずに入力欄へ戻る。入力中・送信中・ダンの作業中は、新しい版が出ても画面を勝手に読み直さない（frontend/src/lib/chat-outbox.ts）。入力欄の左は「＋」（写真・動画／ファイル／タイムライン の一覧。LINE と同じ、2026-11-27）→ 電話マーク。エディターの窓では電話の横に「@」が出て、押してからタイムラインのクリップを押すと、そのクリップが「@映像「…」0:00」の札で添わる（押さずに選んでも添わない。Esc でやめる。frontend/src/stores/clip-mention-store.ts）。パソコンのファイル・エディターの素材の一覧の素材・会話に貼ったファイルは、会話欄のどこに落としても添わる。
+- `chat-input` 下の欄。送ると、作業中でも追い連絡として届く。送った文はダンに届くまで端末に控え、通信が切れたり画面を読み直したりしても、同じ文を自動で送り直す（2回は届かない）。届くまでの間、自分の吹き出しの下に「まだ届いていません・届くまで送り直しています」と出る。10分たっても届かない文は送らずに入力欄へ戻る。入力中・送信中・ダンの作業中は、新しい版が出ても画面を勝手に読み直さない（frontend/src/lib/chat-outbox.ts）。入力欄の左は「＋」（写真・動画／ファイル／タイムライン の一覧。LINE と同じ、2026-11-27）→ 電話マーク。エディターの窓では電話の横に「@」が出て、押してからタイムラインのクリップを押すと、そのクリップの「@映像「…」0:00」が入力欄のカーソルの所に文として入る（行の頭なら後ろで改行、指示を書いた後にもう一度押すと1行空けて次のまとまり。押さずに選んでも入らない。Esc でやめる。送る時に本文に残っている @… の中身だけがダンに渡る。frontend/src/stores/clip-mention-store.ts）。パソコンのファイル・エディターの素材の一覧の素材・会話に貼ったファイルは、会話欄のどこに落としても添わる。
 - `owner-screen` 通話中の「画面を見せる」で、PCの画面全体・ウィンドウ・Chromeのタブを選んで見せる（選ぶ画面はブラウザが毎回出す）。絵はページの中に直近90秒だけ持ち、外へは送らない。「これ何？」「ここ直して」のように画面を見ないと分からない頼みだと判断役が決めた時か、「画面見て」と言った時だけ、その頼みを話していた間の絵がダンに届く。通話のダンには画面のことは何も伝えない。「見せるのをやめる」で止まる。スマホのアプリには無い。
 - `sketch` 通話中の「手描きボード」で、白紙や写真に描いてダンに見せる。閉じても通話は続き、開き直すと前の絵に描き足せる。PCではCtrl＋ホイールで拡大・縮小、右ドラッグで移動できる。
 - `artifact-tab` 部屋に成果物があれば右に出る（artifact-tab の地図）。
@@ -67,5 +67,5 @@ last_review: "2026-11-24 説明は変えない: 倍率の上限と下限でボ�
 - 見張るファイル: `frontend/src/app/globals.css`, `frontend/src/components/chat/chat-shapes.tsx`, `frontend/src/components/chat/sketch-board.tsx`, `frontend/src/components/layout/project-chat-panel.tsx`, `frontend/src/lib/chat-shapes/answer-sends.ts`, `frontend/src/lib/chat-shapes/answers.ts`, `frontend/src/lib/chat-shapes/chart-geometry.ts`, `frontend/src/lib/chat-shapes/job-report.ts`, `frontend/src/lib/chat-shapes/live-line.ts`, `frontend/src/lib/chat-shapes/map-geometry.ts`, `frontend/src/lib/chat-shapes/no-openui-devtools.ts`, `frontend/src/lib/chat-shapes/plain.ts`, `frontend/src/lib/chat-shapes/schema.ts`, `frontend/src/lib/chat-shapes/split.ts`, `frontend/src/lib/chat-shapes/use-answer-send.ts`
 - ラベル: 「近づける」、「遠ざける」、「部品を準備中」、「手描きボード」、「手描きボードを閉じる」、「縮小」、「拡大」、「このコメントを外す」、「添えた物を外す」、「タイムライン参照を外す」、「メンションをやめる」、「写真・動画・ファイルを添える」
 
-<!-- place_map:files {"frontend/src/app/globals.css": "b514a43252", "frontend/src/components/chat/chat-shapes.tsx": "4631d48bed", "frontend/src/components/chat/sketch-board.tsx": "478c742d80", "frontend/src/components/layout/project-chat-panel.tsx": "da18c46816", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "7da7099871", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/map-geometry.ts": "b207ed80e8", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "b46992e55c", "frontend/src/lib/chat-shapes/schema.ts": "0a9de1133f", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
+<!-- place_map:files {"frontend/src/app/globals.css": "b514a43252", "frontend/src/components/chat/chat-shapes.tsx": "4631d48bed", "frontend/src/components/chat/sketch-board.tsx": "478c742d80", "frontend/src/components/layout/project-chat-panel.tsx": "167ca5bdfe", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "7da7099871", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/map-geometry.ts": "b207ed80e8", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "b46992e55c", "frontend/src/lib/chat-shapes/schema.ts": "0a9de1133f", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
 <!-- place_map:auto:end -->
