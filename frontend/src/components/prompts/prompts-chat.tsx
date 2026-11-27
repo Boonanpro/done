@@ -2,14 +2,15 @@
 
 // 指示文の画面で、ダンと話しながら一緒に指示文を見直す会話（2026-11-21 本人「指示文の見直しはお前が単体でやるより俺と一緒に
 // やった方が良い気がするけど、指示文を見直すページにチャットが無いからやりにくい」）。
-// - 本人はダン開発室の部屋で話す（app/api/prompts_screen.py の /prompts/chat）。/prompts と
-//   開発室の「指示文」が同じ部屋で話す。
+// - 部屋は1つ（「ダン開発室: 指示文の見直し」。一覧に出さない。app/api/prompts_screen.py の /prompts/chat）。/prompts と
+//   開発室の「指示文」が同じ部屋で話す。開発室の部屋そのものとは別（2026-11-27 本人「リンクするのをやめて。重複してて意味無い」）。
+// - 上に、この部屋の並行作業の帯（ダン本体のチャットと同じ部品 components/chat/parallel-jobs-bar.tsx）を出す。
 // - 発言ごとに、今開いている指示文と選んでいる行・文、保存していない書きかけを <dan-context> で添える（画面には出さない。
 //   本人の吹き出しには「どの文の何行目について」だけを小さく出す）。「ここ」「この行」で通じるように。
 // - ダンが文を保存したら、全文の欄が新しい版になり、変わった所と「元に戻す」が出る（prompts-screen.tsx の Editor）。
 //   ここからは、ダンが動いている間とダンの返事が来た時に onPulse で知らせるだけ。
 // - 新着は、ダン本体の画面と同じ新着の線（/chat/feed）で受ける。作業中の1行は lib/chat-shapes/live-line.ts と同じ決まり。
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ArrowUp, Loader2, MessageCircle, Square, X } from 'lucide-react';
@@ -22,8 +23,15 @@ import { partKeys } from '@/lib/chat-shapes/answers';
 import { elapsedText, liveLineText, liveStartedAt, liveStepsFromEvents, sentSinceReply } from '@/lib/chat-shapes/live-line';
 import { oneLine } from '@/lib/one-line';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
+import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { promptsChat, type ChatMessage, type ChatStep } from '@/lib/prompts-api';
 import { cn } from '@/lib/utils';
+
+/** 並行作業の帯はダン本体の暗い色の決まりで描くので、この明るい欄では色の変数だけ明るい側に置き換える */
+const LIGHT_BAR = {
+  '--background': '#fafaf9', '--foreground': '#1c1917', '--muted-foreground': '#78716c', '--border': '#e7e5e4',
+  '--primary': '#7c3aed', '--primary-foreground': '#ffffff', '--destructive': '#be123c',
+} as CSSProperties;
 
 /** 会話に添える「今見ている所」。画面（prompts-screen.tsx）が作る */
 export type PromptChatContext = {
@@ -135,6 +143,7 @@ export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBus
   ctx: PromptChatContext; onClearSelection: () => void; onClearPick?: () => void; onPulse: () => void; onBusy?: (busy: boolean) => void; onRoom?: (id: string, development: boolean) => void; header?: ReactNode;
 }) {
   const [room, setRoom] = useState('');
+  const [project, setProject] = useState('');
   const [error, setError] = useState('');
   const [messages, setMessages] = useState<Shown[]>([]);
   const [more, setMore] = useState(false);
@@ -175,6 +184,7 @@ export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBus
       .then(async got => {
         if (!live) return;
         setRoom(got.room_id);
+        setProject(got.project_id);
         onRoom?.(got.room_id, Boolean(got.development));
         await readAll(got.room_id);
         await readBusy(got.room_id);
@@ -286,6 +296,16 @@ export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBus
     } catch { /* もう止まっている */ }
   }
 
+  // 並行作業の「結果を見る」: 読み込んである発言なら、そこまで送って少し光らせる
+  const showMessage = useCallback((id: string) => {
+    const el = list.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`);
+    if (!el) return false;
+    stick.current = false;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.animate([{ backgroundColor: 'rgba(251, 191, 36, 0.35)' }, { backgroundColor: 'transparent' }], { duration: 1800 });
+    return true;
+  }, []);
+
   const live = liveStepsFromEvents(steps);
   const sentTimes = sentSinceReply(messages.filter(m => !m.pending));
   const from = liveStartedAt(live.find(x => x.at)?.at, sentTimes);
@@ -293,6 +313,7 @@ export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBus
   return (
     <div className="flex h-full min-h-0 flex-col">
       {header}
+      {project ? <div className="shrink-0" style={LIGHT_BAR}><ParallelJobsBar projectId={project} onShowMessage={showMessage} /></div> : null}
       {room && <div className="flex shrink-0 justify-end px-3 pt-2"><ModelSwitcher roomId={room} disabled={busy || sending} /></div>}
       <div ref={list} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
         data-media-gallery-scope className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-3">
@@ -304,7 +325,7 @@ export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBus
         {messages.map(m => {
           if (isDan(m)) {
             return (
-              <div key={m.id} className="max-w-full">
+              <div key={m.id} data-message-id={m.id} className="max-w-full rounded-md">
                 <DanBody body={m.content || ''} messageId={m.id} />
                 <time className="mt-0.5 block text-[11px] text-stone-400">ダン {clock(m.created_at)}</time>
               </div>
@@ -313,7 +334,7 @@ export function PromptsChat({ ctx, onClearSelection, onClearPick, onPulse, onBus
           const about = aboutOf(m.content || '');
           const said = parseMediaContent(m.content || '').text;
           return (
-            <div key={m.id} className="ml-6 flex flex-col items-end">
+            <div key={m.id} data-message-id={m.id} className="ml-6 flex flex-col items-end">
               {about ? (
                 <span className="mb-0.5 max-w-full truncate text-[11px] text-stone-500">
                   {about.title ? `「${about.title}」` : ''}{about.lines ? `の${about.lines}` : ''}{about.text ? `「${about.text.slice(0, 30)}${about.text.length > 30 ? '…' : ''}」` : ''}

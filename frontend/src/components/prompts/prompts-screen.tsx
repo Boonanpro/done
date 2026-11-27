@@ -629,9 +629,9 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
       active={place === 'video' ? 'v-owner' : library ? 'skills' : node?.id || ''} glow={work?.state === 'editing' ? workNode : ''}
       onPick={p => { navigate({ place: p }); }}
       toolbar={<>
-      {conversation.development && <button type="button" aria-label={call.room ? '通話を切る' : '開発室で通話する'}
+      {conversation.development && <button type="button" aria-label={call.room ? '通話を切る' : '指示文の見直しで通話する'}
         className="rounded-md border border-teal-800 bg-teal-800 px-3 py-1.5 text-xs font-semibold text-white"
-        onClick={() => call.room ? call.end() : call.start(conversation.room, {chatTitle:'ダン開発室'})}>{call.room ? '通話を切る' : '通話する'}</button>}
+        onClick={() => call.room ? call.end() : call.start(conversation.room, {chatTitle:'指示文の見直し'})}>{call.room ? '通話を切る' : '通話する'}</button>}
       {!trace && (lastChange || board.session || board.turns.length > 0) && <select aria-label="構成図に表示する変更や判断"
         className="max-w-36 rounded-md border bg-white px-1 py-1.5 text-xs" value="" onChange={e => {
           const value = e.target.value;
