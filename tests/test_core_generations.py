@@ -215,3 +215,54 @@ def test_release_routes_include_websockets_from_health(monkeypatch):
     monkeypatch.setattr(release.urllib.request, 'urlopen',
                         lambda url, timeout=0: Response(json.dumps(bodies[url.split('8201', 1)[1]]).encode()))
     assert release.sandbox_routes(8201) == ['/api/v1/collab/rooms', '/health', '/api/v1/collab/ws/{room_id}']
+
+
+def test_superseded_candidate_retires_but_newer_candidate_waits(registry, monkeypatch):
+    """A release prepared before the active one and never activated held its Core for days (2026-11-28)."""
+    from app.core import generation_retirement as retirement
+    old, new = registry
+    stale = {'id': 'stale', 'core': 9203, 'sandbox': 8203, 'owner': {**G.identity(), 'created': old['owner']['created'] - 60}}
+    fresh = {'id': 'fresh', 'core': 9204, 'sandbox': 8204, 'owner': {**G.identity(), 'created': old['owner']['created'] + 60}}
+    G.write('release-stale', stale); G.write('release-fresh', fresh)
+    killed = []
+    monkeypatch.setattr(retirement, 'quiescent', lambda _: True)
+    monkeypatch.setattr(G, 'living', lambda owner: bool(owner))
+    import psutil
+    monkeypatch.setattr(psutil.Process, 'terminate', lambda self: killed.append(self.pid))
+    retirement.retire_once()
+    assert G.read('release-stale').get('retired')
+    assert not G.read('release-fresh').get('retired')   # being prepared for the next activation
+    assert not G.read('release-new').get('retired')
+    assert not G.read('release-old').get('retired')     # the active release
+
+
+def test_upkeep_loops_do_not_hold_a_release(monkeypatch):
+    import asyncio, json, io
+    from app.core import generation_retirement as retirement
+    from app.core.api import generation_routes
+    from app.services import browser_lifecycle
+    replies = {}
+    class Reply(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(browser_lifecycle, '_token_path', lambda: type('P', (), {'read_text': lambda self: 't'})())
+    monkeypatch.setattr('urllib.request.urlopen', lambda request, timeout: Reply(json.dumps(replies[request.full_url.split(':')[2].split('/')[0]]).encode()))
+    release = {'core': 1, 'sandbox': 2}
+    replies.update({'1': {'idle': False, 'busy': ['app.services.run_reconciler.loop']}, '2': {'idle': True, 'busy': []}})
+    assert retirement.quiescent(release)
+    replies['1'] = {'idle': False, 'busy': ['app.services.run_reconciler.loop', 'app.agent.cli_runner.turn']}
+    assert not retirement.quiescent(release)
+    replies['1'] = {'idle': False, 'tasks': 1}   # an older release that does not name its tasks
+    assert not retirement.quiescent(release)
+
+    async def check():
+        async def forever(): await asyncio.sleep(60)
+        upkeep = asyncio.create_task(forever(), name=generation_routes.UPKEEP + 'x')
+        await asyncio.sleep(0)
+        class Request:
+            client = type('C', (), {'host': '127.0.0.1'})()
+            headers = {'x-dan-browser-token': 't'}
+        monkeypatch.setattr(browser_lifecycle, 'authorized', lambda token: True)
+        try: return await generation_routes.activity(Request())
+        finally: upkeep.cancel()
+    assert asyncio.run(check())['idle']

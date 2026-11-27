@@ -135,7 +135,8 @@ async def lifespan(app: FastAPI):
         if os.environ.get("DAN_GENERATION"):
             try:
                 from app.services import run_reconciler
-                asyncio.create_task(run_reconciler.loop())
+                from app.core.api.generation_routes import UPKEEP
+                asyncio.create_task(run_reconciler.loop(), name=UPKEEP + 'run-reconciler')
             except Exception as e:
                 logger.warning("run reconciler failed to schedule: %s", e)
     else:
@@ -188,7 +189,8 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(recover_orphaned_runs())
             # While this Core runs, it closes the runs whose work is gone (it alone can see that)
             from app.services import run_reconciler
-            asyncio.create_task(run_reconciler.loop())
+            from app.core.api.generation_routes import UPKEEP
+            asyncio.create_task(run_reconciler.loop(), name=UPKEEP + 'run-reconciler')
         except Exception as e:
             logger.warning("run recovery failed to schedule: %s", e)
 

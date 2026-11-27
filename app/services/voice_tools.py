@@ -46,7 +46,9 @@ class Host:
         self.process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'app.services.tool_host', cwd=str(ROOT), env=env,
                                                             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                                                             stderr=asyncio.subprocess.DEVNULL, creationflags=creation, limit=4 * 1024 * 1024)
-        asyncio.create_task(self._read(self.process))
+        from app.core.api.generation_routes import UPKEEP
+        # Only reads replies; a tool call in flight is its own request task, and a call holds its generation (refs).
+        asyncio.create_task(self._read(self.process), name=UPKEEP + 'voice-host-read')
 
     async def _read(self, process):
         while True:
