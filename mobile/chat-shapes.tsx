@@ -107,7 +107,7 @@ function Box({ children, flat, framed }: { children: ReactNode; flat?: boolean; 
 }
 
 /** 横並びの中で幅を分け合う部品（Web の chat-shapes.tsx WIDE と同じ） */
-const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow', 'Map', 'Item', 'Quote', 'Sources', 'Frames', 'BeforeAfter']);
+const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow', 'Map', 'Item', 'Quote', 'Sources', 'Frames', 'BeforeAfter', 'MapPlan']);
 
 function Children({ items, row = false }: { items: unknown; row?: boolean }) {
   const list = Array.isArray(items) ? items : [];
@@ -646,6 +646,28 @@ function BeforeAfterNode({ p }: { p: Record<string, unknown> }) {
   );
 }
 
+/** ダン自身の直す所（PC は指示文の地図に番号を付けて描く。スマホには地図が無いので、番号・今・直した後・見込みの札だけ） */
+function MapPlanNode({ p }: { p: Record<string, unknown> }) {
+  const changes = Array.isArray(p.changes) ? p.changes.filter((c): c is Record<string, unknown> => !!c && typeof c === 'object') : [];
+  return (
+    <Box>
+      {str(p.title) ? <Text style={styles.cardTitle}>{str(p.title)}</Text> : null}
+      {changes.map((c, i) => (
+        <View key={i} style={{ flexDirection: 'row', gap: 8, borderWidth: 1, borderColor: '#dbe2da', borderRadius: 10, padding: 8 }}>
+          <Text style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: '#7c3aed', color: '#fff', textAlign: 'center', fontWeight: '800', lineHeight: 24 }}>{i + 1}</Text>
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text style={[styles.text, styles.strong]}>{str(c.title)}</Text>
+            <Text style={[styles.text, { backgroundColor: 'rgba(244,63,94,0.1)', borderRadius: 6, padding: 4 }]}>今: {str(c.now)}</Text>
+            <Text style={[styles.text, { backgroundColor: 'rgba(16,185,129,0.12)', borderRadius: 6, padding: 4 }]}>直した後: {str(c.after)}</Text>
+            {str(c.effect) ? <Text style={[styles.text, { color: '#6d28d9', fontWeight: '700' }]}>→ {str(c.effect)}</Text> : null}
+          </View>
+        </View>
+      ))}
+      {str(p.goal) ? <Text style={[styles.text, styles.strong]}>{str(p.goal)}</Text> : null}
+    </Box>
+  );
+}
+
 function Node({ node }: { node: ShapeNode }) {
   const p = propsOf(node);
   const { openUrl } = useContext(ShapeRoomContext);
@@ -753,6 +775,8 @@ function Node({ node }: { node: ShapeNode }) {
       return <FramesNode p={p} />;
     case 'BeforeAfter':
       return <BeforeAfterNode p={p} />;
+    case 'MapPlan':
+      return <MapPlanNode p={p} />;
     default:
       return null;
   }

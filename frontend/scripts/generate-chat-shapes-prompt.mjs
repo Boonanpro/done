@@ -12,6 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { createLibrary, defineComponent } from '@openuidev/lang-core';
 import { ANSWER_QUESTION_MAX, ANSWER_VALUE_MAX, OFFERED_SHAPE_SPECS as SHAPE_SPECS } from '../src/lib/chat-shapes/schema.ts';
 import { PROGRAM_DEPTH_MAX } from '../src/lib/chat-shapes/plain.ts';
+import { BOARD_NODES } from '../src/components/prompts/architecture.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const PROMPT_PATH = resolve(HERE, '../../app/agent/chat_shapes_prompt.md');
@@ -41,6 +42,11 @@ export function shapeSignatureLines() {
   return lines;
 }
 
+/** MapPlan の node に使える箱（指示文の画面の地図。名前が同じ箱は id で区別する） */
+export function mapBoxLine() {
+  return BOARD_NODES.map((n) => `${n.id}=${n.name}`).join(', ');
+}
+
 export function buildChatShapesPrompt() {
   const sig = shapeSignatureLines().map((l) => `- ${l}`).join('\n');
   return `## Answer shapes (chat UI parts)
@@ -51,6 +57,8 @@ Write parts as one fenced code block with the language \`openui-lang\`, placed b
 
 Parts (generated from the chat UI; ? = optional; Part = any part below):
 ${sig}
+
+When you propose, or report, a change to Dan itself (how it talks, routes, remembers, its instructions, tools or screens), show it as one MapPlan instead of numbered paragraphs: each change sits on the instruction-map box it touches, in the order you would do it, with what the user experiences now, what it becomes, and the expected effect, each in a short line of the user's own terms (no file names or internals). One or two sentences before it say what this is; after it, ask the one thing you need (a Choice when it is a decision). The user sees the same numbers on the instruction map and can press a change to open its box. Map boxes (id=name): ${mapBoxLine()}.
 
 When the user presses a pin of a Map, an Item without a URL or a frame of Frames, it arrives as the user's message \`<title> → <what was pressed>\`: the user is pointing at that thing (「これの話」); continue about it. When the user presses a Choice or submits an Input, the answer arrives as the user's own chat message in the form \`<question> → <answer>\`. After asking with Choice or Input, end the turn and wait for it; do not guess the answer. A Choice question is answered only through the message; do not restate the options as a list. When the answer hinges on one number only the user knows (a budget, hours per week, a head count), ask for it with Input instead of assuming it.
 

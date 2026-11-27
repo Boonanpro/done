@@ -15,6 +15,7 @@ import { promptRequest, type PromptSummary } from '@/lib/prompts-api';
 import { cn } from '@/lib/utils';
 import { BOARD_EDGES, BOARD_NODES, BOX_H, VIDEO_FRAME, VIDEO_NODES, WORK_FRAME, type ArchEdge, type ArchNode } from './architecture';
 import type { Trace } from './architecture-trace';
+import type { PlanMark } from '@/lib/map-focus';
 
 type Box = { x: number; y: number; w: number; h: number };
 type Pt = [number, number];
@@ -110,12 +111,14 @@ type Gesture =
   | { kind: 'frame'; id: string; x: number; y: number; box: Box; inside: Record<string, Box>; via: Record<string, Pt[]>; moved: boolean }
   | { kind: 'point'; key: string; index: number; x: number; y: number; start: Pt; via: Pt[] | null; seg: number; moved: boolean };
 
-export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPick, toolbar, annotation }: {
+export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPick, toolbar, annotation, marks }: {
   trace?: Trace; skills: PromptSummary[]; onSkills: (reader: string, id?: string) => void;
   counts: Record<string, number>; active: string; glow?: string; onPick: (id: string) => void;
   /** 右上の操作の帯の左に足す物（スキルを探す など） */
   toolbar?: ReactNode;
   annotation?: { node: string; title: string; body: ReactNode; open: () => void; close: () => void };
+  /** チャットの直す案（部品 MapPlan）の番号。箱の左上に紫の丸で出す（lib/map-focus.ts） */
+  marks?: PlanMark[];
 }) {
   const port = useRef<HTMLDivElement>(null);
   const marker = useId().replace(/:/g, '');
@@ -416,6 +419,11 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
             const state = trace?.current === n.id ? 'current' : trace?.visits.has(n.id) ? 'visited' : undefined;
             return (
               <div key={n.id} data-annotated={annotation?.node === n.id || undefined} data-node-wrap={n.id} className="group absolute data-[annotated=true]:rounded-lg data-[annotated=true]:ring-4 data-[annotated=true]:ring-indigo-500" style={{ left: b.x, top: b.y, width: b.w, height: b.h }}>
+                {marks?.some(m => m.node === n.id) && <span className="pointer-events-none absolute -inset-2 z-10 rounded-2xl border-4 border-violet-500/80" data-plan-mark={n.id}>
+                  <span className="absolute -left-5 -top-6 flex gap-1">
+                  {marks.filter(m => m.node === n.id).map(m => <span key={m.n} title={m.title}
+                    className="flex h-11 min-w-11 items-center justify-center rounded-full border-[3px] border-white bg-violet-600 px-1 text-2xl font-extrabold text-white shadow-lg">{m.n}</span>)}
+                </span></span>}
                 {n.height ? <button type="button" data-arch-node={n.id} aria-label={n.name} data-trace-state={state} onClick={pick}
                   className={cn('flex h-full w-full flex-col items-center justify-end gap-1 rounded-lg text-stone-900 hover:bg-stone-100/70 focus-visible:outline-2', (on || trace?.current === n.id) && 'ring-2 ring-emerald-600')}>
                   {n.id === 'pc' ? <span className="flex min-h-0 w-full flex-1 flex-col items-center">
