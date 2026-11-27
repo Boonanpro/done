@@ -60,7 +60,6 @@ import { isRegionEffect, regionLabel } from './region-effect';
 import { createZoomPreview, type ZoomPreview } from './zoom-preview';
 import { TypographyPanel, type EditableTypography } from './typography-panel';
 import { describeClipMention, useClipMentionStore, useEditorPresence } from '@/stores/clip-mention-store';
-import { useChatAttachStore } from '@/stores/chat-attach-store';
 import { BlendSelect, SceneClipPanel } from './scene-clip-panel';
 import { TimelinePreview } from './timeline-preview';
 import { MotionPanel } from './motion-panel';
@@ -2352,8 +2351,8 @@ export function VideoReviewEditor({
     });
   }, []);
 
-  // 会話欄の @ を押した後に選んだクリップを、その会話に「メンション」として添える（選んだだけでは添えない）
-  const mentionClip = useCallback((projectId: string, id: string) => {
+  // 会話欄の @ を押した後に選んだクリップを、その会話の入力欄のカーソルの所に @… として入れる（選んだだけでは入れない）
+  const mentionClip = useCallback((_projectId: string, id: string) => {
     const seq = editSequenceRef.current;
     for (const track of seq?.tracks || []) {
       const clip = (track.clips || []).find((c) => c.id === id);
@@ -2361,9 +2360,8 @@ export function VideoReviewEditor({
       const kind = track.type === 'audio' ? 'audio' : (track.type === 'caption' || clip.track === 'caption') ? 'caption'
         : (track.type === 'effect' || isRegionEffect(clip)) ? 'effect' : 'video';
       const lane = computeClipLanes(seq?.tracks || []).get(String(clip.id))?.layer ?? null;
-      const { label, detail } = describeClipMention(clip, kind, lane);
-      useChatAttachStore.getState().put(projectId, { key: `clip:${clip.id}`, label, detail });
-      useClipMentionStore.getState().stop();
+      const { label, detail } = describeClipMention(clip, kind, lane, kind === 'effect' ? regionLabel(clip) : null);
+      useClipMentionStore.getState().pick({ label, detail });
       return;
     }
   }, []);

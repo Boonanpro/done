@@ -70,7 +70,7 @@ import {
   type SelectedElement,
 } from '@/stores/preview-store';
 import { composeAttached, useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
-import { useClipMentionStore, useEditorPresence } from '@/stores/clip-mention-store';
+import { composeMentions, useClipMentionStore, useEditorPresence, type ClipMention } from '@/stores/clip-mention-store';
 import { DAN_FILE_DND_TYPE, endDanFileDrag, type DanDragFile } from '@/lib/dan-file-drag';
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
@@ -952,6 +952,38 @@ function ChatInput({
   const startMention = useClipMentionStore((s) => s.start);
   const stopMention = useClipMentionStore((s) => s.stop);
   const putScreenItem = useChatAttachStore((s) => s.put);
+  // 文の中に入れた @… の札 → ダンに渡す中身（送る時に、本文に残っている札の分だけ添える）
+  const mentionsRef = useRef(new Map<string, string>());
+  const beginMention = () => {
+    const ta = textareaRef.current;
+    const at = ta ? ta.selectionStart : null;
+    startMention(projectId, (m: ClipMention) => {
+      mentionsRef.current.set(m.label, m.detail);
+      setMessage((cur) => {
+        const pos = at == null || at > cur.length ? cur.length : at;
+        const before = cur.slice(0, pos);
+        const after = cur.slice(pos);
+        // 行の頭なら「@…」の後で改行して、次の行に指示を書けるようにする。文の途中なら空白を挟む。
+        // 前に @… を入れて指示を書いた後（行の終わり）で押したら、1行空けて次のまとまりにする
+        //   @A / 〇〇しろ / （空行）/ @B / もっと大きくして
+        const atLineEnd = after === '' || after.startsWith('\n');
+        const prevMention = [...mentionsRef.current.keys()].some((l) => before.includes(l));
+        const newBlock = atLineEnd && prevMention && before.trim() !== '' && !before.endsWith('\n');
+        const lineStart = newBlock || before === '' || before.endsWith('\n');
+        const lead = newBlock ? '\n\n' : lineStart ? '' : before.endsWith(' ') ? '' : ' ';
+        const tail = lineStart ? (after.startsWith('\n') ? '' : '\n') : (after.startsWith(' ') || after.startsWith('\n') ? '' : ' ');
+        const insert = `${lead}${m.label}${tail}`;
+        const caret = pos + insert.length;
+        requestAnimationFrame(() => {
+          const el = textareaRef.current;
+          if (!el) return;
+          el.focus();
+          el.setSelectionRange(caret, caret);
+        });
+        return before + insert + after;
+      });
+    });
+  };
   useEffect(() => {
     if (!plusOpen) return;
     const close = (e: PointerEvent) => { if (!plusRef.current?.contains(e.target as Node)) setPlusOpen(false); };
@@ -1793,9 +1825,10 @@ function ChatInput({
 
     // 溜めておいた要素コメントは、ここで初めて1通のメッセージに畳まれる。
     // （1件ずつ送るとその都度ダンが走り出してしまうのでこの形にしている）
-    const content = composeAttached(pendingComments.length
+    const content = composeAttached(composeMentions(pendingComments.length
       ? composeCommentsMessage(pendingComments, previewArtifactForComments, message.trim())
-      : message.trim(), screen);
+      : message.trim(), mentionsRef.current), screen);
+    mentionsRef.current = new Map();
     if (pendingComments.length) clearPendingComments(projectId);
     const currentReplyTo = replyTo;
 
@@ -2318,7 +2351,7 @@ function ChatInput({
       {mentionPicking && (
         <div data-chat-mention-hint className="mb-1.5 flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-2 py-1.5 text-xs text-foreground">
           <AtSign className="h-3.5 w-3.5 shrink-0 text-primary" />
-          <span className="min-w-0 flex-1">タイムラインのクリップを押すと、この会話に添えます</span>
+          <span className="min-w-0 flex-1">タイムラインのクリップを押すと、文の中に入ります</span>
           <button type="button" onClick={stopMention} className="shrink-0 text-muted-foreground hover:text-foreground" aria-label="メンションをやめる"><X className="h-3 w-3" /></button>
         </div>
       )}
@@ -2358,7 +2391,8 @@ function ChatInput({
           <Button variant="ghost" size="icon" type="button" data-chat-mention aria-pressed={mentionPicking}
             aria-label={mentionPicking ? 'メンションをやめる' : 'クリップをメンション'} title={mentionPicking ? 'メンションをやめる（Esc）' : 'クリップをメンション'}
             className={`h-8 w-8 shrink-0 ${mentionPicking ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
-            onClick={() => (mentionPicking ? stopMention() : startMention(projectId))} disabled={isCommentMode}>
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => (mentionPicking ? stopMention() : beginMention())} disabled={isCommentMode}>
             <AtSign className="h-4 w-4" />
           </Button>
         )}
