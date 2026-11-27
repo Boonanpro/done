@@ -29,12 +29,19 @@ def mark_status(job_id, status):
     from app.services.followups import mark_status as legacy_status
     legacy_status(job_id,status)
 
+def _from_call(job_id):
+    try: return bool((state.read(job_id) or {}).get('from_call'))
+    except (ValueError, OSError): return False
+
+
 async def relay_request(chat, row, spec, job_id):
     """The copy of the request in the room the work runs in. Asked from another room (the command room), the work's room
     shows what was asked. Asked in this same room (a call in a project chat), the owner's own words are already there:
     the copy only showed 「あなたの依頼・Done経由」 and the job's internal rules (2026-09-27). Rules for the job model never
-    reach the room either way."""
-    if spec.get('origin_room_id') == row['room_id']:
+    reach the room either way. Asked in a call, nothing is copied: the copy was the call's whole transcript under
+    「【作業の依頼】」 in whatever room he looked at, and he did not want it in the chat (2026-11-28). The job reads the task
+    itself and its result is reported as usual."""
+    if spec.get('origin_room_id') == row['room_id'] or spec.get('from_call') or _from_call(job_id):
         return None
     from app.services.voice_parts import VOICE_TASK
     from app.services.command_center import report_id

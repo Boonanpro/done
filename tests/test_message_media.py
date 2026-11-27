@@ -51,7 +51,17 @@ class SameRoomTests(unittest.TestCase):
         task = '今回のユーザー発言（原文）:\nシートを直して\n参考の直前会話（過去の発言は…）:\n[]' + VOICE_TASK
         asyncio.run(relay_request(chat, row, {'origin_room_id': 'C', 'task': task}, 'j'))
         posted = chat.send_message.call_args.args[2]
-        self.assertEqual(posted, '【あなたの依頼・Done経由】\nシートを直して')
+        from app.services import prompt_store
+        self.assertEqual(posted, prompt_store.text('work/relay-header') + '\nシートを直して')
+
+    def test_no_request_copy_for_a_call(self):
+        # 通話の頼みは見ている部屋に【作業の依頼】と文字起こしを写さない（2026-11-28 本人「まだ全部表示されてる」）
+        from app.services import command_job_runner
+        chat = AsyncMock(); chat.send_message.return_value = {'id': 'm'}
+        row = {'room_id': 'R', 'user_id': 'U'}
+        with patch.object(command_job_runner.state, 'read', return_value={'from_call': True}):
+            self.assertIsNone(asyncio.run(command_job_runner.relay_request(chat, row, {'origin_room_id': 'C', 'task': 't'}, 'j')))
+        chat.send_message.assert_not_called()
 
     def test_same_room_report_has_no_heading_or_link(self):
         from app.services import command_center

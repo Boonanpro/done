@@ -297,6 +297,8 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
         extra = {'model': str(params['model'])[:60]}
     if internal_check:
         extra['internal_check'] = True
+    if voice_handoff:
+        extra['from_call'] = True   # no 【作業の依頼】 copy in the work's room (command_job_runner.relay_request)
     from app.core.generations import read as generation_read
     queue_owner = 'process' if generation_read('active') else 'core'
     command_job_state.create(job_id,user_id=user_id,room_id=target_room,origin_room_id=room_id,
