@@ -273,3 +273,60 @@ def test_inbound_schedule_saves_before_running(monkeypatch):
         assert len(handed) == 1 and '依頼の素材が届きました' in handed[0]
         assert w.get(w.key_for('inbound:email','room','receipt2'))['status'] == 'done'
     asyncio.run(run())
+
+
+def test_unreadable_notices_do_not_starve_resumption(monkeypatch, tmp_path):
+    from app.agent import cli_runner
+    from app.services import room_receiver
+    from app.services.run_service import RunService
+
+    # Older notices came first each poll. More than one page of them must also
+    # leave an eligible room reachable, without interrupting its current turn.
+    room = '8ad2b443-0719-439b-8de2-633efee5ed7e'
+    unreadable = 'ff992289-04ac-43af-9c27-f22f8b14c526'
+    for n in range(22):
+        w.enqueue(key=str(n), room_id=unreadable if n % 2 else 'room-1', user_id='owner',
+                  source='inbound', prompt='連絡')
+    add(room=room)
+    owner_active = True
+    async def current(self, room_id, chat_only):
+        if room_id == unreadable:
+            raise ValueError('room lookup failed')
+        return {'state': 'running'} if owner_active else None
+    monkeypatch.setattr(RunService, '__init__', lambda self: None)
+    monkeypatch.setattr(RunService, 'get_current_run_for_room', current)
+    monkeypatch.setattr('app.services.followup_poller._room_busy', lambda room: False)
+    monkeypatch.setattr('app.services.followup_poller._resolve_project_id', lambda room: None)
+    monkeypatch.setattr('app.services.restart_signal.draining', lambda: False)
+    hand_over = AsyncMock(side_effect=ValueError('no receiver'))
+    monkeypatch.setattr(room_receiver, 'hand_over', hand_over)
+    artifact = tmp_path / 'report.txt'
+    async def complete(**args):
+        assert args['room_id'] == room
+        artifact.write_text('確認用の資料')
+        w.checkpoint('one', room, token=w.get('one')['token'], status='done',
+                     evidence=str(artifact))
+        yield {'type': 'result', 'text': '資料ができました。'}
+    monkeypatch.setattr(cli_runner, 'process_message_cli', complete)
+    async def tick():
+        await w.dispatch()
+        await asyncio.gather(*list(w._tasks.values()), return_exceptions=True)
+    asyncio.run(tick())
+    assert not artifact.exists()
+    owner_active = False
+    asyncio.run(tick())
+    assert artifact.read_text() == '確認用の資料' and w.get('one')['attempts'] == 1
+    hand_over.assert_not_called()
+
+
+def test_receiver_failure_is_not_replayed(monkeypatch):
+    from app.services import room_receiver
+    monkeypatch.setattr(room_receiver, 'lane', AsyncMock(return_value='receiver'))
+    hand_over = AsyncMock(side_effect=RuntimeError('handover outcome unknown'))
+    monkeypatch.setattr(room_receiver, 'hand_over', hand_over)
+    args = dict(key='notice', room_id='busy', user_id='owner', prompt='連絡', source='inbound')
+    with pytest.raises(RuntimeError):
+        asyncio.run(w.execute(**args))
+    assert asyncio.run(w.execute(**args)) == ('', False)
+    assert w.get('notice')['status'] == 'blocked'
+    hand_over.assert_awaited_once()

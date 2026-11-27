@@ -150,7 +150,10 @@ async def _wake_turn(room_id: str, user_id: str, content: str) -> Tuple[str, boo
     from app.services import room_receiver
 
     # Never a follow-up into the owner's running work (2026-11-10: an hourly watch stopped 中村さん's script twice).
-    if await room_receiver.wait_turn(room_id) == "receiver":
+    current = await room_receiver.wait_turn(room_id)
+    if current == "wait":
+        return "", False
+    if current == "receiver":
         await room_receiver.hand_over(room_id, user_id, content)
         return "", True
     project_id = _resolve_project_id(room_id)

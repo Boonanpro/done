@@ -44,7 +44,10 @@ def background(room_id):
 
 async def lane(room_id):
     from app.services.work_continuity import room_busy
-    if not await room_busy(room_id):
+    busy = await room_busy(room_id)
+    if busy is None:
+        return 'wait'
+    if not busy:
         return 'turn'
     return 'wait' if room_id in _background else 'receiver'
 

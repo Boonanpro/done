@@ -200,3 +200,14 @@ def test_work_note_reaches_only_a_running_turn(monkeypatch):
     out = asyncio.run(cr.internal_room_work_note('r', Req({'text': '中村さんがテーマを変えたい'})))
     assert out['delivered'] == 'session' and got[0][0] == 'r'
     assert '中村さんがテーマを変えたい' in got[0][1] and '本人の発言ではありません' in got[0][1]
+
+
+
+def test_wake_timeout_never_enters_an_unconfirmed_room(monkeypatch):
+    from unittest.mock import AsyncMock
+    import app.services.followup_poller as fp
+    monkeypatch.setattr(rr, 'wait_turn', AsyncMock(return_value='wait'))
+    no_turn(monkeypatch)
+    handed = receiver_spy(monkeypatch)
+    assert asyncio.run(fp._wake_turn('r', 'u', '知らせ')) == ('', False)
+    assert handed == []

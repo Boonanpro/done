@@ -92,3 +92,29 @@ def test_keep_mark_checks_the_reply_before_it(tmp_path):
     out = _run({"_dir": tmp_path / "store", "hook_event_name": "Stop", "transcript_path": str(t),
                 "session_id": "k1", "last_assistant_message": "REPLY_UNCHANGED"})
     assert out and json.loads(out).get("decision") == "block"
+
+
+def test_start_only_final_sends_turn_back_to_work(tmp_path):
+    for i, reply in enumerate([
+        'わかりました。ご希望の形で作り始めました。設定が終わったら試します。そのあと、PDFにしてお見せします。',
+        'これから資料を作ります。',
+    ]):
+        result = _run({'session_id': f'start-{i}', 'hook_event_name': 'Stop',
+                       'last_assistant_message': reply, '_dir': tmp_path})
+        decision = json.loads(result)
+        assert decision['decision'] == 'block' and '作業を続け' in decision['reason']
+    for reply in ['資料を作りました。', '申請が通ったら作業を始めます。',
+                  '前半は保存しました。これから後半を作ります。',
+                  '「これから資料を作ります」と伝えました。']:
+        assert not rc.check(reply)
+
+
+
+def test_later_turn_and_codex_transcript_get_the_start_check(tmp_path):
+    transcript = tmp_path / 'rollout.jsonl'
+    transcript.write_text(json.dumps({'type': 'response_item', 'payload': {'type': 'message',
+        'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'これから設定します。'}]}}))
+    payload = {'hook_event_name': 'Stop', 'session_id': 'same-room', 'transcript_path': str(transcript)}
+    for _ in range(2):
+        decision = json.loads(_run({**payload, '_dir': tmp_path}))
+        assert decision['decision'] == 'block' and '作業を続け' in decision['reason']

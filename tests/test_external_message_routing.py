@@ -85,6 +85,8 @@ def make_service(fake: FakeSupabase) -> ExternalMessageRoutingService:
 @pytest.fixture(autouse=True)
 def _stub_draft(monkeypatch):
     """メール返信草案の生成は実 CLI を叩かず固定文面にする（高速・決定的）。"""
+    # These cases exercise the proposal fallback. Never wake a real room from the routing fixture.
+    monkeypatch.setattr('app.services.inbound_wakeup.schedule_room_wakeup', lambda *a, **k: False)
     import app.agent.cli_runner as cli_runner
     monkeypatch.setattr(cli_runner, "run_oneshot_cli", lambda *a, **k: "（自動生成された返信草案）")
 

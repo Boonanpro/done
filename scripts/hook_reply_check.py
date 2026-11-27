@@ -94,6 +94,29 @@ def local_delivery_links(reply: str) -> list[str]:
     return list(dict.fromkeys(bad))
 
 
+# A Stop is the final reply, not a progress message. Match an immediate start
+# only when the whole reply is acknowledgement, starting, or promised steps.
+START = re.compile(r"(?:^始め|(?:作業|作成|制作|設定|編集|修正|確認|調査)を始め|作り始め|取りかかり|取り掛かり)ま(?:す|した)$"
+                   r"|(?:これから|今から)[^。]*(?:作り|作成し|設定し|調べ|確認し|修正し|進め)ます$")
+ACK = re.compile(r"^(?:わかりました|分かりました|了解(?:です|しました)?|承知しました|はい|うん)[、,]?")
+DEFERRED = re.compile(r"明日|来週|から先|いただければ|もらえれば|たら|次第|(?:承認|許可|返事)(?:後|を待って)")
+
+
+def start_only(said: str) -> bool:
+    started = False
+    for sentence in re.split(r"[。！!\n]+", said):
+        sentence = ACK.sub("", sentence.strip(), count=1).strip()
+        if not sentence:
+            continue
+        if START.search(sentence):
+            if DEFERRED.search(sentence):
+                return False
+            started = True
+        elif not sentence.endswith("ます"):
+            return False
+    return started
+
+
 def check(reply: str, ask: str = "") -> list[dict]:
     if re.sub(r"[\s*`~]", "", reply or "") == QUIET:   # 「**WATCH_NO_CHANGE**」なども画面には出ない印
         return []
@@ -105,6 +128,8 @@ def check(reply: str, ask: str = "") -> list[dict]:
         hits.append({"id": "english", "name": "英語の返事", "at": body.strip()[:50].replace("\n", " "),
                      "fix": "日本語で書き直す。英語のエラー文は貼らず、何が止まったかと次にどうするかを日本語1文ずつで書く。"})
     said = re.sub(r"「[^「」\n]{0,80}」", "「」", body)   # 決まりの説明で言葉を「」に入れて引いた所は数えない（10/27 点検自身の報告で止まった）
+    if start_only(said):
+        hits.append({"id": "start-only", "name": "開始の返事だけで作業が終わる", "at": "", "fix": ""})
     for rid, name, rx, allow, fix in RULES:
         m = rx.search(said)
         if not m or (allow and re.search(allow, ask or "")) or (ask and m.group(0) in ask):
@@ -118,7 +143,7 @@ def _text_of(content) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "\n".join(b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") in ("text", "input_text"))
+        return "\n".join(b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") in ("text", "input_text", "output_text"))
     return ""
 
 
@@ -156,9 +181,9 @@ def last_text(path: str) -> str:
                     row = json.loads(line)
                 except ValueError:
                     continue
-                msg = row.get("message") if isinstance(row.get("message"), dict) else {}
-                if row.get("type") == "assistant" and isinstance(msg.get("content"), list):
-                    t = _text_of(msg["content"])
+                msg = row.get("message") or row.get("payload") or {}
+                if isinstance(msg, dict) and (row.get("type") == "assistant" or msg.get("role") == "assistant"):
+                    t = _text_of(msg.get("content"))
                     if t.strip() and KEEP_MARK not in t:
                         text = t
     except OSError:
@@ -168,6 +193,10 @@ def last_text(path: str) -> str:
 
 def reason(hits: list[dict]) -> str:
     """止めた理由。Codex の橋渡しは理由を600字で切るので、いちばん大事な「全部をもう一度書く」を先に置き、短く保つ。"""
+    if any(hit['id'] == 'start-only' for hit in hits):
+        sys.path.insert(0, str(ROOT))
+        from app.services import prompt_store
+        return prompt_store.text('chat/continue-work')
     head = ("[返事の点検] この後に書く文だけがみきさんに届く。下の所を直した返事の全部を、前置きなしでもう一度書いて終えること"
             "（WATCH_NO_CHANGE だけでよい場面なら、それだけ）。みきさんに言わない約束の書き方:\n")
     lines = "\n".join(f"- {h['name']}「{h['at'][:30]}」: {h['fix'][:60]}" for h in hits[:3])
@@ -204,7 +233,7 @@ def main() -> int:
     if not hits:
         return 0
     session = str(payload.get("session_id") or hashlib.sha1(path.encode()).hexdigest()[:16])
-    if not any(h["id"] == "local-delivery-link" for h in hits) and blocked_before(session, hashlib.sha1(message.encode("utf-8")).hexdigest()[:16]):
+    if not any(h["id"] in {"local-delivery-link", "start-only"} for h in hits) and blocked_before(session, hashlib.sha1(message.encode("utf-8")).hexdigest()[:16]):
         return 0
     sys.stdout.write(json.dumps({"decision": "block", "reason": reason(hits)}, ensure_ascii=False))
     sys.stdout.flush()
