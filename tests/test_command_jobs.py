@@ -35,6 +35,9 @@ async def test_project_lookup_failure_finishes_job_instead_of_leaving_it_queued(
     from app.services.project_service import ProjectService
     from app.services import followups
     monkeypatch.setattr(ProjectService,'get_project_by_room_id',AsyncMock(side_effect=RuntimeError('database unavailable')))
+    from app.services import chat_service, run_service   # no database in the test: the services are only constructed
+    for cls in (chat_service.ChatService, run_service.RunService, ProjectService):
+        monkeypatch.setattr(cls,'__init__',lambda self,*a,**k:None)
     statuses=[]
     monkeypatch.setattr(followups,'mark_status',lambda key,status:statuses.append(status))
     await runner.run({'id':job,'user_id':'owner','room_id':'target','spec':{'origin_room_id':'hub','origin_project_id':'p','task':'test'}})
