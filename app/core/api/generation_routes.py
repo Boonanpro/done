@@ -3,6 +3,10 @@ import asyncio
 from fastapi import APIRouter, Request, HTTPException
 from app.services import browser_lifecycle
 router = APIRouter()
+# A task named so is upkeep that runs for the life of the process (a loop, a pipe reader), not work. Counting
+# run_reconciler.loop as work kept every Core since 2026-11-24 from retiring: 51 old releases with their chat
+# sessions held ~14 GB on 2026-11-28 and swapped the Mac while the owner edited.
+UPKEEP = 'upkeep:'
 
 
 @router.get('/internal/generation/activity')
@@ -17,7 +21,7 @@ async def activity(request: Request):
     current = asyncio.current_task()
     busy = []
     for task in asyncio.all_tasks():
-        if task is current or task.done(): continue
+        if task is current or task.done() or task.get_name().startswith(UPKEEP): continue
         coro = task.get_coro()
         module = getattr(coro, '__module__', '')
         frame = getattr(coro, 'cr_frame', None)

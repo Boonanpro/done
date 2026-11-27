@@ -10,6 +10,9 @@ from app.services.job_process import lease
 # that have not created a run yet. The stable gateway is the sole public entrance.
 connections = {}
 
+# What an older release reports as busy although it is only its upkeep (named upkeep: from 2026-11-28).
+UPKEEP_LOOPS = {'app.services.run_reconciler.loop', 'app.services.voice_tools.Host._read'}
+
 
 def enter(port): connections[port] = connections.get(port, 0) + 1
 
@@ -26,20 +29,32 @@ def quiescent(release):
             request = urllib.request.Request(f"http://127.0.0.1:{release[kind]}/internal/generation/activity",
                                              headers={'x-dan-browser-token': token})
             with urllib.request.urlopen(request, timeout=2) as response:
-                if not json.load(response).get('idle'): return False
+                activity = json.load(response)
+            # Releases from 2026-11-27 name what they run but count their upkeep loops as work.
+            if not activity.get('idle') and not (activity.get('busy') and set(activity['busy']) <= UPKEEP_LOOPS): return False
         return True
     except Exception:
         return False
+
+
+def superseded(release, active_release):
+    created = (release.get('owner') or {}).get('created')
+    active_created = (active_release.get('owner') or {}).get('created')
+    return bool(created and active_created and created < active_created)
 
 
 def retire_once():
     import psutil
     with lease(G.ROOT / 'activation.lock') as locked:
         if not locked: return
-        active = (G.read('active') or {}).get('id')
+        active_release = G.read('active') or {}
+        active = active_release.get('id')
         for path in G.ROOT.glob('release-*.json'):
             release = G.read(path.stem)
-            if not release or not release.get('draining') or release['id'] == active or release.get('retired'): continue
+            if not release or release['id'] == active or release.get('retired'): continue
+            # A release prepared before the active one and never activated is a superseded candidate (a restart
+            # that prepared again). Nothing routes to it; it held a Core, a Sandbox and ports for good (2026-11-28).
+            if not release.get('draining') and not superseded(release, active_release): continue
             if any(connections.get(release[k], 0) for k in ('core', 'sandbox')) or any(G.refs(release['id'])): continue
             if G.living(release.get('owner')) and not quiescent(release): continue
             if G.living(release.get('owner')):
