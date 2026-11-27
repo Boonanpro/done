@@ -109,7 +109,7 @@ def start_only(said: str) -> bool:
         if not sentence:
             continue
         if START.search(sentence):
-            if DEFERRED.search(sentence):
+            if sentence.endswith("ます") and DEFERRED.search(sentence):
                 return False
             started = True
         elif not sentence.endswith("ます"):

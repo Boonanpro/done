@@ -98,6 +98,7 @@ def test_start_only_final_sends_turn_back_to_work(tmp_path):
     for i, reply in enumerate([
         'わかりました。ご希望の形で作り始めました。設定が終わったら試します。そのあと、PDFにしてお見せします。',
         'これから資料を作ります。',
+        '依頼が来たら写真を返す形で作り始めました。設定が終わったら実機で試します。',
     ]):
         result = _run({'session_id': f'start-{i}', 'hook_event_name': 'Stop',
                        'last_assistant_message': reply, '_dir': tmp_path})
