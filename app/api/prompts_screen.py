@@ -122,6 +122,7 @@ async def revert_prompt(body: RevertBody, current_user: TokenData = Depends(get_
 
 # ---- 指示文の画面の会話（2026-11-21 本人「指示文の見直しはお前と一緒にやった方が良いけど、ページにチャットが無いからやりにくい」）----
 # 開発室のボードの話し合いと同じく、一覧に出さない部屋を1つ作り、/prompts と開発室の「指示文」の両方からその1つの部屋で話す。
+# 開発室の部屋そのもの（DEV_LEAD_ROOM）とは別にする（11/25〜11/27 は本人だけ開発室の部屋で話し、同じ発言が2か所に出ていた）。
 # 部屋の説明（ダンが毎回読む前置き）に、この画面の発言の読み方と直し方を書く。どの文・どの行を開いているかは、
 # 画面が発言ごとに <dan-context> で添える（components/prompts/prompts-chat.tsx）。
 DEV_LEAD_ROOM = '7b5184bd-21a9-4b18-a6c6-da4c0ce1243f'   # ダン開発室（artifacts/dev-lead/model.ts の ROOM_ID）
@@ -163,7 +164,12 @@ _chat_lock = asyncio.Lock()
 async def development_state(user=Depends(circuit_owner)):
     from app.services import development_board, voice_calls
     changes = await asyncio.to_thread(development_board.recent)
-    call = await asyncio.to_thread(voice_calls.active, DEV_LEAD_ROOM)
+    # 通話は指示文の画面の会話の部屋でかける（2026-11-27 から開発室の部屋とは別）。前の通話が開発室の部屋で続いていればそれも見る
+    own = ((await asyncio.to_thread(_chat_read)).get(user) or {}).get('room_id')   # user は owner() が返す本人の user_id
+    call = None
+    for room in [r for r in (own, DEV_LEAD_ROOM) if r]:
+        call = await asyncio.to_thread(voice_calls.active, room)
+        if call: break
     return {'changes': changes, 'session': call['session_id'] if call else ''}
 
 
@@ -172,14 +178,10 @@ async def prompts_chat_room(current_user: TokenData = Depends(get_current_user))
     """The one room for talking about the instructions with Dan. Made on first use (hidden from the room list)."""
     from app.services.project_service import ProjectService
     service = ProjectService()
+    # 本人も、開発室の部屋（DEV_LEAD_ROOM）とは別のこの画面の部屋で話す（2026-11-27 本人「指示文ページとダン開発室の部屋の
+    # チャットがリンクするのをやめて。重複してて意味無い」）。development は本人だけの道具（通話・変更と判断の表示）を出す印。
     owner_id = await asyncio.to_thread(resolve_owner_user_id)
-    if not owner_id:
-        raise HTTPException(503, '開発室の持ち主を確認できませんでした。')
-    if current_user.user_id == owner_id:
-        project = await service.get_project_by_room_id(DEV_LEAD_ROOM)
-        if not project or project.get('user_id') != current_user.user_id:
-            raise HTTPException(404, 'ダン開発室を開けませんでした。')
-        return {'project_id': project['id'], 'room_id': DEV_LEAD_ROOM, 'title': project['title'], 'development': True}
+    development = bool(owner_id) and current_user.user_id == owner_id
     async with _chat_lock:
         saved = (await asyncio.to_thread(_chat_read)).get(current_user.user_id) or {}
         if saved.get('project_id'):
@@ -187,7 +189,7 @@ async def prompts_chat_room(current_user: TokenData = Depends(get_current_user))
             if project and project.get('room_id'):
                 if (project.get('description') or '') != CHAT_DESCRIPTION:   # how Dan works in this room changed
                     await service.update_project(project['id'], current_user.user_id, description=CHAT_DESCRIPTION)
-                return {'project_id': project['id'], 'room_id': project['room_id'], 'title': CHAT_TITLE}
+                return {'project_id': project['id'], 'room_id': project['room_id'], 'title': CHAT_TITLE, 'development': development}
         project = await service.create_project(user_id=current_user.user_id, title=CHAT_TITLE, description=CHAT_DESCRIPTION,
                                                origin_room_id=DEV_LEAD_ROOM, metadata={'hidden': True})
         if not project.get('room_id'):
@@ -195,7 +197,7 @@ async def prompts_chat_room(current_user: TokenData = Depends(get_current_user))
         data = await asyncio.to_thread(_chat_read)
         data[current_user.user_id] = {'project_id': project['id'], 'room_id': project['room_id'], 'created': project.get('created_at')}
         await asyncio.to_thread(_chat_write, data)
-        return {'project_id': project['id'], 'room_id': project['room_id'], 'title': CHAT_TITLE}
+        return {'project_id': project['id'], 'room_id': project['room_id'], 'title': CHAT_TITLE, 'development': development}
 
 
 # ---- 構成図のボードの並べ方（2026-11-24 本人「要素や札のサイズ・位置、線の伸び方も調整したい」）----

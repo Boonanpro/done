@@ -50,15 +50,17 @@ def test_sha_matches_item(monkeypatch):
     assert prompts_screen._sha(pid)['sha'] == prompts_screen._item(pid)['sha']
 
 
-def test_development_page_uses_the_existing_owner_room(monkeypatch):
-    import app.services.project_service as ps
+def test_owner_talks_in_own_room_not_the_dev_lead_room(tmp_path, monkeypatch):
+    """2026-11-27 本人「指示文ページとダン開発室の部屋のチャットがリンクするのをやめて」: 本人も開発室の部屋ではなく、この画面の部屋で話す。"""
+    monkeypatch.setattr(prompt_store, 'root', lambda: tmp_path)
     monkeypatch.setattr(prompts_screen, 'resolve_owner_user_id', lambda: 'owner')
+    import app.services.project_service as ps
+    FakeService.made, FakeService.alive = [], {'old'}
+    monkeypatch.setattr(ps, 'ProjectService', FakeService)
+    prompts_screen._chat_write({'owner': {'project_id': 'old', 'room_id': 'room-old'}})   # 前に使っていた部屋（履歴が残っている）
 
-    class Existing:
-        async def get_project_by_room_id(self, room):
-            assert room == '7b5184bd-21a9-4b18-a6c6-da4c0ce1243f'
-            return {'id': 'project', 'title': 'ダン開発室', 'user_id': 'owner'}
-
-    monkeypatch.setattr(ps, 'ProjectService', Existing)
-    result = asyncio.run(prompts_screen.prompts_chat_room(types.SimpleNamespace(user_id='owner')))
-    assert result['room_id'] == prompts_screen.DEV_LEAD_ROOM and result['development']
+    owner = asyncio.run(prompts_screen.prompts_chat_room(types.SimpleNamespace(user_id='owner')))
+    assert owner['room_id'] == 'room-old' != prompts_screen.DEV_LEAD_ROOM
+    assert owner['development'] is True
+    other = asyncio.run(prompts_screen.prompts_chat_room(types.SimpleNamespace(user_id='u2')))
+    assert other['room_id'] != prompts_screen.DEV_LEAD_ROOM and other['development'] is False
