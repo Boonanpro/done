@@ -16,7 +16,7 @@ import { AudioSourceManager, STRETCH_BLOCK_SEC, audioOnlyUrl, webAudioSupported 
 import { localMedia, localMediaEnabled, localPlaySrc, type LocalMediaProgress } from './local-media';
 import { setMediaElementSrc, startMediaRoute } from './media-route';
 import { feelDrawn, feelFrozen, feelSeek, feelStall, feelStart } from './editor-feel';
-import { isOneForm, motionAt, pictureRect, visibleRect, cropOf, type Motion } from './placement';
+import { isOneForm, motionAt, pictureRect, visibleRect, cropOf, setKeyAt, sortedKeys, type Motion } from './placement';
 import { drawRegionEffect, isRegionEffect } from './region-effect';
 
 // Live timeline compositor. Draws the current edit (base video + overlay/PiP layers +
@@ -47,6 +47,8 @@ type Props = {
   className?: string;
   // Direct-manipulation of a clip's position/transform in the preview.
   selectedClipId?: string | null;
+  selectedClipIds?: string[];
+  onGroupMove?: (patches: Map<string, Partial<SequenceClip>>) => void;
   onPositionChange?: (clipId: string, position: { x: number; y: number; width: number; height: number }) => void;
   onTransformChange?: (clipId: string, transform: { scale: number; x: number; y: number }) => void;
   /** プレビューの上で押した物（テロップ・重ねた絵・映像）を選ぶ。何も無い所なら null */
@@ -272,7 +274,7 @@ const BLEND_OPS: Record<string, GlobalCompositeOperation> = {
 // プレビューを描く画素の倍率の上限: 長い辺 1920px まで（書き出しの 1080p と同じ細かさ）
 const MAX_CANVAS_LONG_SIDE = 1920;
 
-export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange, onPick, onPoint, onCaptionMove, rate: rateProp = 1, skimFrom = 5 }: Props) {
+export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, selectedClipIds, onGroupMove, onPositionChange, onTransformChange, onPick, onPoint, onCaptionMove, rate: rateProp = 1, skimFrom = 5 }: Props) {
   const rate = Number.isFinite(rateProp) && rateProp > 0 ? rateProp : 1;
   const rateRef = useRef(rate);
   rateRef.current = rate;
@@ -1747,7 +1749,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // Selection box for the active selected clip. PiP/overlay uses its `position` window; a base
   // clip uses its SOURCE rectangle (locked to the footage aspect via `transform`) so shrinking
   // it reveals the whole source — no 9:16 crop. The box may overflow the frame.
-  const selectedBox = (() => {
+  const selectionBoxFor = (selectedClipId: string | null | undefined) => {
     if (!selectedClipId) return null;
     const vc = visualClips.find((x) => String(x.clip.id) === String(selectedClipId));
     if (!vc) return null;
@@ -1781,7 +1783,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       vc, kind: 'transform' as const, tf,
       rect: { x: destX / w, y: destY / h, width: destW / w, height: destH / h },
     };
-  })();
+  };
+  const selectedBox = selectionBoxFor(selectedClipId);
 
   const startBoxDrag = useCallback(
     (e: React.PointerEvent, mode: 'move' | 'nw' | 'ne' | 'sw' | 'se') => {
@@ -2006,6 +2009,74 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   useEffect(() => { pickAtRef.current = pickAt; }, [pickAt]);
   const editingCaption = useContext(CaptionEditContext);
   const box = selectedBox?.rect;
+  // Measure captions in the same coordinate system as the letterboxed picture.
+  const groupIds = selectedClipIds && selectedClipIds.length > 1 ? selectedClipIds : [];
+  const [captionRects, setCaptionRects] = useState<Map<string, DOMRect>>(new Map());
+  useLayoutEffect(() => {
+    if (!selectedClipIds || selectedClipIds.length < 2 || !contentRect || playing) return;
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const elements = Array.from(wrap.querySelectorAll<HTMLElement>('[data-caption-id]'))
+      .filter(el => selectedClipIds.includes(el.dataset.captionId || ''));
+    const measure = () => {
+      const wb = wrap.getBoundingClientRect();
+      setCaptionRects(new Map(elements.map(el => {
+        const eb = el.getBoundingClientRect();
+        return [el.dataset.captionId!, new DOMRect(eb.left - wb.left, eb.top - wb.top, eb.width, eb.height)];
+      })));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    elements.forEach(el => observer.observe(el));
+    return () => observer.disconnect();
+  }, [sequence, selectedClipIds, currentTime, contentRect, playing]);
+  const members = groupIds.flatMap(id => {
+    if (!contentRect || playing) return [];
+    const caption = renderCaptions.find(c => c.id === id && c.start <= currentTime && c.end > currentTime);
+    const captionRect = captionRects.get(id);
+    if (caption && captionRect) {
+      const x = Number(caption.design?.x ?? 0), y = Number(caption.design?.y ?? 0.08);
+      return [{ id, rect: captionRect, captionY: y, patch: (dx: number, dy: number): Partial<SequenceClip> =>
+        ({ style: { ...caption.design, x: x + dx, y: y - dy } }) }];
+    }
+    const pic = selectionBoxFor(id);
+    if (!pic) return [];
+    const { x, y, width, height } = pic.rect;
+    const rect = new DOMRect(contentRect.left + x * contentRect.width, contentRect.top + y * contentRect.height,
+      width * contentRect.width, height * contentRect.height);
+    return [{ id, rect, captionY: null as number | null, patch: (dx: number, dy: number): Partial<SequenceClip> => {
+      if (pic.kind === 'position') return { position: { ...pic.rect, x: x + dx, y: y + dy } };
+      const transform = { ...pic.tf, x: pic.tf.x + dx, y: pic.tf.y + dy };
+      const keys = sortedKeys(pic.vc.clip);
+      return keys.length ? { motion_keys: setKeyAt(keys, currentTime - pic.vc.clip.timeline_start,
+        transform, Number(sequence?.frame_rate) || 30) } : { transform };
+    } }];
+  });
+  function startGroupMove(e: React.PointerEvent) {
+    if (!contentRect || !onGroupMove || e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const start = { x: e.clientX, y: e.clientY };
+    const ys = members.flatMap(m => m.captionY == null ? [] : [m.captionY]);
+    const minY = Math.max(-Infinity, ...ys.map(y => y - .92));
+    const maxY = Math.min(Infinity, ...ys);
+    const { width, height } = contentRect;
+    const apply = onGroupMove;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const target = e.currentTarget;
+    const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== e.pointerId) return;
+      const dx = (ev.clientX - start.x) / width;
+      const dy = Math.min(maxY, Math.max(minY, (ev.clientY - start.y) / height));
+      apply(new Map(members.map(m => [m.id, m.patch(dx, dy)])));
+    };
+    const finish = () => {
+      target.removeEventListener('pointermove', move as EventListener);
+      target.removeEventListener('lostpointercapture', finish);
+    };
+    target.addEventListener('pointermove', move as EventListener);
+    target.addEventListener('lostpointercapture', finish);
+  }
   const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
 
   return (
@@ -2082,7 +2153,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           </div>
         ) : null;
       })}
-      {capBox && !editingCaption ? (
+      {members.length > 1 && !editingCaption && members.map(m => (
+        <div key={m.id} data-preview-group-member={m.id} className="absolute cursor-move border-2 border-sky-400"
+          style={{ left: m.rect.x, top: m.rect.y, width: m.rect.width, height: m.rect.height, touchAction: 'none' }}
+          onPointerDown={startGroupMove} />
+      ))}
+      {members.length < 2 && capBox && !editingCaption ? (
         <div
           data-caption-select-box
           className="absolute cursor-move rounded-sm border-2 border-sky-400 bg-sky-400/10"
@@ -2095,7 +2171,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           title="ダブルクリックで文字を編集、ドラッグで位置を移動"
         />
       ) : null}
-      {box && !capBox ? (
+      {members.length < 2 && box && !capBox ? (
         <div
           className="absolute cursor-move border-2 border-sky-400"
           style={{

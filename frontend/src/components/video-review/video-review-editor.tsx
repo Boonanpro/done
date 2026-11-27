@@ -352,6 +352,7 @@ type TimelineLane = {
 };
 
 export type EditSequence = {
+  frame_rate?: number;
   version?: number;
   format?: string;
   duration?: number;
@@ -5884,6 +5885,9 @@ export function VideoReviewEditor({
             onEnded={handlePreviewEnded}
             className="h-full w-full"
             selectedClipId={selectedSequenceClipId}
+            selectedClipIds={selectedSequenceClipIds}
+            onGroupMove={patches => updateSequenceClips(new Set([...patches.keys()].filter(id => !isLockedClip(id))),
+              clip => patches.get(String(clip.id)) || {})}
             onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
             onTransformChange={(clipId, transform) => {
               // 動き（キーフレーム）がある時は、再生位置のキーを動かす（無ければ足す）
