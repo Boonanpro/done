@@ -212,16 +212,18 @@ def turn_prompt(row):
                           'next_step':'未完了なら次の作業・再開条件'}, ensure_ascii=False))
 
 
-async def room_busy(room_id):
+async def room_busy(room_id) -> bool | None:
+    """None means we could not establish who owns the room, so no work may start."""
     from app.services.followup_poller import _room_busy
     if _room_busy(room_id):
         return True
     # Chat generations have separate process-local session registries.
     from app.services.run_service import RunService, ACTIVE_RUN_STATES
     try:
+        uuid.UUID(room_id)  # A malformed legacy record cannot name a chat room.
         run = await RunService().get_current_run_for_room(room_id, chat_only=True)
     except Exception:
-        return True
+        return None
     return bool(run and run.get('state') in ACTIVE_RUN_STATES)
 
 
@@ -230,32 +232,25 @@ async def room_busy(room_id):
 RECEIVER_SOURCES = {'inbound', 'followup'}
 
 
-async def _to_receiver(key, room_id, user_id):
-    from app.services import room_receiver
-    row = get(key)
-    if not row or row['token'] or row['status'] != 'ready':
-        return False
-    job = await room_receiver.hand_over(room_id, user_id, row['prompt'])
-    checkpoint(key, room_id, status='done',
-               evidence=f'本人の作業中に届いたので、部屋の受け口（並行作業 {job}）に渡した。結果は受け口が部屋に出す。')
-    return True
-
-
 async def execute(*, key, room_id, user_id, prompt, source='event', project_id=None):
     from app.agent.cli_runner import process_message_cli
     from app.services.followup_poller import _resolve_project_id
     from app.services import room_receiver
     enqueue(key=key, room_id=room_id, user_id=user_id, source=source, prompt=prompt)
     current = await room_receiver.lane(room_id)
-    if current == 'receiver' and source in RECEIVER_SOURCES:
-        return '', await _to_receiver(key, room_id, user_id)
-    if current != 'turn':
+    use_receiver = current == 'receiver' and source in RECEIVER_SOURCES
+    if current != 'turn' and not use_receiver:
         return '', False
     row = claim(key)
     if not row:
         return '', False
     text, landed, failed, cancelled = '', False, False, False
     try:
+        if use_receiver:
+            job = await room_receiver.hand_over(room_id, user_id, row['prompt'])
+            checkpoint(key, room_id, token=row['token'], status='done',
+                       evidence=f'本人の作業中に届いたので、並行作業 {job} に渡した。')
+            return '', True
         with room_receiver.background(room_id):
             async for event in process_message_cli(room_id=room_id, user_id=user_id,
                     content=turn_prompt(row), project_id=project_id or _resolve_project_id(room_id),
@@ -267,6 +262,7 @@ async def execute(*, key, room_id, user_id, prompt, source='event', project_id=N
                 elif event.get('type') == 'cancelled':
                     cancelled = True
     except asyncio.CancelledError:
+        failed = use_receiver  # Interrupted handover may already have reached the receiver.
         # Process shutdown is different from an explicit owner stop event.
         raise
     except Exception:
@@ -278,20 +274,28 @@ async def execute(*, key, room_id, user_id, prompt, source='event', project_id=N
 
 
 async def dispatch():
+    from app.services import room_receiver
     from app.services.restart_signal import draining
     if draining():
         return
     recover()
     with connection() as db:
         db.execute("UPDATE work SET status='ready' WHERE status='waiting' AND token IS NULL AND wake_at>0 AND wake_at<=?", (time.time(),))
-        rows = [dict(r) for r in db.execute("SELECT * FROM work WHERE status='ready' AND token IS NULL AND wake_at<=? ORDER BY updated LIMIT 20", (time.time(),))]
+        # Limit running turns, not candidates: even a whole page can belong to rooms that must wait.
+        rows = db.execute("""SELECT id, room_id, user_id, source, prompt FROM work
+            WHERE status='ready' AND token IS NULL AND wake_at<=?
+            AND room_id NOT IN (SELECT room_id FROM work WHERE token IS NOT NULL)
+            ORDER BY updated, id""", (time.time(),)).fetchall()
+    lanes = {}
     for row in rows:
         if len([t for t in _tasks.values() if not t.done()]) >= 2:
             break
         if row['id'] in _tasks:
             continue
-        from app.services import room_receiver
-        current = await room_receiver.lane(row['room_id'])
+        room = row['room_id']
+        if room not in lanes:
+            lanes[room] = await room_receiver.lane(room)
+        current = lanes[room]
         if current == 'wait' or (current == 'receiver' and row['source'] not in RECEIVER_SOURCES):
             continue
         task = asyncio.create_task(execute(key=row['id'], room_id=row['room_id'], user_id=row['user_id'],
