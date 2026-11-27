@@ -155,18 +155,10 @@ def test_calendar_and_history_require_equal_effective_arguments():
     assert not p.same_args(e, 'search_records', {'query':'あれ'}, e.context + [{'role':'assistant','text':'はい'}])
 
 
-def test_only_literal_owner_evidence_can_make_a_decision():
-    turns = [{'role':'user','text':'じゃあメモリは32GBでお願い'}, {'role':'assistant','text':'予算は20万円でどう？'}]
-    assert S.decision_lines([
-        {'text':'メモリ32GBにする。','evidence':'メモリは32GBでお願い'},
-        {'text':'予算20万円。','evidence':'予算は20万円でどう？'},
-        {'text':'購入済み。','evidence':'買った'},
-    ], turns) == ['メモリ32GBにする。']
-
-
 @pytest.mark.asyncio
-async def test_after_call_reads_once_and_returns_only_decisions_without_start_notices(monkeypatch):
-    started, steps = [], []
+async def test_after_call_reads_once_and_posts_nothing_when_nothing_is_left(monkeypatch):
+    """The owner (2026-11-27) does not want the call's decisions posted to the chat after a call."""
+    started, steps, posted = [], [], []
     monkeypatch.setattr('app.services.command_job_state.list_owned', lambda *a: [])
     monkeypatch.setattr('app.services.inbox._env', lambda: None)
     class Model:
@@ -176,12 +168,11 @@ async def test_after_call_reads_once_and_returns_only_decisions_without_start_no
     monkeypatch.setattr('app.services.api_job_providers.make', lambda *a: Model())
     async def execute(*a): started.append(a)
     monkeypatch.setattr('app.services.command_center.execute', execute)
-    out = []
-    assert await S.after_call('u','r',[{'role':'user','text':'32GBでお願い'}], 'now', decisions_out=out) == []
-    assert out == ['メモリ32GBにする。'] and len(steps) == 1 and started == []
-    out.clear()
-    await S.after_call('u','r',[{'role':'user','text':'32GBでお願い'}], 'now', decisions_out=out, complete=False)
-    assert out == []
+    async def send_message(self, *a, **k): posted.append(a)
+    monkeypatch.setattr('app.services.chat_service.ChatService.send_message', send_message)
+    assert await S.after_call('u','r',[{'role':'user','text':'32GBでお願い'}], 'now') == []
+    assert len(steps) == 1 and started == [] and posted == []
+    assert 'decisions' not in S.LEFT_OVER
 
 
 def test_summary_retains_early_decisions_after_recent_context_rotates():
@@ -217,7 +208,7 @@ async def test_work_guess_does_not_block_later_status_read(reads, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_call_end_writes_one_decision_message_under_log_and_keeps_stage(monkeypatch):
+async def test_call_end_writes_only_the_call_log_and_keeps_stage(monkeypatch):
     from app.services import voice_stage, voice_calls
     from app.services.chat_service import ChatService
     sent = []
@@ -238,8 +229,7 @@ async def test_call_end_writes_one_decision_message_under_log_and_keeps_stage(mo
         def summary(self): return '図の記録'
     monkeypatch.setattr(voice_stage, 'Stage', Stage)
     monkeypatch.setattr(voice_stage, 'enabled', lambda: True)
-    async def after(*a, decisions_out, **kw):
-        decisions_out.append('メモリ32GBにする。')
+    async def after(*a, **kw):
         return []
     monkeypatch.setattr(S, 'after_call', after)
     events=iter([{'type':'session.input_transcript.delta','delta':'32GBでお願い'}, {'type':'session.closed'}])
@@ -251,10 +241,9 @@ async def test_call_end_writes_one_decision_message_under_log_and_keeps_stage(mo
     import websockets
     monkeypatch.setattr(websockets,'connect',lambda *a,**kw:Socket())
     await S._run('test','u','r','fake',True)
-    assert len(sent)==2
+    # the owner (2026-11-27) does not want the call's decisions posted after a call: only the call's line
+    assert len(sent)==1
     assert sent[0][2].startswith('📞 ダンと通話')
-    assert sent[1][2]=='メモリ32GBにする。'
-    assert datetime.fromisoformat(sent[1][3]['created_at'])-datetime.fromisoformat(sent[0][3]['created_at'])==timedelta(seconds=1)
 
 
 @pytest.mark.asyncio
@@ -285,9 +274,9 @@ async def test_merged_stage_survives_call_end_and_decision_extraction_failure(mo
         sent.append((content,kwargs)); return {'id':str(len(sent))}
     monkeypatch.setattr(ChatService, '__init__', lambda self: None)
     monkeypatch.setattr(ChatService, 'send_message', write)
-    async def after(*a, decisions_out, **kw):
+    async def after(*a, **kw):
         if summary_fails: raise RuntimeError('fixture model unavailable')
-        decisions_out.append('メモリ32GBにする。'); return []
+        return []
     monkeypatch.setattr(S, 'after_call', after)
     class Socket:
         count = 0
@@ -304,12 +293,9 @@ async def test_merged_stage_survives_call_end_and_decision_extraction_failure(mo
             return json.dumps({'type':'session.closed'})
     monkeypatch.setattr(websockets, 'connect', lambda *a, **kw: Socket())
     await S._run('integration-call','test-user','integration-room','fixture',True)
-    assert len(sent) == (1 if summary_fails else 2)
+    assert len(sent) == 1
     assert sent[0][0].startswith('📞 ダンと通話')
     assert all('```openui-lang' not in text and '通話中に出した画面' not in text for text, _ in sent)
-    if not summary_fails:
-        assert sent[1][0] == 'メモリ32GBにする。'
-        assert datetime.fromisoformat(sent[1][1]['created_at']) - datetime.fromisoformat(sent[0][1]['created_at']) == timedelta(seconds=1)
     state = V.read_state('integration-room')
     assert not state['active'] and state['version'] == 8 and V.for_room('integration-room') is None
 
@@ -340,7 +326,7 @@ async def test_long_phrase_does_not_repeat_expired_speculative_read(reads):
 
 
 @pytest.mark.asyncio
-async def test_slow_handoff_cannot_hold_summary_or_drop_later_requests(monkeypatch,tmp_path):
+async def test_slow_handoff_cannot_drop_later_requests(monkeypatch,tmp_path):
     from app.services import voice_stage as V
     from app.services.chat_service import ChatService
     from datetime import timezone
@@ -381,11 +367,11 @@ async def test_slow_handoff_cannot_hold_summary_or_drop_later_requests(monkeypat
     # Model delay and enqueue delay are independent; neither is wrapped in 30s wait_for.
     await asyncio.sleep(.02);assert not saved and not tasks
     model_release.set();await entered.wait()
-    assert len(saved)==1 and 'メモリ32GB' in saved[0][0][2] and '```openui-lang' not in saved[0][0][2]
     assert len(tasks)==1
     release.set();await finish
-    # everything left by one call goes as ONE piece of work (2026-10-27: three jobs queued on the phone)
-    assert len(tasks)==1 and len(saved)==1
+    # everything left by one call goes as ONE piece of work (2026-10-27: three jobs queued on the phone);
+    # nothing is posted to the chat after the call (2026-11-27)
+    assert len(tasks)==1 and not saved
     assert all(f'{i+1}. 資料{i}を作る' in tasks[0]['task'] for i in range(5))
     paths=list((tmp_path/'handoff').rglob('*.json'));assert len(paths)==1
     data=json.loads(paths[0].read_text());assert len(data['requests'])==5 and len(data['receipts'])==1
