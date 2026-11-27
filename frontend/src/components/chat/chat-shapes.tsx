@@ -56,8 +56,8 @@ import {
 import {
   ANSWER_VALUE_MAX, BadgeProps, ButtonProps, CardProps, ChartProps, ChoiceProps, ColumnProps, CompareProps, DividerProps, FactsProps,
   FlowProps, HeadingProps, ImageProps, InputProps, RowProps, StatProps, StepsProps, TextProps, checkShapeProgram, choiceOptions, flowEdges,
-  BeforeAfterProps, FramesProps, ItemProps, MapProps, QuoteProps, SourcesProps, POINT_TITLE, timeSeconds,
-  type BeforeAfterInput, type FramesInput, type ItemInput, type MapInput, type QuoteInput, type SourcesInput,
+  BeforeAfterProps, FramesProps, ItemProps, MapPlanProps, MapProps, QuoteProps, SourcesProps, POINT_TITLE, timeSeconds,
+  type MapPlanInput, type BeforeAfterInput, type FramesInput, type ItemInput, type MapInput, type QuoteInput, type SourcesInput,
   type BadgeInput, type ButtonInput, type CardInput, type ChartInput, type ChoiceInput, type ColumnInput, type CompareInput,
   type FactsInput, type FlowInput, type HeadingInput, type ImageInput, type InputInput, type RowInput, type StatInput, type StepsInput, type TextInput,
 } from '@/lib/chat-shapes/schema';
@@ -71,6 +71,7 @@ import {
   canAnswer, newSendId, useAnswerSend, type AnswerEnv, type SendState,
 } from '@/lib/chat-shapes/use-answer-send';
 import { mapView, pinLabels } from '@/lib/chat-shapes/map-geometry';
+import { MapPlanView } from '@/components/chat/map-plan';
 import { readLook, safeImageUrl, safeLinkUrl, type Look } from '@/lib/chat-shapes/plain';
 import { openSignedIn } from '@/lib/signed-in-open';
 import { CHART_HEIGHT, chartGeometry, type ChartGeometry } from '@/lib/chat-shapes/chart-geometry';
@@ -537,7 +538,7 @@ const ChartView: ComponentRenderer<ChartInput> = ({ props }) => {
 /** 子の部品の名前（lang-core の要素なら typeName） */
 const childName = (c: unknown): string => (c && typeof c === 'object' && typeof (c as { typeName?: unknown }).typeName === 'string' ? (c as { typeName: string }).typeName : '');
 /** 横並びの中で幅を分け合う部品（カード・縦並び・表・グラフ）。ほかの部品（数字・札・ボタン）は中身の幅のまま */
-const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow', 'Map', 'Item', 'Quote', 'Sources', 'Frames', 'BeforeAfter']);
+const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow', 'Map', 'Item', 'Quote', 'Sources', 'Frames', 'BeforeAfter', 'MapPlan']);
 
 function ChildList({ items, row = false }: { items: unknown; row?: boolean }) {
   const renderNode = useRenderNode();
@@ -1091,6 +1092,11 @@ const BeforeAfterView: ComponentRenderer<BeforeAfterInput> = ({ props }) => {
   );
 };
 
+const MapPlanPart: ComponentRenderer<MapPlanInput> = ({ props }) => {
+  const box = useBox();
+  return <MapPlanView plan={props} box={box} />;
+};
+
 // --- 部品一覧（OpenUI の library） ----------------------------------------------------------
 
 export const shapeLibrary = createLibrary({
@@ -1118,6 +1124,7 @@ export const shapeLibrary = createLibrary({
     defineComponent({ name: 'Sources', description: '出どころ', props: SourcesProps, component: SourcesView }),
     defineComponent({ name: 'Frames', description: '動画のコマ', props: FramesProps, component: FramesView }),
     defineComponent({ name: 'BeforeAfter', description: '前と後', props: BeforeAfterProps, component: BeforeAfterView }),
+    defineComponent({ name: 'MapPlan', description: '指示文の地図の直す所', props: MapPlanProps, component: MapPlanPart }),
   ],
 });
 

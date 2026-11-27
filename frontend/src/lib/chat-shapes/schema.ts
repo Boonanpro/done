@@ -347,6 +347,27 @@ export const BeforeAfterProps = z
   })
   .refine((v) => nonEmpty(v.before) && nonEmpty(v.after), { message: '前か後の画像が空' });
 
+/**
+ * ダン自身の直す所を、指示文の画面の地図（components/prompts/architecture.ts の箱）に結びつけて見せる（2026-11-27 本人
+ * 「どこをどう変えようと思っているのかを指示文のマップと紐づけてない。何をどう変えてその結果どうなる見込みかを直感的に」）。
+ * 画面は小さな地図に番号を付け、直す所ごとに「今 → 直した後 → 見込み」を並べる。押すと指示文の地図のその箱が開く。
+ */
+export const MAP_PLAN_MAX = 8;
+export const MapPlanProps = z
+  .object({
+    changes: z.array(z.object({
+      node: z.string().regex(/^[A-Za-z0-9-]{1,40}$/).describe('指示文の地図の箱の id（下の一覧）'),
+      title: z.string().max(40).describe('何を直すか（短く）'),
+      now: z.string().max(120).describe('今どうなっているか（みきさんが困っていること）'),
+      after: z.string().max(120).describe('直した後どうなるか'),
+      effect: z.string().max(80).nullish().describe('見込み: みきさんが感じる違い（数字があれば数字）'),
+    })).describe(`直す所。直す順に1〜${MAP_PLAN_MAX}個`),
+    title: z.string().max(60).nullish().describe('題'),
+    goal: z.string().max(120).nullish().describe('全部直すとどうなるか（一行）'),
+  })
+  .refine((v) => v.changes.length >= 1 && v.changes.length <= MAP_PLAN_MAX && v.changes.every((c) => nonEmpty(c.title) && nonEmpty(c.now) && nonEmpty(c.after)),
+    { message: `直す所は1〜${MAP_PLAN_MAX}個、何を・今・直した後が要る` });
+
 /** 時刻の文字（9:41・1:02:03・581.9）を秒に。読めなければ null */
 export function timeSeconds(t: unknown): number | null {
   if (typeof t !== 'string') return null;
@@ -365,6 +386,7 @@ export type QuoteInput = z.infer<typeof QuoteProps>;
 export type SourcesInput = z.infer<typeof SourcesProps>;
 export type FramesInput = z.infer<typeof FramesProps>;
 export type BeforeAfterInput = z.infer<typeof BeforeAfterProps>;
+export type MapPlanInput = z.infer<typeof MapPlanProps>;
 
 export type ChoiceInput = z.infer<typeof ChoiceProps>;
 export type InputInput = z.infer<typeof InputProps>;
@@ -427,6 +449,7 @@ export const SHAPE_SPECS = [
   { name: 'Sources', description: '出どころのページの一覧。調べて答えた文の最後に付ける', props: SourcesProps },
   { name: 'Frames', description: '動画のコマの並び（時刻つき）。動画のどこの話かを見せる時。押すとダンに届く', props: FramesProps },
   { name: 'BeforeAfter', description: '前と後の画像を並べる。直した所・変わった所を見せる時', props: BeforeAfterProps },
+  { name: 'MapPlan', description: 'ダン自身（指示文・仕組み）の直す所を、指示文の地図の箱に番号で結んで見せる。直す順に「今 → 直した後 → 見込み」。直す案・直した報告の時', props: MapPlanProps },
 ] as const;
 
 export const SHAPE_NAMES: readonly string[] = SHAPE_SPECS.map((s) => s.name);
