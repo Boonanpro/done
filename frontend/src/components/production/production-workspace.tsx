@@ -882,6 +882,8 @@ export function ProductionWorkspace({
                             kind: asset.kind,
                             duration: asset.metadata?.duration,
                             label: asset.filename || asset.original_uri,
+                            // 会話欄に落とした時の札の小さい絵
+                            thumb: asset.kind === 'audio' ? null : (asset.thumbnail_url || assetThumbBase(asset)),
                           };
                           event.dataTransfer.setData('application/x-dan-asset', JSON.stringify(payload));
                           event.dataTransfer.effectAllowed = 'copy';
