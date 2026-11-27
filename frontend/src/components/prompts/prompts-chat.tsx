@@ -27,6 +27,15 @@ import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { promptsChat, type ChatMessage, type ChatStep } from '@/lib/prompts-api';
 import { cn } from '@/lib/utils';
 
+/** チャットの部品（表・カード・直す案など）もダン本体の暗い色の決まりで描くので、この明るい欄では色の変数を明るい側に置き換える
+ * （置き換える前は、暗いカードに黒い字で部品が読めなかった。2026-11-27） */
+const LIGHT_SHAPES = {
+  '--background': '#fafaf9', '--foreground': '#1c1917', '--card': '#ffffff', '--card-foreground': '#1c1917',
+  '--muted': '#f5f5f4', '--muted-foreground': '#78716c', '--border': '#e7e5e4', '--input': '#e7e5e4',
+  '--primary': '#7c3aed', '--primary-foreground': '#ffffff', '--secondary': '#f5f5f4', '--secondary-foreground': '#1c1917',
+  '--accent': '#f5f5f4', '--accent-foreground': '#1c1917', '--popover': '#ffffff', '--popover-foreground': '#1c1917',
+} as CSSProperties;
+
 /** 並行作業の帯はダン本体の暗い色の決まりで描くので、この明るい欄では色の変数だけ明るい側に置き換える */
 const LIGHT_BAR = {
   '--background': '#fafaf9', '--foreground': '#1c1917', '--muted-foreground': '#78716c', '--border': '#e7e5e4',
@@ -97,7 +106,7 @@ const DanBody = memo(function DanBody({ body, messageId }: { body: string; messa
     <>
       {media.text && segments.map((x, i) => (x.kind === 'markdown'
         ? md(x.text, `m${i}`)
-        : <div key={`s${x.index}`}><ShapeBlock code={x.code} complete={x.complete} messageId={messageId} part={keys[x.index] || `i${x.index}`} renderFallback={code => md('```\n' + code + '\n```', `f${i}`)} /></div>))}
+        : <div key={`s${x.index}`} style={LIGHT_SHAPES} className="text-stone-900"><ShapeBlock code={x.code} complete={x.complete} messageId={messageId} part={keys[x.index] || `i${x.index}`} renderFallback={code => md('```\n' + code + '\n```', `f${i}`)} /></div>))}
       {/* 1枚ずつ縦横比のまま置き、押すと大きく開く（2026-11-22 本人「クリックしても大きく表示できない」） */}
       {media.images.map(url => <MediaGrid key={url} items={[{ url, kind: 'image' }]} className="mt-2" />)}
       {media.videos.map(url => <video key={url} src={url} controls playsInline preload="metadata" className="mt-2 max-h-72 rounded-lg border" />)}
