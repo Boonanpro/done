@@ -33,6 +33,7 @@ import mcp.types as types  # noqa: E402
 
 from app.services import timeline_draft as td  # noqa: E402
 from app.services import timeline_commands as tc  # noqa: E402
+from app.services import visual_lane_layout
 from app.services import timeline_context as tcx  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ MAX_TOOL_CALLS = int(os.environ.get("DAN_MAX_TOOL_CALLS", "0"))
 MAX_GENERATIONS = int(os.environ.get("DAN_MAX_GENERATIONS", "0"))
 
 _VISUAL_LANE = {'anyOf': [{'type': 'integer', 'minimum': 0}, {'type': 'string', 'enum': ['front']}],
-                'description': '映像レーン番号、またはfrontで実行時点の最前面に新規レーン。リンク音声などでレーン数が変わってもfrontなら番号の再計算は不要。'}
+                'description': '映像レーン番号、またはfrontで重なる物の前に置き、空いた段を再利用。リンク音声などでレーン数が変わってもfrontなら番号の再計算は不要。'}
 
 _calls = 0
 _generations = 0
@@ -196,6 +197,7 @@ def tool_definitions() -> list[types.Tool]:
         _tool('check_skill', '制作スキルを読む。name省略で利用可能なスキル一覧。', {'name': _STR}),
         _tool("clip_history", "タイムラインを誰が（みきさんの手／どのダンの作業）・いつ・何を変えたかの記録を新しい順に読む。clip_idで1本に絞る。見覚えのない変更を見つけたら、本人に聞く前にこれで確かめる。",
               {"clip_id": _STR, "limit": {"type": "integer"}}),
+        _tool("compact_visual_lanes", "重なって見える順と再生時刻を保ち、映像・字幕を空いた下の段に整理する。", {}),
         _tool("timeline_outline", "タイムライン全体の構造（レーン/クリップ/時刻/種類）を読む。作業前に必ず一度読むこと。", {}),
         _tool('list_envato_components', 'Envatoの部品を用途と差し替え欄で探す。素材ページで現在の作品への利用登録を確かめる。', {'query': _STR}),
         _tool('place_envato_component', '作品名でEnvatoの利用登録を確認した部品に文字・数字・作品内の写真素材IDを入れ、After Effectsで書き出して指定秒に置く。license_projectは実際に登録した作品名。fontは有効なAdobe FontsのPostScript名。text_sizeは文字の大きさの倍率(0.5〜4、テンプレートの元の大きさが1)、text_colorは文字の色、text_outlineは文字の縁の色(どちらも#rrggbb)。', {'component': _STR, 'values': {'type':'object'}, 'at': _NUM, 'font': _STR, 'license_project': _STR, 'text_size': _NUM, 'text_color': _STR, 'text_outline': _STR}, ['component','values','at','license_project']),
@@ -395,8 +397,19 @@ async def _dispatch(name: str, a: dict) -> list:
     draft = _load()
     seq = draft["sequence"]
     assets = _assets()
-    if name in {'add_clip', 'add_caption', 'add_region'} and a.get('lane') == 'front':
-        a = {**a, 'lane': len(seq.get('tracks', []))}
+    visual_add = name in {'add_clip', 'add_caption', 'add_region'}
+    front = visual_add and a.get('lane') == 'front'
+    auto_layer = visual_add and (front or a.get('lane') is None)
+    appended_caption_track = False
+    if front:
+        tracks = seq.get('tracks', [])
+        start = float(a['timeline_start'])
+        end = float(a['timeline_end']) if 'timeline_end' in a else start + float(a['duration'])
+        kind = 'caption' if name == 'add_caption' else 'video'
+        lane = next((i for i, t in enumerate(tracks) if i > 0 and t.get('type') == kind
+                     and not t.get('hidden') and not t.get('locked') and tc._span_free(t, start, end)), len(tracks))
+        appended_caption_track = kind == 'caption' and lane == len(tracks)
+        a = {**a, 'lane': lane}
     if name == 'prepare_motion_project':
         from app.services.editor_motion_project import prepare
         source = a.get('project_dir')
@@ -698,6 +711,7 @@ async def _dispatch(name: str, a: dict) -> list:
 
     # ---- mutating commands on the draft ----
     cmd = {
+        "compact_visual_lanes": lambda: visual_lane_layout.compact(seq),
         "add_region": lambda: tc.add_region(seq, timeline_start=float(a["timeline_start"]),
                                             timeline_end=float(a["timeline_end"]),
                                             x=float(a["x"]), y=float(a["y"]),
@@ -774,6 +788,10 @@ async def _dispatch(name: str, a: dict) -> list:
     if cmd is None:
         return _ok({"ok": False, "error": f"unknown tool: {name}"})
     result = cmd()
+    if result.get("ok") and auto_layer:
+        if appended_caption_track:
+            seq['tracks'][a['lane']]['type'] = 'caption'
+        visual_lane_layout.assign_added(seq, result['clip_id'], front=front)
     if result.get("ok"):
         draft.setdefault("log", []).append({"t": time.time(), "tool": name, "args": a})
         td.save_draft(draft)
