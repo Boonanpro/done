@@ -3090,6 +3090,9 @@ export function VideoReviewEditor({
       if (undoKey && isValueControl(target) && editorRootRef.current?.contains(target)) {
         (target as HTMLElement).blur();
       } else if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+      // チャットの動画を大きく開いている間・動画そのものを操作している時は、キーはその動画のもの
+      // （2026-11-27 本人「チャットで開いた動画をスペースで止めるとタイムラインが再生停止になる」）
+      if (target?.closest('video, audio, [data-media-viewer]') || document.querySelector('[data-media-viewer]')) return;
       if (modKey && event.key.toLowerCase() === 'z') {
         event.preventDefault();
         if (event.shiftKey) redo();
@@ -3205,6 +3208,7 @@ export function VideoReviewEditor({
       if (event.code !== 'Space') return;
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+      if (target?.closest('video, audio, [data-media-viewer]') || document.querySelector('[data-media-viewer]')) return;
       if (target?.closest('button, [role="button"], summary, a[href]')) event.preventDefault();
     };
     window.addEventListener('keydown', handleKeyDown);
