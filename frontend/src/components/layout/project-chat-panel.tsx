@@ -955,8 +955,11 @@ function ChatInput({
   useEffect(() => {
     if (!plusOpen) return;
     const close = (e: PointerEvent) => { if (!plusRef.current?.contains(e.target as Node)) setPlusOpen(false); };
+    // Esc は＋の一覧を閉じるだけ（作業を止める Esc にしない）
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); setPlusOpen(false); } };
     window.addEventListener('pointerdown', close);
-    return () => window.removeEventListener('pointerdown', close);
+    window.addEventListener('keydown', esc, true);
+    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('keydown', esc, true); };
   }, [plusOpen]);
   useEffect(() => {
     if (!mentionPicking) return;
