@@ -27,7 +27,7 @@ function boardLayout(): Promise<Record<string, Box>> {
 }
 
 /** 直す箱を、指示文の地図の左から右（流れの順）に、地図と同じ絵で並べる。番号は下のカードと同じ */
-function BoxStrip({ marks, layout, onPick }: { marks: Map<string, number[]>; layout: Record<string, Box>; onPick: (id: string) => void }) {
+function BoxStrip({ marks, layout, onPick }: { marks: Map<string, number[]>; layout: Record<string, Box>; onPick: (id: string, n?: number) => void }) {
   const boxOf = (n: ArchNode): Box => layout[n.id] || { x: n.x, y: n.y, w: n.w, h: n.height ?? BOX_H };
   const targets = BOARD_NODES.filter((n) => marks.has(n.id))
     .sort((a, b) => { const A = boxOf(a), B = boxOf(b); return A.x - B.x || A.y - B.y; });
@@ -37,7 +37,7 @@ function BoxStrip({ marks, layout, onPick }: { marks: Map<string, number[]>; lay
       {targets.map((n, i) => (
         <div key={n.id} className="flex items-center gap-1">
           {i ? <ArrowRight className="h-4 w-4 shrink-0 text-stone-400" /> : null}
-          <button type="button" onClick={() => onPick(n.id)} title="指示文の地図でこの箱を開く"
+          <button type="button" onClick={() => onPick(n.id, marks.get(n.id)?.[0])} title="指示文の地図でこの箱を開く"
             className="relative flex w-[84px] flex-col items-center gap-0.5 rounded-lg border-2 border-violet-500 bg-white px-1 pb-1 pt-2 hover:bg-violet-50">
             <span className="absolute -left-2 -top-2 flex gap-0.5">
               {marks.get(n.id)!.map((k) => <span key={k} className="flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-600 px-1 text-[11px] font-extrabold text-white">{k}</span>)}
@@ -52,6 +52,18 @@ function BoxStrip({ marks, layout, onPick }: { marks: Map<string, number[]>; lay
   );
 }
 
+/** 指示文を書き換える案の、今の文と直した後の文（実物の言葉）。指示文の画面の箱の中身でも同じ物を出す */
+export function TextChange({ quote, rewrite, light }: { quote?: string | null; rewrite?: string | null; light?: boolean }) {
+  return (
+    <span className="flex flex-col gap-1 text-[13px] leading-relaxed" data-map-plan-text>
+      <span className={light ? 'text-[11px] font-bold text-stone-500' : 'text-[11px] font-bold text-muted-foreground'}>指示文の言葉</span>
+      {quote ? <span className="rounded-md border border-rose-400/40 bg-rose-500/5 px-2 py-1"><b className="mr-1 text-[11px] text-rose-600">今の文</b><span className="whitespace-pre-wrap">「{quote}」</span></span> : null}
+      {rewrite ? <span className="rounded-md border border-emerald-500/40 bg-emerald-500/5 px-2 py-1"><b className="mr-1 text-[11px] text-emerald-600">{quote ? 'こう書き換える' : '足す文'}</b><span className="whitespace-pre-wrap">「{rewrite}」</span></span>
+        : quote ? <span className="text-[12px] text-rose-600">この文を消す</span> : null}
+    </span>
+  );
+}
+
 export function MapPlanView({ plan, box }: { plan: MapPlanInput; box: string }) {
   const changes = useMemo(() => plan.changes || [], [plan.changes]);
   const [layout, setLayout] = useState<Record<string, Box>>({});
@@ -61,10 +73,13 @@ export function MapPlanView({ plan, box }: { plan: MapPlanInput; box: string }) 
     changes.forEach((c, i) => { if (c?.node && BY_ID.has(c.node)) m.set(c.node, [...(m.get(c.node) || []), i + 1]); });
     return m;
   }, [changes]);
-  const key = changes.map((c) => `${c?.node}:${c?.title}`).join('|');
+  const key = changes.map((c) => `${c?.node}:${c?.title}:${c?.prompt || ''}`).join('|');
   useEffect(() => {
     if (!key) return;
-    announcePlan(changes.flatMap((c, i) => (c?.node ? [{ node: c.node, n: i + 1, title: c.title || '' }] : [])));
+    announcePlan(changes.flatMap((c, i) => (c?.node ? [{
+      node: c.node, n: i + 1, title: c.title || '', now: c.now || undefined, after: c.after || undefined,
+      effect: c.effect || undefined, prompt: c.prompt || undefined, quote: c.quote || undefined, rewrite: c.rewrite || undefined,
+    }] : [])));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   return (
@@ -76,7 +91,7 @@ export function MapPlanView({ plan, box }: { plan: MapPlanInput; box: string }) 
           const n = c?.node ? BY_ID.get(c.node) : undefined;
           return (
             <li key={i}>
-              <button type="button" onClick={() => c?.node && focusMapBox(c.node)} data-map-plan-change={c?.node}
+              <button type="button" onClick={() => c?.node && focusMapBox(c.node, i + 1)} data-map-plan-change={c?.node}
                 className="group flex w-full gap-2.5 rounded-lg border border-border bg-background/40 p-2 text-left transition-colors hover:border-violet-500/70 hover:bg-violet-500/5">
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-violet-600 text-sm font-extrabold text-white">{i + 1}</span>
                 <span className="flex min-w-0 flex-1 flex-col gap-1.5">
@@ -93,6 +108,7 @@ export function MapPlanView({ plan, box }: { plan: MapPlanInput; box: string }) 
                     <ArrowRight className="hidden h-4 w-4 self-center text-muted-foreground sm:block" />
                     <span className="rounded-md bg-emerald-500/10 px-2 py-1.5 text-[13px] leading-snug"><b className="mr-1 text-[11px] text-emerald-600">直した後</b>{c?.after}</span>
                   </span>
+                  {c?.quote || c?.rewrite ? <TextChange quote={c.quote} rewrite={c.rewrite} /> : null}
                   {c?.effect ? <span className="text-[13px] font-semibold text-violet-500">→ {c.effect}</span> : null}
                 </span>
               </button>

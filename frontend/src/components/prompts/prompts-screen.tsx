@@ -19,7 +19,8 @@ import { promptsApi, type PromptItem, type PromptSummary, type PromptVersion, ty
 import { cn } from '@/lib/utils';
 import { BOARD_NODES, NODES, VIDEO_NODES, type ArchNode } from './architecture';
 import { useCall } from '@/components/voice/call-provider';
-import { ChangeList, useDevelopmentBoard, TurnDecision, type Turn } from './development-board';
+import { useDevelopmentBoard, TurnDecision, type Turn } from './development-board';
+import { TextChange } from '@/components/chat/map-plan';
 import { ArchBoard } from './arch-board';
 import { hostMap, type PlanMark } from '@/lib/map-focus';
 import { ConversationCircuit, type TrialControls } from './conversation-circuit';
@@ -93,6 +94,39 @@ function StateBadge({ p }: { p: Pick<PromptSummary, 'readonly' | 'last_by' | 'la
   // 誰が直したか・元の文のままかは札に出さない（2026-11-22 本人「最終更新日時だけ」）。一度も直していない文は札なし
   if (!p.last_at || p.last_by === 'seed') return null;
   return <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[11px] text-stone-600">最終更新 {when(p.last_at)}</span>;
+}
+
+/** チャットの直す案（MapPlan）のうち、この箱の分。押した番号の案を先に、紫の枠で出す */
+function PlanHere({ plans, pressed, titleOf, onOpen }: {
+  plans: PlanMark[]; pressed: number; titleOf: (id: string) => string | undefined; onOpen: (id: string) => void;
+}) {
+  const sorted = [...plans].sort((a, b) => (b.n === pressed ? 1 : 0) - (a.n === pressed ? 1 : 0) || a.n - b.n);
+  return (
+    <section aria-label="この箱の直す案" className="space-y-2" data-plan-here>
+      <h3 className="text-sm font-semibold text-violet-900">チャットの直す案のうち、この箱で直すこと</h3>
+      {sorted.map(m => (
+        <div key={m.n} className={cn('rounded-lg border p-2.5', m.n === pressed ? 'border-2 border-violet-500 bg-violet-50' : 'border-violet-200 bg-white')} data-plan-n={m.n}>
+          <div className="flex items-center gap-2">
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-600 text-xs font-extrabold text-white">{m.n}</span>
+            <span className="text-[15px] font-bold leading-tight text-stone-900">{m.title}</span>
+          </div>
+          {(m.now || m.after) && <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+            {m.now && <div className="rounded-md bg-rose-50 px-2 py-1.5 text-[13px] leading-snug text-stone-800"><b className="mr-1 text-[11px] text-rose-600">今</b>{m.now}</div>}
+            {m.after && <div className="rounded-md bg-emerald-50 px-2 py-1.5 text-[13px] leading-snug text-stone-800"><b className="mr-1 text-[11px] text-emerald-700">直した後</b>{m.after}</div>}
+          </div>}
+          {m.effect && <div className="mt-1.5 text-[13px] font-semibold text-violet-700">→ {m.effect}</div>}
+          {m.prompt && <div className="mt-2 space-y-1">
+            <button type="button" onClick={() => onOpen(m.prompt!)} className="text-left text-[13px] font-semibold text-violet-800 underline">
+              直す文：{titleOf(m.prompt) || m.prompt}（押すと全文）
+            </button>
+            {(m.quote || m.rewrite) && <TextChange quote={m.quote} rewrite={m.rewrite} light />}
+          </div>}
+          {!m.prompt && (m.quote || m.rewrite) && <div className="mt-2"><TextChange quote={m.quote} rewrite={m.rewrite} light /></div>}
+          {!m.prompt && !m.quote && !m.rewrite && <p className="mt-2 text-xs text-stone-500">指示文の言葉ではなく、プログラムの動きを直す案です。</p>}
+        </div>
+      ))}
+    </section>
+  );
 }
 
 // ---- 全文と書き直し ----
@@ -605,8 +639,11 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
 
   // チャットの直す案（部品 MapPlan）: 番号を地図に出し、案のカードを押すとその箱を開く（lib/map-focus.ts）
   const [planMarks, setPlanMarks] = useState<PlanMark[]>([]);
+  const [pressedPlan, setPressedPlan] = useState(0);   // チャットで押した案の番号。箱の中身の一番上にその案を出す
   const navigateRef = useRef<(next: { place: string; id?: string }) => boolean>(() => false);
-  useEffect(() => hostMap({ focus: node => { navigateRef.current({ place: node }); }, plan: setPlanMarks }), []);
+  useEffect(() => hostMap({ focus: (node, n) => { if (navigateRef.current({ place: node })) setPressedPlan(n || 0); }, plan: setPlanMarks }), []);
+  const plansHere = node ? planMarks.filter(m => m.node === node.id) : [];
+  const planOfPrompt = new Map(planMarks.filter(m => m.prompt).map(m => [m.prompt!, m.n]));
 
   const navigate = (next: { place: string; id?: string }) => {
     if (shown && open.draft !== shown.text && next.id !== id &&
@@ -618,18 +655,17 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
 
   // 構成図のボード。いつもの時は左の欄いっぱい、依頼の流れを再生する時はその枠の中で決まった高さ
   const showingCall = (!notedBox && !!board.session) || (showLastCall && board.turns.length > 0);
-  const lastChange = board.changes[0];
-  const activityNode = showingCall ? 'router' : notedBox || lastChange?.node || '';
-  const changesHere = board.changes.filter(change => change.node === activityNode);
-  const activityKey = showingCall ? 'voice/'+board.session : activityNode+'/'+(changesHere[0]?.id || '');
+  // 箱に付けていた作業メモ（提案・作業中・確認結果）は出さない（2026-11-28 本人「まじで意味が分からん」）。
+  // 直す案はチャットの MapPlan が地図の番号と箱の中身に出す。ここに残すのは通話の振り分けの判断だけ
+  const activityNode = showingCall ? 'router' : '';
+  const activityKey = 'voice/'+board.session;
   const showActivity = !place && !id && activityNode && hiddenActivity !== activityKey;
   const renderDiagram = (trace?: Trace) => <div className={trace ? 'h-[min(70dvh,760px)]' : 'absolute inset-0'}>
     <ArchBoard trace={trace}
       annotation={!trace && showActivity ? {
         node: activityNode,
-        title: showingCall ? 'Jevの判断' : (BY_ID.get(activityNode)?.name || activityNode) + 'の変更',
-        body: showingCall ? <TurnDecision baseline={baseline} setBaseline={setBaseline} key={board.session || 'previous'} turns={board.turns} live={!!board.session} />
-          : <ChangeList changes={changesHere} />,
+        title: 'Jevの判断',
+        body: <TurnDecision baseline={baseline} setBaseline={setBaseline} key={board.session || 'previous'} turns={board.turns} live={!!board.session} />,
         close: () => setHiddenActivity(activityKey),
         open: () => navigate({place: activityNode}),
       } : undefined} skills={skills} onSkills={(name, pid) => navigate({ place: 'reader-' + name, id: pid })} counts={counts}
@@ -639,16 +675,15 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
       {conversation.development && <button type="button" aria-label={call.room ? '通話を切る' : '指示文の見直しで通話する'}
         className="rounded-md border border-teal-800 bg-teal-800 px-3 py-1.5 text-xs font-semibold text-white"
         onClick={() => call.room ? call.end() : call.start(conversation.room, {chatTitle:'指示文の見直し'})}>{call.room ? '通話を切る' : '通話する'}</button>}
-      {!trace && (lastChange || board.session || board.turns.length > 0) && <select aria-label="構成図に表示する変更や判断"
+      {!trace && (board.session || board.turns.length > 0) && <select aria-label="構成図に表示する通話の判断"
         className="max-w-36 rounded-md border bg-white px-1 py-1.5 text-xs" value="" onChange={e => {
           const value = e.target.value;
           if (!value || !navigate({place:''})) return;
           setNotedBox(value === 'call' ? '' : value);
           setShowLastCall(value === 'call'); setHiddenActivity('');
         }}>
-        <option value="">変更・判断を見る</option>
-        {(board.session || board.turns.length > 0) && <option value="call">通話の判断</option>}
-        {[...new Set(board.changes.map(c => c.node))].map(key => <option key={key} value={key}>{BY_ID.get(key)?.name || key}の変更</option>)}
+        <option value="">判断を見る</option>
+        <option value="call">通話の判断</option>
       </select>}
       <button type="button"  className="inline-flex h-8 items-center gap-1 rounded-md border border-stone-300 bg-white/95 px-2 text-xs font-semibold text-stone-800 shadow-sm hover:bg-stone-100" onClick={() => navigate({ place: 'skills' })}><BookOpen size={13} />スキルを探す</button></>} />
   </div>;
@@ -658,8 +693,18 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
       <button type="button" onClick={() => navigate({ place, id: p.id })}
         className={cn('w-full rounded-lg border px-3 py-2 text-left transition hover:border-amber-400 hover:bg-amber-50',
           p.id === id ? 'border-amber-500 bg-amber-50' : 'border-stone-200 bg-white',
+          planOfPrompt.has(p.id) && 'border-2 border-violet-500',
           work?.state === 'editing' && work.id === p.id && 'dan-working-glow border-violet-500')}>
-        <div className="text-sm font-semibold leading-snug text-stone-900">{p.title}{p.value && <span className="ml-2 font-mono text-teal-800">{p.value}</span>}</div>
+        <div className="flex items-start gap-2">
+          {planOfPrompt.has(p.id) && <span className="mt-0.5 inline-flex h-5 shrink-0 items-center rounded-full bg-violet-600 px-2 text-[11px] font-extrabold text-white">{planOfPrompt.get(p.id)}で直す文</span>}
+          <div className="text-sm font-semibold leading-snug text-stone-900">{p.title}{p.value && <span className="ml-2 font-mono text-teal-800">{p.value}</span>}</div>
+        </div>
+        {/* いつ・誰が読む文かを添える（2026-11-28 本人「そもそもこの項目が分かりづらい」。題と字数だけでは何の文か分からなかった） */}
+        {(p.when || p.reader) && <div className="mt-1 text-xs leading-snug text-stone-600">
+          {p.reader && <span><span className="text-stone-400">読む：</span>{p.reader}</span>}
+          {p.reader && p.when && <span className="mx-1.5 text-stone-300">｜</span>}
+          {p.when && <span><span className="text-stone-400">いつ：</span>{p.when}</span>}
+        </div>}
         <div className="mt-1 flex flex-wrap items-center gap-2">
           {work?.state === 'editing' && work.id === p.id
             ? <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-900"><Sparkles className="h-3 w-3 animate-pulse" />ダンが直しています</span>
@@ -730,11 +775,15 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           ) : (
             <p className="text-sm text-stone-500">図の箱を押すと、ここにその箱が読む指示文が並びます。</p>
           )}
-          {node && <ChangeList changes={board.changes.filter(c => c.node === node.id)} />}
+          {plansHere.length > 0 && <PlanHere plans={plansHere} pressed={pressedPlan} titleOf={pid => byId.get(pid)?.title}
+            onOpen={pid => navigate({ place, id: pid })} />}
           {node?.id === 'router' && (board.session || board.turns.length > 0) && <TurnDecision baseline={baseline} setBaseline={setBaseline} turns={board.turns} live={!!board.session} />}
           {node?.facts?.length ? <ul className="list-disc space-y-1 pl-5 text-sm text-stone-700" data-testid="node-facts">{node.facts.map(f => <li key={f}>{f}</li>)}</ul> : null}
           {parameters.length > 0 && <section><h3 className="mb-1 text-sm font-semibold">動作の設定</h3><ul className="space-y-1">{parameters.map(row)}</ul></section>}
-          {editable.length ? <ul className="space-y-2">{editable.map(row)}</ul> : null}
+          {editable.length ? <section>
+            <h3 className="mb-1 text-sm font-semibold text-stone-800">{node ? `${node.name}が読む指示文（${editable.length}）` : '指示文'}</h3>
+            <p className="mb-1.5 text-xs text-stone-500">押すと全文が出て、そのまま書き直せます。</p>
+            <ul className="space-y-2">{editable.map(row)}</ul></section> : null}
           {readonly.length ? (
             <details open={!editable.length}>
               <summary className="cursor-pointer text-sm text-stone-600">まだプログラムの中にある文（読むだけ・{readonly.length}）</summary>

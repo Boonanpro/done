@@ -17,6 +17,15 @@ test('直す所を地図の箱に結んだ案が通り、文章でも読める',
   assert.match(md, /→ ぼーっとした間が無くなる/);
 });
 
+test('指示文を書き換える案は、直す文の id と今の文・書き換えた文を持てて、文章でも読める', () => {
+  const plan = `root = MapPlan([{node: "voice", title: "受け取った中身を一言返す", now: "「うん」だけ", after: "要点を返す", prompt: "call/policies", quote: "相づちは短く", rewrite: "頼みを受けたら、受け取った中身を一言で言い返す"}])`;
+  assert.equal(checkShapeProgram(plan).ok, true);
+  const md = shapeToPlainMarkdown(plan);
+  assert.match(md, /今の文: 「相づちは短く」/);
+  assert.match(md, /書き換え: 「頼みを受けたら/);
+  assert.equal(checkShapeProgram(plan.replace('call/policies', '../etc/passwd')).ok, false);
+});
+
 test('今か直した後が無い・多すぎる・箱の名前の形が違う案は通さない', () => {
   assert.equal(checkShapeProgram('root = MapPlan([{node: "router", title: "x", now: "", after: "y"}])').ok, false);
   assert.equal(checkShapeProgram('root = MapPlan([{node: "ルーター", title: "x", now: "a", after: "b"}])').ok, false);
