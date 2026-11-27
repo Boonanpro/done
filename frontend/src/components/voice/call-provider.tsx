@@ -41,11 +41,11 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const me = useRef('');
   const channelRef = useRef<BroadcastChannel | null>(null);
   const callRef = useRef(call);
-  const focusRef = useRef(focusRoom);
+  // この窓で見えている部屋（この窓の会話欄が知らせた物）。通話のある窓の focusRoom は他の窓の知らせで変わるので別に持つ
+  const ownRef = useRef('');
   useLayoutEffect(() => {
     callRef.current = call;
-    focusRef.current = focusRoom;
-  }, [call, focusRoom]);
+  }, [call]);
 
   const post = useCallback((msg: Msg) => {
     try { channelRef.current?.postMessage(msg); } catch { /* 古いブラウザ: 窓をまたがないだけ */ }
@@ -78,15 +78,24 @@ export function CallProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('pagehide', bye);
   }, [post]);
 
-  // 別の窓へ移った時、その窓で見ている部屋を通話へ知らせ直す
+  // 窓を移った時、その窓で見ている部屋を通話へ知らせ直す。通話のある窓へ戻った時も自分の部屋へ戻す
+  // （前は戻しておらず、別の窓で開いた部屋に頼みが届き続けた。2026-11-28 本人「関係無い場所で作業が開始される」）
   useEffect(() => {
-    const onFocus = () => { if (!callRef.current && focusRef.current) post({ type: 'focus', room: focusRef.current, from: me.current }); };
+    const onFocus = () => {
+      const own = ownRef.current;
+      if (!own) return;
+      if (callRef.current) setFocusRoom(own);
+      else post({ type: 'focus', room: own, from: me.current });
+    };
+    const onVisible = () => { if (document.visibilityState === 'visible' && document.hasFocus()) onFocus(); };
     window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { window.removeEventListener('focus', onFocus); document.removeEventListener('visibilitychange', onVisible); };
   }, [post]);
 
   const start = useCallback((roomId: string, opts?: CallOptions) => {
     if (remoteRoom) return;   // 別の窓で通話中: 2本目はかけない
+    ownRef.current = roomId;   // 電話マークを押した会話欄の部屋
     setFocusRoom(roomId);
     setCall({ room: roomId, ...opts });
   }, [remoteRoom]);
@@ -98,6 +107,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
   const setFocus = useCallback((roomId: string) => {
     if (!roomId) return;
+    ownRef.current = roomId;
     setFocusRoom(roomId);
     if (!callRef.current && (typeof document === 'undefined' || document.hasFocus())) post({ type: 'focus', room: roomId, from: me.current });
   }, [post]);

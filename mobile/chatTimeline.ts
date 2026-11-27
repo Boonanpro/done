@@ -289,6 +289,7 @@ export function mergeVoiceFragments<M extends VoiceLike>(messages: M[]): M[] {
 // mobile/chatTimeline.ts と frontend/src/lib/voice-fragments.ts に同じ関数がある（両方を同じに保つ）。
 const CALL = '📞';
 const CALL_GAP_MS = 5 * 60_000;
+const RELAY_HEAD = '【作業の依頼】';
 
 /** 本人とダンの通話の記録の行なら、かけた側（本人＝右、ダン＝左。電話の発着信の履歴と同じ置き方）。それ以外は null。
  * 「📞 ダンからの通話」はダンがかけた通話、「📞 ダンと通話」は本人がかけた通話（それより前の記録はすべて本人から）。 */
@@ -336,6 +337,8 @@ export function collapseCalls<M extends VoiceLike>(messages: M[]): M[] {
   };
   for (const m of messages) {
     const content = m.content || '';
+    // 別の部屋から頼んだ作業の写し（【作業の依頼】＋通話の文字起こし）は出さない。ダンは読める（2026-11-28 本人「まだ全部表示されてる」）
+    if (m.sender_type === 'system' && content.startsWith(RELAY_HEAD)) continue;
     if (!content.startsWith(VOICE)) {
       out.push(m);
       continue;
