@@ -1,6 +1,6 @@
 'use client';
 
-import { endDanFileDrag, startDanFileDrag } from '@/lib/dan-file-drag';
+import { startDanFileDrag } from '@/lib/dan-file-drag';
 import { callDuration, callSide, collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
 import { probeSiteIdbOncePerDay } from '@/lib/idb-probe';
 import { perfLog, roomClickStart } from '@/lib/perf-log';
@@ -11,7 +11,9 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  AtSign,
   Clapperboard,
+  ImagePlus,
   Film,
   Play,
   File,
@@ -68,6 +70,8 @@ import {
   type SelectedElement,
 } from '@/stores/preview-store';
 import { composeAttached, useChatAttachStore, useChatAttachments } from '@/stores/chat-attach-store';
+import { useClipMentionStore, useEditorPresence } from '@/stores/clip-mention-store';
+import { DAN_FILE_DND_TYPE, endDanFileDrag, type DanDragFile } from '@/lib/dan-file-drag';
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent, ConfirmCard, parseConfirmCardMarker } from '@/components/chat/outbound-message-card';
@@ -886,7 +890,9 @@ function ChatInput({
   onClearReply,
   onAddComment,
   onEditPendingComment,
+  dropRef,
 }: {
+  dropRef?: React.MutableRefObject<((dt: DataTransfer) => boolean) | null>;
   projectId: string;
   roomId: string;
   isSessionActive: boolean;
@@ -936,6 +942,31 @@ function ChatInput({
   const [timelineChoices, setTimelineChoices] = useState<TimelineReference[]>([]);
   const [timelineMenuOpen, setTimelineMenuOpen] = useState(false);
   const [timelineLoading, setTimelineLoading] = useState(false);
+  // ＋の中に、写真・動画・ファイル・タイムラインをまとめる（2026-11-27 本人「画像や動画追加などは＋マークにしてないようまとめて。LINEもそう」）
+  const [plusOpen, setPlusOpen] = useState(false);
+  const plusRef = useRef<HTMLDivElement>(null);
+  const mediaInputRef = useRef<HTMLInputElement>(null);
+  // @: 押した後に選んだクリップだけを会話に添える（エディターがこの窓にある時だけ出す）
+  const editorHere = useEditorPresence((s) => s.editors > 0);
+  const mentionPicking = useClipMentionStore((s) => s.picking === projectId);
+  const startMention = useClipMentionStore((s) => s.start);
+  const stopMention = useClipMentionStore((s) => s.stop);
+  const putScreenItem = useChatAttachStore((s) => s.put);
+  useEffect(() => {
+    if (!plusOpen) return;
+    const close = (e: PointerEvent) => { if (!plusRef.current?.contains(e.target as Node)) setPlusOpen(false); };
+    // Esc は＋の一覧を閉じるだけ（作業を止める Esc にしない）
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); setPlusOpen(false); } };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('keydown', esc, true);
+    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('keydown', esc, true); };
+  }, [plusOpen]);
+  useEffect(() => {
+    if (!mentionPicking) return;
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); stopMention(); } };
+    window.addEventListener('keydown', esc, true);
+    return () => window.removeEventListener('keydown', esc, true);
+  }, [mentionPicking, stopMention]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // 追い連絡の下書きがある時、1回目の Esc は停止せず下書きを保持（armed）、
   // 2回目の Esc で本当に停止する。escStopHint は「もう一度Escで停止」表示。
@@ -1194,9 +1225,11 @@ function ChatInput({
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
+    // 会話欄全体が受ける時は、欄の側の印（1つ）に任せる
+    if (dropRef) return;
     e.stopPropagation();
     setIsDragging(true);
-  }, []);
+  }, [dropRef]);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -1207,15 +1240,55 @@ function ChatInput({
     }
   }, []);
 
+  // 落とされた物を添える: パソコンのファイル・エディターの素材の一覧の素材・会話に貼ったファイル（2026-11-27 本人
+  // 「チャット内やタイムライン内への素材のドラッグアンドドロップもできないならできるようにしてね」）。添えたら true。
+  const takeDrop = useCallback((dt: DataTransfer): boolean => {
+    const assetRaw = dt.getData('application/x-dan-asset');
+    if (assetRaw) {
+      try {
+        const a = JSON.parse(assetRaw) as { id: string; kind?: string; label?: string | null; thumb?: string | null };
+        const kindJa = a.kind === 'video' ? '動画' : a.kind === 'image' ? '画像' : a.kind === 'audio' ? '音' : '素材';
+        const name = String(a.label || a.id).split('/').pop() || a.id;
+        putScreenItem(projectId, {
+          key: `asset:${a.id}`,
+          label: `素材の${kindJa}「${name.slice(0, 24)}」`,
+          preview: a.thumb || undefined,
+          detail: `- 素材の一覧から添えた素材: asset_id=${a.id} 種類=${a.kind || '不明'} 名前=${name}`,
+        });
+      } catch { /* 壊れた印は無視 */ }
+      delete (window as unknown as { __danDragAsset?: unknown }).__danDragAsset;
+      return true;
+    }
+    const danRaw = dt.getData(DAN_FILE_DND_TYPE);
+    if (danRaw) {
+      endDanFileDrag();
+      try {
+        const f = JSON.parse(danRaw) as DanDragFile;
+        const name = f.name || decodeURIComponent(f.url.split('/').pop() || 'file');
+        setAttachedFiles((prev) => prev.some((x) => x.url === f.url) ? prev : [...prev, {
+          id: `dan-${f.url}`, filename: name, url: f.url, content_type: '', size: 0, created_at: new Date().toISOString(),
+        }]);
+      } catch { /* 壊れた印は無視 */ }
+      return true;
+    }
+    const files = Array.from(dt.files || []);
+    if (files.length > 0) { void uploadFiles(files); return true; }
+    return false;
+  }, [projectId, putScreenItem, uploadFiles]);
+  useEffect(() => {
+    if (!dropRef) return;
+    dropRef.current = takeDrop;
+    return () => { if (dropRef.current === takeDrop) dropRef.current = null; };
+  }, [dropRef, takeDrop]);
+
   const handleDrop = useCallback(async (e: React.DragEvent) => {
+    // 会話欄全体が受ける時は、欄の側（ProjectChatPanel）で1回だけ添える
+    if (dropRef) return;
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) {
-      await uploadFiles(files);
-    }
-  }, [uploadFiles]);
+    takeDrop(e.dataTransfer);
+  }, [dropRef, takeDrop]);
 
   const handleRemoveFile = useCallback((fileId: string) => {
     setAttachedFiles(prev => prev.filter(f => f.id !== fileId));
@@ -2242,20 +2315,53 @@ function ChatInput({
           )) : <div className="px-2 py-2 text-xs text-muted-foreground">参照できるタイムラインはありません</div>}
         </div>
       )}
+      {mentionPicking && (
+        <div data-chat-mention-hint className="mb-1.5 flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-2 py-1.5 text-xs text-foreground">
+          <AtSign className="h-3.5 w-3.5 shrink-0 text-primary" />
+          <span className="min-w-0 flex-1">タイムラインのクリップを押すと、この会話に添えます</span>
+          <button type="button" onClick={stopMention} className="shrink-0 text-muted-foreground hover:text-foreground" aria-label="メンションをやめる"><X className="h-3 w-3" /></button>
+        </div>
+      )}
       <div className={`flex items-end gap-2 rounded-xl border bg-input/30 p-2 transition-colors ${isCommentMode ? 'border-primary/40' : 'border-border focus-within:border-primary/50'}`}>
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} accept="*/*" />
-        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={() => void openTimelineMenu()} disabled={isCommentMode} title="タイムラインをメンション">
-          <Clapperboard className="h-3.5 w-3.5" />
-        </Button>
-        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={handleClickAttach} disabled={isUploading || isCommentMode} title="ファイルを添付">
-          {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
-        </Button>
+        <input ref={mediaInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} accept="image/*,video/*" />
+        <div ref={plusRef} className="relative shrink-0">
+          <Button variant="ghost" size="icon" type="button" data-chat-plus
+            className={`h-8 w-8 shrink-0 ${plusOpen ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            onClick={() => setPlusOpen((o) => !o)} disabled={isCommentMode} aria-label="写真・動画・ファイルを添える" title="写真・動画・ファイルを添える">
+            {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className={`h-5 w-5 transition-transform ${plusOpen ? 'rotate-45' : ''}`} />}
+          </Button>
+          {plusOpen && (
+            <div data-chat-plus-menu className="absolute bottom-full left-0 z-50 mb-2 w-48 rounded-lg border bg-popover p-1 shadow-lg">
+              <button type="button" className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-sm hover:bg-muted" disabled={isUploading}
+                onClick={() => { setPlusOpen(false); mediaInputRef.current?.click(); }}>
+                <ImagePlus className="h-4 w-4 text-primary" />写真・動画
+              </button>
+              <button type="button" className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-sm hover:bg-muted" disabled={isUploading}
+                onClick={() => { setPlusOpen(false); handleClickAttach(); }}>
+                <Paperclip className="h-4 w-4 text-primary" />ファイル
+              </button>
+              <button type="button" className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-sm hover:bg-muted"
+                onClick={() => { setPlusOpen(false); void openTimelineMenu(); }}>
+                <Clapperboard className="h-4 w-4 text-primary" />タイムライン
+              </button>
+            </div>
+          )}
+        </div>
         <Button variant="ghost" size="icon" type="button"
           aria-label={voiceOpen ? '通話を終了' : '通話を始める'} title={voiceOpen ? '通話を終了' : '通話を始める'}
           className={`h-8 w-8 shrink-0 ${voiceOpen ? 'text-red-500' : 'text-muted-foreground'}`}
           onClick={() => onVoice(!voiceOpen)}>
           {voiceOpen ? <PhoneOff className="h-4 w-4" /> : <Phone className="h-4 w-4" />}
         </Button>
+        {editorHere && (
+          <Button variant="ghost" size="icon" type="button" data-chat-mention aria-pressed={mentionPicking}
+            aria-label={mentionPicking ? 'メンションをやめる' : 'クリップをメンション'} title={mentionPicking ? 'メンションをやめる（Esc）' : 'クリップをメンション'}
+            className={`h-8 w-8 shrink-0 ${mentionPicking ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+            onClick={() => (mentionPicking ? stopMention() : startMention(projectId))} disabled={isCommentMode}>
+            <AtSign className="h-4 w-4" />
+          </Button>
+        )}
         <textarea
           ref={textareaRef}
           value={isCommentMode ? inspectorDraft : message}
@@ -2544,6 +2650,13 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sendMessageRef = useRef<SendMessageHandle | null>(null);
+  // 会話欄のどこに落としても添える（入力欄だけでなく、話の並びの上でも）
+  const chatDropRef = useRef<((dt: DataTransfer) => boolean) | null>(null);
+  const [panelDragging, setPanelDragging] = useState(false);
+  const dropTypes = (dt: DataTransfer) => {
+    const t = Array.from(dt.types || []);
+    return t.includes('Files') || t.includes('application/x-dan-asset') || t.includes('application/x-dan-file');
+  };
   // 確認カードの答え（「承認: …」/「やめる: …」）を、本人の発言としてこの部屋に送る
   const answerInRoom = useCallback((text: string) => { sendMessageRef.current?.(text); }, []);
   // 部品（選択・入力）の答え: 同じ経路で本人の発言として送り、どの返事のどの部品への答えか（answer_to）を
@@ -3337,11 +3450,19 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
   return (
     <div data-media-gallery-scope className="relative flex h-full w-full overflow-hidden">
     <div
-      className={`flex h-full shrink-0 flex-col overflow-hidden bg-background ${
+      className={`relative flex h-full shrink-0 flex-col overflow-hidden bg-background ${
         isMobile && isPreviewOpenForProject ? 'hidden' : isPreviewOpenForProject ? '' : 'w-full'
       }`}
       style={!isMobile && isPreviewOpenForProject ? { width: chatWidth } : undefined}
+      onDragOver={(e) => { if (!dropTypes(e.dataTransfer)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; if (!panelDragging) setPanelDragging(true); }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setPanelDragging(false); }}
+      onDrop={(e) => { setPanelDragging(false); if (!dropTypes(e.dataTransfer)) return; e.preventDefault(); chatDropRef.current?.(e.dataTransfer); }}
     >
+      {panelDragging && (
+        <div data-chat-drop-overlay className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-primary bg-primary/10">
+          <span className="rounded-md bg-background/90 px-3 py-1.5 text-sm font-medium text-primary">ここに落とすと会話に添えます</span>
+        </div>
+      )}
       <div className={`flex shrink-0 items-center border-b border-border ${editorChat ? 'gap-2 px-2 py-1.5' : commandCenter ? 'flex-wrap gap-2 px-4 py-3 [&>button]:min-h-11' : 'gap-3 py-3 pl-12 pr-16 md:pl-4 md:pr-16'}`}>
         {!commandCenter && !editorChat && <FolderKanban className="h-5 w-5 shrink-0 text-primary" />}
         {/* 題（「ダンと制作」・作品名）は出さない（2026-11-17 本人「チャットして作るのは分かりきっている」）。
@@ -3645,6 +3766,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
 
       {project?.room_id && workspaceMode === 'chat' ? (
         <ChatInput
+          dropRef={chatDropRef}
           voiceOpen={!!call.room} onVoice={open => (open ? (project.room_id ? call.start(project.room_id, { chatTitle: project?.title || undefined, stageWidthClass: editorChat ? 'w-[396px]' : 'w-[520px]' }) : undefined) : call.end())}
           projectId={projectId}
           roomId={project.room_id}

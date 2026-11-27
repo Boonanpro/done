@@ -59,6 +59,8 @@ import { isSceneClip } from './scene-layer';
 import { isRegionEffect, regionLabel } from './region-effect';
 import { createZoomPreview, type ZoomPreview } from './zoom-preview';
 import { TypographyPanel, type EditableTypography } from './typography-panel';
+import { describeClipMention, useClipMentionStore, useEditorPresence } from '@/stores/clip-mention-store';
+import { useChatAttachStore } from '@/stores/chat-attach-store';
 import { BlendSelect, SceneClipPanel } from './scene-clip-panel';
 import { TimelinePreview } from './timeline-preview';
 import { MotionPanel } from './motion-panel';
@@ -2350,7 +2352,29 @@ export function VideoReviewEditor({
     });
   }, []);
 
+  // 会話欄の @ を押した後に選んだクリップを、その会話に「メンション」として添える（選んだだけでは添えない）
+  const mentionClip = useCallback((projectId: string, id: string) => {
+    const seq = editSequenceRef.current;
+    for (const track of seq?.tracks || []) {
+      const clip = (track.clips || []).find((c) => c.id === id);
+      if (!clip) continue;
+      const kind = track.type === 'audio' ? 'audio' : (track.type === 'caption' || clip.track === 'caption') ? 'caption'
+        : (track.type === 'effect' || isRegionEffect(clip)) ? 'effect' : 'video';
+      const lane = computeClipLanes(seq?.tracks || []).get(String(clip.id))?.layer ?? null;
+      const { label, detail } = describeClipMention(clip, kind, lane);
+      useChatAttachStore.getState().put(projectId, { key: `clip:${clip.id}`, label, detail });
+      useClipMentionStore.getState().stop();
+      return;
+    }
+  }, []);
+  useEffect(() => {
+    useEditorPresence.getState().enter();
+    return () => { useEditorPresence.getState().leave(); useClipMentionStore.getState().stop(); };
+  }, []);
+
   const selectSequenceClip = useCallback((id: string, additive = false) => {
+    const mentionFor = useClipMentionStore.getState().picking;
+    if (mentionFor) mentionClip(mentionFor, id);
     setInlineCaption(current => current?.id === id && !additive ? current : null);
     setWordSelection(null);
     setSelectedId(null);
@@ -2363,7 +2387,7 @@ export function VideoReviewEditor({
       if (!additive) return id;
       return current === id ? null : id;
     });
-  }, []);
+  }, [mentionClip]);
 
   const clearSelection = useCallback(() => {
     setSelectedId(null);
@@ -4658,6 +4682,7 @@ export function VideoReviewEditor({
       const additive = event.shiftKey || event.ctrlKey || event.metaKey;
       const inMulti = !additive && selectedSequenceClipIds.length > 1 && selectedSequenceClipIds.includes(clip.id);
       if (!inMulti) selectSequenceClip(clip.id, additive);
+      else { const mentionFor = useClipMentionStore.getState().picking; if (mentionFor) mentionClip(mentionFor, clip.id); }
       dragSelectionRef.current = inMulti ? [...selectedSequenceClipIds] : [clip.id];
       const startLane = clipLanes.get(String(clip.id)) || { zone: 'visual' as const, layer: clip.layer ?? 0 };
       dragLayerRef.current = startLane.layer;
@@ -4779,7 +4804,7 @@ export function VideoReviewEditor({
         /* ignore */
       }
     },
-    [editSequence, clipLanes, selectSequenceClip, selectedSequenceClipIds, buildCopySource, placeClipCopies, rippleOn, mainLayer, linkAV, annotations,
+    [editSequence, clipLanes, selectSequenceClip, mentionClip, selectedSequenceClipIds, buildCopySource, placeClipCopies, rippleOn, mainLayer, linkAV, annotations,
       isLockedClip, timelineTool, timelineDuration, snapEnabled, fps, splitClipAtTime, timelineLanes]
   );
 
