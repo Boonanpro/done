@@ -1301,6 +1301,13 @@ function nodeToPlain(call: ShapeNode): string | null {
     }
     case 'BeforeAfter':
       return str(a2) ? `前と後: ${str(a2)}` : '';
+    case 'MapPlan': {
+      const items = objs(a0).filter((c) => str(c.title));
+      if (!items.length) return null;
+      return [...(str(a1) ? [`**${str(a1)}**`] : []),
+        ...items.map((c, i) => `${i + 1}. **${str(c.title)}**（${str(c.node)}）\n   今: ${str(c.now)}\n   直した後: ${str(c.after)}${str(c.effect) ? `\n   見込み: ${str(c.effect)}` : ''}`),
+        ...(str(a2) ? [`→ ${str(a2)}`] : [])].join('\n');
+    }
     default:
       return null;
   }

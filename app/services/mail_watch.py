@@ -117,6 +117,7 @@ def check_mail_watch(spec: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[st
                 if p.get_filename()
             ]
             mails.append({
+                "message_id": (msg.get("Message-ID") or "").strip(),
                 "sender": _decode(msg.get("From")),
                 "subject": subject,
                 "date": _decode(msg.get("Date")),

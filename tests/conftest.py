@@ -164,3 +164,10 @@ def another_friend_id(client, auth_token):
 def _voice_router_off_by_default(monkeypatch):
     """Tests written for the Responses delegation keep it; tests of Jev's routing (voice_router) switch it on themselves."""
     monkeypatch.setenv('DAN_VOICE_ROUTER', '0')
+
+
+@pytest.fixture(autouse=True)
+def _room_mail_once_in_tmp(tmp_path, monkeypatch):
+    """Tests never write the live 'one mail wakes a room once' ledger (~/.dan/state/room_mail_once.json)."""
+    from app.services import room_mail_once
+    monkeypatch.setattr(room_mail_once, "PATH", tmp_path / "room_mail_once.json")

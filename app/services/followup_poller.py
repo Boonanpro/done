@@ -358,18 +358,37 @@ async def _fire_mail(row: Dict[str, Any]) -> None:
         return
 
     if mails:
+        # One mail wakes a room once (room_mail_once): a mail another road (the reply routing, another watch of this
+        # room) already woke the room for is passed over; the watch still moves past it.
+        from app.services import room_mail_once
+        by = "watch:" + str(row["id"])
+        taken = [m for m in mails if await asyncio.to_thread(
+            room_mail_once.claim, row["room_id"], m.get("message_id") or "", by)]
+        if len(taken) < len(mails):
+            logger.info("[watch] mail already woke room=%s: %d of %d passed over",
+                        row["room_id"][:8], len(mails) - len(taken), len(mails))
+        mails = taken
+    if mails:
         logger.info("[watch] mail hit room=%s count=%d", row["room_id"][:8], len(mails))
         new_spec["fire_count"] = int(new_spec.get("fire_count") or 0) + len(mails)
         landed = False
         try:
+            sender = " ".join(m.get("sender") or "" for m in mails)
+            others = await asyncio.to_thread(
+                room_mail_once.watch_notes, row["room_id"], sender, " ".join(m.get("subject") or "" for m in mails),
+                skip=row["id"])
             _, landed = await _wake_turn(
                 row["room_id"], row.get("user_id") or "",
-                _MAIL_PROMPT.format(note=note, mails=format_mails(mails)))
+                _MAIL_PROMPT.format(note=note, mails=format_mails(mails))
+                + ("\n\n" + room_mail_once.notes_block(others) if others else ""))
         except Exception as e:  # noqa: BLE001
             logger.error("[watch] mail wake failed room=%s: %s", row["room_id"], e)
         # Retrying with the spec from before the check finds the same mail again.
-        if not landed and await _defer_empty_wake(row, "mail", note, spec):
-            return
+        if not landed:
+            if await _defer_empty_wake(row, "mail", note, spec):
+                return
+            for m in mails:   # given up: another road may still wake the room for it
+                await asyncio.to_thread(room_mail_once.release, row["room_id"], m.get("message_id") or "", by)
         new_spec.pop("empty_wakes", None)
     await asyncio.to_thread(
         reschedule_watch, row["id"], "mail", note, new_spec, now + timedelta(seconds=interval))

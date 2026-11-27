@@ -14,13 +14,13 @@ test('書かれている指示文は、部品定義から作った物と同じ',
 
 // 長さの上限: 比べる質問の一文と「実物を出す」の段落を足した時（2026-10-17）に 2,500 → 3,400 字、
 // 組み合わせる小さな部品11個と組み方・例を足した時（2026-10-23）に 3,400 → 5,400 字
-test('勧める部品22個の名前が全部、指示文の一覧に出ていて、Flow は出ていない。長さは8.5KB以内', () => {
+test('勧める部品23個の名前が全部、指示文の一覧に出ていて、Flow は出ていない。長さは9.5KB以内', () => {
   const lines = shapeSignatureLines();
   // 2026-11-15: 箱と矢印の図（Flow）は画面が前のメッセージ用に描くだけで、ダンには勧めない
   assert.deepEqual(lines.map((l) => l.split('(')[0]), SHAPE_NAMES.filter((n) => !RETIRED_SHAPES.has(n)));
-  assert.equal(SHAPE_NAMES.length, 23);
+  assert.equal(SHAPE_NAMES.length, 24);
   assert.ok(!buildChatShapesPrompt().includes('- Flow('));
   const text = buildChatShapesPrompt();
   assert.ok(text.includes('```openui-lang'));
-  assert.ok(text.length <= 8500, `prompt is ${text.length} chars`);   // 2026-10-25: Flow and its icon names; 2026-11-12: 本物の中身の部品6つ
+  assert.ok(text.length <= 9500, `prompt is ${text.length} chars`);   // 2026-10-25: Flow and its icon names; 2026-11-12: 本物の中身の部品6つ; 2026-11-27: MapPlan と地図の箱の一覧
 });

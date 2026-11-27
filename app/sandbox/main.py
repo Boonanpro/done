@@ -173,6 +173,8 @@ if settings.ALLOWED_ORIGINS:
         [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
     )
 
+from app.services.owner_activity import Middleware as _OwnerActivity  # noqa: E402
+app.add_middleware(_OwnerActivity)   # renders give way while the owner uses the screens (envato_shelf)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,

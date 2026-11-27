@@ -58,6 +58,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { isSceneClip } from './scene-layer';
 import { isRegionEffect, regionLabel } from './region-effect';
 import { createZoomPreview, type ZoomPreview } from './zoom-preview';
+import { TypographyPanel, type EditableTypography } from './typography-panel';
 import { BlendSelect, SceneClipPanel } from './scene-clip-panel';
 import { TimelinePreview } from './timeline-preview';
 import { MotionPanel } from './motion-panel';
@@ -112,6 +113,7 @@ export type SessionPayload = {
 };
 
 export type SequenceClip = {
+  ae_text?: EditableTypography;
   id: string;
   asset_id?: string | null;
   label?: string | null;
@@ -6766,6 +6768,12 @@ export function VideoReviewEditor({
                       </Button>
                     </div>
                   </div>
+                  {selectedSequenceClip.ae_text && roomId && contentId && selectedSequenceClip.asset_id && (
+                    <TypographyPanel key={String(selectedSequenceClip.id) + selectedSequenceClip.asset_id}
+                      room={roomId} content={contentId} clip={String(selectedSequenceClip.id)} asset={selectedSequenceClip.asset_id}
+                      spec={selectedSequenceClip.ae_text} time={currentTime - selectedSequenceClip.timeline_start + Number(selectedSequenceClip.source_start || 0)}
+                      onSaved={() => onExternalEditRef.current?.()} />
+                  )}
                   {clipAuthor && clipAuthor.id === selectedSequenceClip.id ? (
                     <div className="text-[11px] text-muted-foreground" data-testid="clip-last-changed">
                       {clipAuthor.label

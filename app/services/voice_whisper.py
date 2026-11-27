@@ -220,7 +220,7 @@ _fallback = None
 
 
 def _start_worker():
-    """The GPU transcriber (scripts/voice_whisper_worker.py) in its own environment, kept for the process's life."""
+    """The GPU transcriber (scripts/voice_whisper_worker.py) in its own environment. It leaves by itself when idle; started again here."""
     global _worker
     if _worker is not None and _worker.poll() is None:
         return _worker
@@ -234,12 +234,29 @@ def _start_worker():
     return _worker
 
 
+def _ask_worker(line):
+    worker = _start_worker()
+    worker.stdin.write(line)
+    worker.stdin.flush()
+    reply = worker.stdout.readline()
+    if not reply:
+        raise BrokenPipeError('whisper worker left')
+    return json.loads(reply)
+
+
 def _segments_gpu(x):
+    line = json.dumps({'id': 1, 'pcm': base64.b64encode(x.astype(np.float32).tobytes()).decode()}) + chr(10)
     with _worker_lock:
-        worker = _start_worker()
-        worker.stdin.write(json.dumps({'id': 1, 'pcm': base64.b64encode(x.astype(np.float32).tobytes()).decode()}) + chr(10))
-        worker.stdin.flush()
-        answer = json.loads(worker.stdout.readline() or '{}')
+        try:
+            answer = _ask_worker(line)
+        except (BrokenPipeError, OSError):
+            # It leaves after some idle minutes (scripts/voice_whisper_worker.py) and may have just gone: start it once more.
+            global _worker
+            if _worker is not None:
+                try: _worker.wait(timeout=5)
+                except Exception: _worker.kill()
+            _worker = None
+            answer = _ask_worker(line)
     if 'segments' not in answer:
         raise RuntimeError(answer.get('error') or 'whisper worker gave no answer')
     return answer['segments']

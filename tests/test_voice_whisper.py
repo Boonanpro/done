@@ -292,3 +292,41 @@ async def test_the_calls_sideband_hands_a_whisper_to_the_speech_model(monkeypatc
     spoken = [e for e in out if e.get('type') == 'session.commentary.append']
     assert len(spoken) == 1 and '「明日って何曜日？」' in spoken[0]['content']
     assert not any(e.get('type') == 'response.create' for e in out)
+
+
+def test_a_worker_that_left_while_idle_is_started_once_more(monkeypatch):
+    """The worker leaves after idle minutes; a request that meets it just gone starts it again and is answered."""
+    import io
+
+    class Gone:
+        pid = 1
+        def __init__(self): self.stdin, self.stdout = io.StringIO(), io.StringIO('')
+        def poll(self): return None   # looked alive when picked up, left before answering
+        def wait(self, timeout=None): return 0
+        def kill(self): pass
+
+    class Fresh(Gone):
+        def __init__(self):
+            super().__init__()
+            self.stdout = io.StringIO(json.dumps({'id': 1, 'segments': [{'text': 'はい'}]}) + '\n')
+
+    started = []
+    def start():
+        if W._worker is None:
+            W._worker = Fresh() if started else Gone()
+            started.append(W._worker)
+        return W._worker
+    monkeypatch.setattr(W, '_worker', None)
+    monkeypatch.setattr(W, '_start_worker', start)
+    assert W._segments_gpu(np.zeros(1600, dtype=np.float32)) == [{'text': 'はい'}]
+    assert [type(w).__name__ for w in started] == ['Gone', 'Fresh']
+
+
+def test_the_worker_leaves_after_idle_seconds(tmp_path):
+    """Without the model: the idle watch alone ends the process (a held worker kept 2.4 GB for a generation's life)."""
+    import subprocess, sys
+    code = ('import sys, time; sys.path.insert(0, "scripts"); import voice_whisper_worker as w; '
+            'w._last[0] = time.monotonic(); w._leave_when_idle(0.3, 0.05)')
+    began = time.monotonic()
+    done = subprocess.run([sys.executable, '-c', code], timeout=20)
+    assert done.returncode == 0 and time.monotonic() - began < 15

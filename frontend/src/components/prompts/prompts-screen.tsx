@@ -21,6 +21,7 @@ import { BOARD_NODES, NODES, VIDEO_NODES, type ArchNode } from './architecture';
 import { useCall } from '@/components/voice/call-provider';
 import { ChangeList, useDevelopmentBoard, TurnDecision, type Turn } from './development-board';
 import { ArchBoard } from './arch-board';
+import { hostMap, type PlanMark } from '@/lib/map-focus';
 import { ConversationCircuit, type TrialControls } from './conversation-circuit';
 import type { Trace } from './architecture-trace';
 import { diffText, hunks, lineDiff } from './line-diff';
@@ -602,12 +603,18 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [id, place, library, reader, video]);
 
+  // チャットの直す案（部品 MapPlan）: 番号を地図に出し、案のカードを押すとその箱を開く（lib/map-focus.ts）
+  const [planMarks, setPlanMarks] = useState<PlanMark[]>([]);
+  const navigateRef = useRef<(next: { place: string; id?: string }) => boolean>(() => false);
+  useEffect(() => hostMap({ focus: node => { navigateRef.current({ place: node }); }, plan: setPlanMarks }), []);
+
   const navigate = (next: { place: string; id?: string }) => {
     if (shown && open.draft !== shown.text && next.id !== id &&
       !window.confirm('保存していない書きかけがあります。閉じますか？')) return false;
     onGo(next);
     return true;
   };
+  useLayoutEffect(() => { navigateRef.current = navigate; });
 
   // 構成図のボード。いつもの時は左の欄いっぱい、依頼の流れを再生する時はその枠の中で決まった高さ
   const showingCall = (!notedBox && !!board.session) || (showLastCall && board.turns.length > 0);
@@ -626,12 +633,12 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
         close: () => setHiddenActivity(activityKey),
         open: () => navigate({place: activityNode}),
       } : undefined} skills={skills} onSkills={(name, pid) => navigate({ place: 'reader-' + name, id: pid })} counts={counts}
-      active={place === 'video' ? 'v-owner' : library ? 'skills' : node?.id || ''} glow={work?.state === 'editing' ? workNode : ''}
+      active={place === 'video' ? 'v-owner' : library ? 'skills' : node?.id || ''} glow={work?.state === 'editing' ? workNode : ''} marks={planMarks}
       onPick={p => { navigate({ place: p }); }}
       toolbar={<>
-      {conversation.development && <button type="button" aria-label={call.room ? '通話を切る' : '開発室で通話する'}
+      {conversation.development && <button type="button" aria-label={call.room ? '通話を切る' : '指示文の見直しで通話する'}
         className="rounded-md border border-teal-800 bg-teal-800 px-3 py-1.5 text-xs font-semibold text-white"
-        onClick={() => call.room ? call.end() : call.start(conversation.room, {chatTitle:'ダン開発室'})}>{call.room ? '通話を切る' : '通話する'}</button>}
+        onClick={() => call.room ? call.end() : call.start(conversation.room, {chatTitle:'指示文の見直し'})}>{call.room ? '通話を切る' : '通話する'}</button>}
       {!trace && (lastChange || board.session || board.turns.length > 0) && <select aria-label="構成図に表示する変更や判断"
         className="max-w-36 rounded-md border bg-white px-1 py-1.5 text-xs" value="" onChange={e => {
           const value = e.target.value;
