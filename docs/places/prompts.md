@@ -10,12 +10,13 @@ speak: |
   - 構成図の上の「今動いている依頼」で見たいチャット・通話・並行作業を押すと、その依頼だけの作業が箱の横と「作業の様子」に出ます。「前の会話を流し直す」で部屋と依頼を選び、図の下の「流れを再生」で再生・一時停止・コマ送り・速度変更ができます。光った箱を押すと、その段階で記録された指示文・渡した本文・秒数が開きます。「依頼を試す」で渡す直前までか実際に進めるかを選べます。
   - 構成図の緑の枝には、ダンがどんな依頼で読むスキルかが出ます。「すべて」でそのダンの頼み別の枝を開けます。通話で制作を頼んだ時は並行作業につながります。
   - 構成図の「スキルを探す」で全スキルの手順書と参考ページを検索し、編集・復元できます。
-  - 「通話する」でこの開発室から普段の通話を始める。発言ごとに「振り分け」の横で、先読み・行き先・画面を見るか・判断の理由と時間が読める。「この判断を比較に残す」で次の発言と並べられる。「振り分け」の箱の「動作の設定」には、その時のモデル名と判断を採用する確率の下限が出る。どちらも押すと編集できる。利用枠や接続の都合でJevが答えられなかった時は、その理由も表示する。変更案・作業中の内容・確認結果は対象の箱の横に出る。
+  - 「通話する」でこの開発室から普段の通話を始める。発言ごとに「振り分け」の横で、先読み・行き先・画面を見るか・判断の理由と時間が読める。「この判断を比較に残す」で次の発言と並べられる。「振り分け」の箱の「動作の設定」には、その時のモデル名と判断を採用する確率の下限が出る。どちらも押すと編集できる。利用枠や接続の都合でJevが答えられなかった時は、その理由も表示する。箱に付けていた作業メモ（提案・作業中・確認結果）は 2026-11-28 から出さない。
+  - チャットの直す案（部品 MapPlan）の番号は地図の箱の左上に紫の丸で出る。チャットで案の番号を押すと、その箱の中身のいちばん上に「チャットの直す案のうち、この箱で直すこと」として押した案が紫の枠で出る（今→直した後・見込み・直す文の名前と、その文の今の文→書き換える文）。直す文は一覧で「N で直す文」の札が付く。
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: 96e9c9aaf6888b5c
-described: 86b15fc0b01b002a
+fingerprint: 24a3b067c78898ed
+described: 58de93c2969dd05b
 last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で追う操作は記載どおり"
 ---
 # ダンを動かしている指示文
@@ -30,7 +31,7 @@ last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で�
 ## 中にある物
 
 - 構成図（components/prompts/architecture.ts。箱と矢印はコードで確かめた呼び出し順で、根拠のファイルは同じファイルの頭に書いてある。仕組みを変えたらここも直す）。スマホの幅では図が横に広く、押した箱の所まで横に送る。
-- 場所ごとの一覧。札: 直したことのある文は「最終更新 月/日 時:分」だけ（誰が直したか・元の文のままかは出さない。11/22 本人）、灰＝プログラムの中（読むだけ）。
+- 場所ごとの一覧（見出し「◯◯が読む指示文（N）」）。各行に題、「読む：誰が｜いつ：いつ読むか」、札: 直したことのある文は「最終更新 月/日 時:分」だけ（誰が直したか・元の文のままかは出さない。11/22 本人）、灰＝プログラムの中（読むだけ）。
 - 全文の欄（「この文は、ここでそのまま書き直せます」。欄は中身の高さまで伸びる）、下に貼り付いた保存の帯（書き直すと「なぜ直したか」・直す前に戻す・保存が出る）、たたんだ「この文について」と「履歴」（押すとその版、この版に戻す・プログラムの中にあった頃に直された日）。
 - スマホの幅では、一覧と全文が入れ替わり（「一覧に戻る」）。PC でも 1280 より狭い時（開発室の中など）は、一覧と全文が入れ替わり、右に会話の列が出る。
 - 「ダンと話して直す」の会話（2026-11-21 本人「指示文の見直しはお前と一緒にやった方が良いけど、ページにチャットが無いからやりにくい」）。PC は全文の横の列（スクロールしても見えたまま）、スマホは右下の「ダンと話す」で下から出る。本人の会話は「ダン開発室」の部屋そのもの。/prompts と開発室の「指示文」の両方で、この部屋にある相談の続きを読んで話せる。
@@ -67,10 +68,10 @@ last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で�
 `python scripts/place_map.py stamp prompts` が書き直す。手で直さない。
 
 - 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/circuit/page.tsx`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/arch-board.tsx`, `frontend/src/components/prompts/architecture-trace.ts`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/conversation-circuit.tsx`, `frontend/src/components/prompts/development-board.tsx`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/request-playback.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
-- ラベル: 「図の説明を閉じる」、「引く」、「寄る」、「確認する発言」、「ダンに書く」、「止める」、「送る」、「作業中」、「閉じる」、「構成図に表示する変更や判断」、「選んだ場所の中身」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「この依頼の会話」、「スキル一覧」、「スキル・参考ページを検索」
+- ラベル: 「図の説明を閉じる」、「引く」、「寄る」、「確認する発言」、「ダンに書く」、「止める」、「送る」、「作業中」、「この箱の直す案」、「閉じる」、「構成図に表示する通話の判断」、「選んだ場所の中身」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「この依頼の会話」、「スキル一覧」、「スキル・参考ページを検索」
 - 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」、「node-facts」、「node-programs」
 - ボタンの字: 「×」
-- 見出し: 「プログラムの中にあった頃に直された日」、「動作の設定」、「作業の様子」
+- 見出し: 「チャットの直す案のうち、この箱で直すこと」、「プログラムの中にあった頃に直された日」、「動作の設定」、「作業の様子」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "0a52e92302", "app/prompts/catalog.json": "147765ba7f", "app/services/prompt_store.py": "3f32aa2266", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/arch-board.tsx": "e269df9b77", "frontend/src/components/prompts/architecture-trace.ts": "b7c601bd50", "frontend/src/components/prompts/architecture.ts": "037259d858", "frontend/src/components/prompts/conversation-circuit.tsx": "5f7ab329b4", "frontend/src/components/prompts/development-board.tsx": "21886e59dd", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "e05db8aa92", "frontend/src/components/prompts/prompts-screen.tsx": "e4a1bce605", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "d084b2ce2a", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "b703f67e84"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "71ed6d9ca9", "app/prompts/catalog.json": "76c1128646", "app/services/prompt_store.py": "3f32aa2266", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/arch-board.tsx": "2809e0014c", "frontend/src/components/prompts/architecture-trace.ts": "b7c601bd50", "frontend/src/components/prompts/architecture.ts": "42e5fa6084", "frontend/src/components/prompts/conversation-circuit.tsx": "5f7ab329b4", "frontend/src/components/prompts/development-board.tsx": "21886e59dd", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "3cbc21d822", "frontend/src/components/prompts/prompts-screen.tsx": "9ead6b73a6", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "d084b2ce2a", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "b703f67e84"} -->
 <!-- place_map:auto:end -->
