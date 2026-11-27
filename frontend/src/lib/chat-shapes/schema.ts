@@ -361,6 +361,11 @@ export const MapPlanProps = z
       now: z.string().max(120).describe('今どうなっているか（みきさんが困っていること）'),
       after: z.string().max(120).describe('直した後どうなるか'),
       effect: z.string().max(80).nullish().describe('見込み: みきさんが感じる違い（数字があれば数字）'),
+      // 2026-11-28 本人「番号を押してもパネルが開くだけで何で開いたのか意味分からん」。指示文を直す案は、どの文のどこを
+      // どう書き換えるかを実物の言葉で見せる（指示文の画面で番号を押すと、その文の前後が出る）
+      prompt: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9/_.-]{0,80}$/).nullish().describe('直す指示文の id（例 call/policies）'),
+      quote: z.string().max(240).nullish().describe('その指示文の今の文（書いてあるとおりに引く）'),
+      rewrite: z.string().max(320).nullish().describe('直した後の文'),
     })).describe(`直す所。直す順に1〜${MAP_PLAN_MAX}個`),
     title: z.string().max(60).nullish().describe('題'),
     goal: z.string().max(120).nullish().describe('全部直すとどうなるか（一行）'),

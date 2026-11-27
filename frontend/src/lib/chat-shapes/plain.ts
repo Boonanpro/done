@@ -1305,7 +1305,7 @@ function nodeToPlain(call: ShapeNode): string | null {
       const items = objs(a0).filter((c) => str(c.title));
       if (!items.length) return null;
       return [...(str(a1) ? [`**${str(a1)}**`] : []),
-        ...items.map((c, i) => `${i + 1}. **${str(c.title)}**（${str(c.node)}）\n   今: ${str(c.now)}\n   直した後: ${str(c.after)}${str(c.effect) ? `\n   見込み: ${str(c.effect)}` : ''}`),
+        ...items.map((c, i) => `${i + 1}. **${str(c.title)}**（${str(c.node)}）\n   今: ${str(c.now)}\n   直した後: ${str(c.after)}${str(c.quote) ? `\n   今の文: 「${str(c.quote)}」` : ''}${str(c.rewrite) ? `\n   書き換え: 「${str(c.rewrite)}」` : ''}${str(c.effect) ? `\n   見込み: ${str(c.effect)}` : ''}`),
         ...(str(a2) ? [`→ ${str(a2)}`] : [])].join('\n');
     }
     default:

@@ -3,24 +3,39 @@
 // - 同じ画面（/prompts、開発室の「指示文」）: window のイベントで渡す。
 // - 開発室の成果物タブ: 会話は外の画面、地図は中の枠（iframe）なので postMessage で渡し、中から受け取りの返事（ack）をもらう。
 // - どちらにも地図が無ければ、/prompts?place=<箱> を新しいタブで開く。
-// 渡すのは箱の id と番号だけ（押して地図を動かすだけの無害な知らせなので、送り元は問わない）。
+// 渡すのは箱の id・番号と、案の中身の短い文だけ（押して地図を動かし、中身を見せるだけの無害な知らせなので、送り元は問わない）。
+// 2026-11-28 本人「番号を押しても該当するパネルが開くだけで、何で開いたのか意味分からん」→ 押した番号も渡し、指示文の画面は
+// 箱の中身の一番上にその案（今→直した後・見込み・直す文の前後）を出す。
 
-export type PlanMark = { node: string; n: number; title: string };
+export type PlanMark = {
+  node: string; n: number; title: string;
+  now?: string; after?: string; effect?: string; prompt?: string; quote?: string; rewrite?: string;
+};
 
 const FOCUS = 'dan-map-focus';
 const PLAN = 'dan-map-plan';
 const ACK = 'dan-map-ack';
 const HELLO = 'dan-map-hello';   // 後から開いた中の枠の地図が、外の会話に今の番号を聞く
 const ID_RE = /^[A-Za-z0-9-]{1,40}$/;
+const PROMPT_RE = /^[A-Za-z0-9][A-Za-z0-9/_.-]{0,80}$/;
 
-type Here = { focus: (node: string) => void; plan: (marks: PlanMark[]) => void };
+type Here = { focus: (node: string, n?: number) => void; plan: (marks: PlanMark[]) => void };
 let here: Here | null = null;
 let lastPlan: PlanMark[] = [];
 
 function cleanMarks(v: unknown): PlanMark[] {
   if (!Array.isArray(v)) return [];
-  return v.flatMap((m) => (m && typeof m === 'object' && typeof (m as PlanMark).node === 'string' && ID_RE.test((m as PlanMark).node)
-    ? [{ node: (m as PlanMark).node, n: Number((m as PlanMark).n) || 0, title: String((m as PlanMark).title || '').slice(0, 80) }] : []));
+  const s = (x: unknown, max: number) => (typeof x === 'string' && x.trim() ? x.slice(0, max) : undefined);
+  return v.flatMap((raw) => {
+    const m = raw as PlanMark;
+    if (!m || typeof m !== 'object' || typeof m.node !== 'string' || !ID_RE.test(m.node)) return [];
+    const prompt = s(m.prompt, 81);
+    return [{
+      node: m.node, n: Number(m.n) || 0, title: String(m.title || '').slice(0, 80),
+      now: s(m.now, 160), after: s(m.after, 160), effect: s(m.effect, 120),
+      prompt: prompt && PROMPT_RE.test(prompt) ? prompt : undefined, quote: s(m.quote, 300), rewrite: s(m.rewrite, 400),
+    }];
+  });
 }
 
 function frames(): Window[] {
@@ -42,15 +57,15 @@ export function announcePlan(marks: PlanMark[]) {
   for (const w of frames()) w.postMessage({ type: PLAN, marks }, '*');
 }
 
-/** 地図のその箱を開く。地図がどこにも無ければ指示文の画面を新しいタブで開く */
-export function focusMapBox(node: string) {
+/** 地図のその箱を開き、n 番の案をその中身の一番上に出す。地図がどこにも無ければ指示文の画面を新しいタブで開く */
+export function focusMapBox(node: string, n?: number) {
   if (!ID_RE.test(node)) return;
-  if (here) { here.focus(node); return; }
+  if (here) { here.focus(node, n); return; }
   const targets = frames();
   let acked = false;
   const onAck = (e: MessageEvent) => { if (e.data?.type === ACK && e.data.node === node) acked = true; };
   window.addEventListener('message', onAck);
-  for (const w of targets) w.postMessage({ type: FOCUS, node }, '*');
+  for (const w of targets) w.postMessage({ type: FOCUS, node, n }, '*');
   window.setTimeout(() => {
     window.removeEventListener('message', onAck);
     if (!acked) window.open(`/prompts?place=${encodeURIComponent(node)}`, '_blank', 'noopener');
@@ -65,7 +80,7 @@ export function hostMap(h: Here): () => void {
     const d = e.data;
     if (!d || typeof d !== 'object') return;
     if (d.type === FOCUS && typeof d.node === 'string' && ID_RE.test(d.node)) {
-      h.focus(d.node);
+      h.focus(d.node, Number(d.n) || undefined);
       (e.source as Window | null)?.postMessage({ type: ACK, node: d.node }, '*');
     } else if (d.type === PLAN) {
       h.plan(cleanMarks(d.marks));
