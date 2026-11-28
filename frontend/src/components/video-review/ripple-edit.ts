@@ -91,7 +91,14 @@ export function mainLayerOf(tracks: RTrack[], lanes: Map<string, RLane>): number
 
 function shiftClip(c: RClip, d: number): RClip {
   if (Math.abs(d) < 1e-6) return c;
-  return { ...c, timeline_start: r2(c.timeline_start + d), timeline_end: r2(c.timeline_end + d) };
+  return { ...c, timeline_start: r2(c.timeline_start + d), timeline_end: r2(c.timeline_end + d), ...shiftWords(c, d) };
+}
+
+// 字幕の語の時刻（前半→後半・カラオケ）はタイムライン上の秒なので、字幕と一緒に動かす。
+function shiftWords(c: RClip, d: number): { words?: unknown } {
+  const ws = c.words as Array<{ start: number; end?: number | null } & Record<string, unknown>> | null | undefined;
+  if (!Array.isArray(ws) || !ws.length) return {};
+  return { words: ws.map((w) => ({ ...w, start: r3(Number(w.start) + d), ...(w.end != null ? { end: r3(Number(w.end) + d) } : {}) })) };
 }
 
 type AnnData = { keyframes?: Array<{ t: number } & Record<string, unknown>>; track_boxes?: Record<string, number[]> };
@@ -134,7 +141,7 @@ export function removeRange<S extends RSeq, A extends RAnn>(
       // 頭が区間の中、後ろが区間の外: 頭を切って区間の頭から始める
       const cut = y - s;
       const keys = c.motion_keys && c.motion_keys.length ? { motion_keys: c.motion_keys.map((k) => ({ ...k, t: Number((k.t - cut).toFixed(4)) })) } : {};
-      out.push({ ...c, timeline_start: r2(x), timeline_end: r2(e - len), ...(av ? { source_start: r3(Number(c.source_start || 0) + srcAdvance(c, cut)) } : {}), ...keys });
+      out.push({ ...c, timeline_start: r2(x), timeline_end: r2(e - len), ...(av ? { source_start: r3(Number(c.source_start || 0) + srcAdvance(c, cut)) } : {}), ...keys, ...shiftWords(c, -len) });
     }
     return { ...track, clips: out };
   });

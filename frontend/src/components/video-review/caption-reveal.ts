@@ -11,7 +11,11 @@ const spells = (cap: RevealCaption) =>
 // （2026-11-28 本人「1文字ずつ出す字幕はやめてください」）。区切りが本文と合わない時は全部まとめて出す。
 export function revealTokens(cap: RevealCaption, anim: 'typewriter' | 'karaoke'): { text: string; start: number; end: number }[] {
   if (spells(cap)) {
-    const ws = cap.words as RevealWord[];
+    // 語の時刻はタイムライン上の秒。字幕だけ動いて語が元の時刻のまま残った時（詰める・ずらす。
+    // 2026-11-28 本人が隙間を詰めた後ろの字幕で後半が出なくなった）は、語ごと字幕の頭へ寄せる。
+    const raw = cap.words as RevealWord[];
+    const d = raw[0].start < cap.start - 0.05 || raw[0].start >= cap.end ? cap.start - raw[0].start : 0;
+    const ws = d ? raw.map((w) => ({ ...w, start: w.start + d, end: w.end != null && Number.isFinite(Number(w.end)) ? Number(w.end) + d : w.end })) : raw;
     return ws.map((w, i) => ({ text: w.text, start: w.start, end: Number.isFinite(Number(w.end)) && w.end != null ? Number(w.end) : (ws[i + 1]?.start ?? cap.end) }));
   }
   if (anim === 'typewriter') return [{ text: cap.text, start: cap.start, end: cap.end }];
