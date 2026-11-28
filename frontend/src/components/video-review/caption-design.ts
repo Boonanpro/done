@@ -135,7 +135,7 @@ ${Object.values(CAPTION_OWNER_FONT_FILES).map((f) => `@font-face{font-family:'${
 // Noto-Sans caption with a black outline (a sane default, not the old plain Yu Gothic).
 export type CaptionSpan = {
   s: number; e: number; color?: string; scale?: number;
-  font?: CaptionFontId; bold?: boolean; outlineColor?: string; outlineWidth?: number;
+  font?: CaptionFontId; bold?: boolean; outlineColor?: string; outlineWidth?: number; outlineOpacity?: number;
 };
 
 export type CaptionDesign = {
@@ -144,6 +144,7 @@ export type CaptionDesign = {
   color?: string;             // text fill (ignored when gradient is set)
   gradient?: [string, string];// vertical gradient fill (top, bottom)
   outlineColor?: string;
+  outlineOpacity?: number;    // 0..1; legacy outlines are fully opaque
   outlineWidth?: number;      // multiplier of the default stroke (1 = default, 0 = none)
   fontSize?: number;          // multiplier of the base size (base = outH * 0.052)
   maxWidth?: number;          // fraction of frame width (default .88; manual values may exceed 1)
@@ -262,6 +263,9 @@ export function captionBoxStyle(design: CaptionDesign, outH: number): CSSPropert
   return style;
 }
 
+export const captionStrokeColor = 'color-mix(in srgb, var(--caption-outline-color) var(--caption-outline-percent), transparent)';
+export const outlinePercent = (opacity = 1) => `${Math.max(0, Math.min(1, opacity)) * 100}%`;
+
 // The text itself — font, fill (solid or gradient), outline (stroke painted behind the fill).
 export function captionTextStyle(design: CaptionDesign, outH: number): CSSProperties {
   const base = outH * 0.052;
@@ -277,7 +281,9 @@ export function captionTextStyle(design: CaptionDesign, outH: number): CSSProper
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
     // Stroke painted behind the fill = clean outline that doesn't eat the glyph.
-    WebkitTextStroke: strokeW > 0.1 ? `${strokeW.toFixed(2)}px ${design.outlineColor || '#000000'}` : undefined,
+    '--caption-outline-color': design.outlineColor || '#000000',
+    '--caption-outline-percent': outlinePercent(design.outlineOpacity),
+    WebkitTextStroke: strokeW > 0.1 ? `${strokeW.toFixed(2)}px ${captionStrokeColor}` : undefined,
     paintOrder: 'stroke fill',
   } as CSSProperties;
   if (design.gradient) {

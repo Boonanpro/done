@@ -10,7 +10,7 @@ import {
   type CaptionDesign, type CaptionSpan, captionFont,
   captionAnchorStyle,
   captionBoxStyle,
-  captionTextStyle,
+  captionTextStyle, captionStrokeColor, outlinePercent,
   easeOut,
   popScale,
 } from './caption-design';
@@ -98,7 +98,13 @@ function spanStyle(sp: ColorSpan | undefined): CSSProperties | undefined {
   }
   if (sp.bold != null) st.fontWeight = sp.bold ? 900 : 400;
   if (sp.outlineWidth != null) st.WebkitTextStrokeWidth = (0.085 * sp.outlineWidth) + 'em';
-  if (sp.outlineColor) st.WebkitTextStrokeColor = sp.outlineColor;
+  if (sp.outlineColor || sp.outlineOpacity != null) {
+    Object.assign(st, {
+      ...(sp.outlineColor ? { '--caption-outline-color': sp.outlineColor } : {}),
+      ...(sp.outlineOpacity != null ? { '--caption-outline-percent': outlinePercent(sp.outlineOpacity) } : {}),
+      WebkitTextStrokeColor: captionStrokeColor,
+    });
+  }
   const sc = Number(sp.scale);
   if (Number.isFinite(sc) && sc >= 0 && sc !== 1) st.fontSize = `${sc}em`;
   return st;
@@ -166,6 +172,9 @@ function EditableCaption({ cap, style, edit }: { cap: RenderCaption; style: CSSP
       const span = document.createElement('span');
       span.textContent = run.text;
       Object.assign(span.style, run.style);
+      for (const [name, value] of Object.entries(run.style)) {
+        if (name.startsWith('--')) span.style.setProperty(name, String(value));
+      }
       return span;
     });
     // A trailing line break needs a caret stop on the empty final line.

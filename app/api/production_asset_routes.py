@@ -657,6 +657,12 @@ def _caption_style_override(style: dict[str, Any] | None, base_font: int, width:
             parts.append(f"\\bord{max(0, round(4 * float(style['outlineWidth'])))}")
     except Exception:
         pass
+    if style.get("outlineOpacity") is not None and font_px > 0 and "\\alpha&HFF&" not in parts:
+        try:
+            opacity = max(0.0, min(1.0, float(style["outlineOpacity"])))
+            parts.append(f"\\3a&H{round(255 * (1 - opacity)):02X}&")
+        except (TypeError, ValueError):
+            pass
     if style.get("bold") is False:
         parts.append("\\b0")
     # Anchored bottom-centre (\an2); the user moves it freely with x/y (no top/center/bottom preset).

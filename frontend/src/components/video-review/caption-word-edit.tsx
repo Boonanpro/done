@@ -4,7 +4,7 @@ import type { CaptionDesign } from './caption-design';
 type Span = NonNullable<CaptionDesign['colorSpans']>[number];
 export type WordRange = Pick<Span, 's' | 'e'>;
 export type WordLook = Omit<Span, 's' | 'e'>;
-const attributes = ['color', 'scale', 'font', 'bold', 'outlineColor', 'outlineWidth'] as const;
+const attributes = ['color', 'scale', 'font', 'bold', 'outlineColor', 'outlineWidth', 'outlineOpacity'] as const;
 
 export function styleWords(spans: Span[] = [], range: WordRange, patch: WordLook): Span[] {
   const cuts = Array.from(new Set([range.s, range.e, ...spans.flatMap(sp => [sp.s, sp.e])])).sort((a, b) => a - b);

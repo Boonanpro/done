@@ -1,6 +1,6 @@
 // タイムラインの基本の編集（2026-11-25 本人）。node --experimental-strip-types で動かす。
 import assert from 'node:assert/strict';
-import { applyRoll, applySlide, applySlip, editPoints, insertBlock, multiTrimMoved, nudgeRoom, overwriteMoved, resolveFree, splitAt, touchingNeighbor, trimRoom, withPartners } from './timeline-ops.ts';
+import { applyRoll, applySlide, applySlip, editPoints, insertBlock, multiTrimMoved, nudgeRoom, overwriteMoved, resolveFree, selectionRoll, splitAt, touchingNeighbor, trimRoom, withPartners } from './timeline-ops.ts';
 import { rippleMoveGroups, insertPoints } from './ripple-edit.ts';
 import type { RLane, RSeq } from './ripple-edit.ts';
 
@@ -183,3 +183,21 @@ const newId = () => `n${++n}`;
   assert.equal(m.has('M2'), false);
 }
 console.log('timeline-ops ok');
+
+// A caption and its question card share the dragged edge. The neighbour keeps
+// touching the caption even when trimming both layers from the left.
+{
+  const clips = [
+    { id: 'previous', timeline_start: 0, timeline_end: 3 },
+    { id: 'caption', timeline_start: 3, timeline_end: 6 },
+    { id: 'card', kind: 'image', source_start: 0, source_end: 3, timeline_start: 3, timeline_end: 6 },
+  ];
+  const seq = { tracks: [{ clips }] };
+  const lanes = new Map<string, RLane>(clips.map(c => [c.id, { zone: 'visual', layer: c.id === 'card' ? 1 : 2 }]));
+  const group = selectionRoll(seq, ['caption', 'card'], 'card', 'start', lanes, false, () => false, [])!;
+  const edit = applyRoll(seq, group.prevIds, group.nextIds, -1, () => Infinity);
+  assert.deepEqual(edit.seq.tracks[0].clips.map(c => [c.timeline_start, c.timeline_end]), [[0, 2], [2, 6], [2, 6]]);
+  const join = selectionRoll(seq, ['previous', 'caption'], 'previous', 'end', lanes, false, () => false, [])!;
+  assert.deepEqual(join.prevIds, ['previous']);
+  assert.deepEqual(join.nextIds, ['caption']);
+}

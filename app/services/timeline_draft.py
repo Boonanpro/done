@@ -253,6 +253,8 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
     draft = load_draft(room_id, draft_id)
     if draft.get('presentation_only'):
         return {'ok':False,'conflict':False,'problems':['別の見本を提示する作業から元タイムラインは変更できません']}
+    from app.services.lane_switches import separate_draft_placements
+    separate_draft_placements(draft["sequence"], draft.get("published_sequence") or draft.get("base_sequence") or {})
     problems = validate(draft["sequence"], room_id)
     if draft.get("base_sequence") is not None:
         from app.services.timeline_scope import violations
