@@ -246,7 +246,30 @@ def _read_assets(room_id: str) -> list[dict[str, Any]]:
 
 
 def _write_assets(room_id: str, assets: list[dict[str, Any]]) -> None:
-    _index_path(room_id).write_text(json.dumps(assets, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Replace the file whole: a reader that caught it half-written got [] and could save that back.
+    path = _index_path(room_id)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(assets, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _merge_asset_meta(room_id: str, stale_rows: list[dict[str, Any]], ids: set[str], keys: tuple[str, ...]) -> None:
+    """Save metadata keys a long job computed on a list it read minutes ago. Writing that old list back
+    dropped every asset registered meanwhile (2026-11-28): read the list again and change only these keys."""
+    want: dict[str, dict[str, Any]] = {}
+    for r in stale_rows:
+        rid = str(r.get("id") or "")
+        meta = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
+        if rid in ids:
+            want[rid] = {k: meta[k] for k in keys if k in meta}
+    if not want:
+        return
+    rows = _read_assets(room_id)
+    for row in rows:
+        upd = want.get(str(row.get("id") or ""))
+        if upd:
+            row["metadata"] = {**(row.get("metadata") if isinstance(row.get("metadata"), dict) else {}), **upd}
+    _write_assets(room_id, rows)
 
 
 def _read_json_list(path: Path) -> list[dict[str, Any]]:
@@ -3412,6 +3435,7 @@ async def _analyze_assets_for_edit(room_id: str, source_assets: list[dict[str, A
     by_id = {str(a.get("id")): a for a in assets if a.get("id")}
     results: dict[str, str] = {}
     dirty = False
+    touched: set[str] = set()
     for asset in source_assets:
         if not isinstance(asset, dict) or asset.get("kind") != "video":
             continue
@@ -3435,8 +3459,9 @@ async def _analyze_assets_for_edit(room_id: str, source_assets: list[dict[str, A
                 meta["edit_analysis_src"] = str(src)
                 live["metadata"] = meta
                 dirty = True
+                touched.add(aid)
     if dirty:
-        _write_assets(room_id, assets)
+        _merge_asset_meta(room_id, assets, touched, ("edit_analysis", "edit_analysis_src"))
     return results
 
 
@@ -3748,6 +3773,7 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
     whisper_model = os.environ.get("DAN_PLAN_WHISPER_MODEL", "medium")
     results: dict[str, Any] = {}
     dirty = False
+    touched: set[str] = set()
     asset_index = 0
     for asset in source_assets:
         if not isinstance(asset, dict) or asset.get("kind") != "video":
@@ -3772,6 +3798,7 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
                 meta["silence_src"] = str(src)
                 live["metadata"] = meta
                 dirty = True
+                touched.add(aid)
         cached = meta.get("audio_analysis")
         if isinstance(cached, dict) and meta.get("audio_analysis_src") == str(src) and meta.get("audio_analysis_model") == whisper_model:
             cached = dict(cached)
@@ -3813,8 +3840,9 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
             meta["audio_analysis_model"] = whisper_model
             live["metadata"] = meta
             dirty = True
+            touched.add(aid)
     if dirty:
-        _write_assets(room_id, assets)
+        _merge_asset_meta(room_id, assets, touched, ("silence_regions", "silence_src", "audio_analysis", "audio_analysis_src", "audio_analysis_model"))
     if results:
         n = sum(len(v.get("segments") or []) for v in results.values())
         _append_job_event(room_id, job_id, {"type": "status", "text": f"音声解析(Whisper)完了: {len(results)}本 / {n}セグメント"})
@@ -7708,7 +7736,7 @@ def _ensure_audio_analysis_locked(room_id: str, asset_ids: list[str]) -> dict[st
     script = PROJECT_ROOT / "scripts" / "dan_audio_check.py"
     cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     out: dict[str, dict[str, Any]] = {}
-    dirty = False
+    fresh: dict[str, dict[str, Any]] = {}
     for aid in dict.fromkeys(asset_ids):
         a = by_id.get(aid)
         if not a or a.get("kind") != "video":
@@ -7735,14 +7763,18 @@ def _ensure_audio_analysis_locked(room_id: str, asset_ids: list[str]) -> dict[st
             data = {}
         entry = {"asset_id": aid, "duration": data.get("duration"), "segments": data.get("segments") or []}
         out[aid] = entry
-        meta = dict(meta)
-        meta["audio_analysis"] = entry
-        meta["audio_analysis_src"] = str(src)
-        meta["audio_analysis_model"] = whisper_model
-        a["metadata"] = meta
-        dirty = True
-    if dirty:
-        _write_assets(room_id, assets)
+        if not entry["segments"]:
+            continue  # a failed or stopped run is not a result: leave the asset as it was
+        fresh[aid] = {"audio_analysis": entry, "audio_analysis_src": str(src), "audio_analysis_model": whisper_model}
+    if fresh:
+        # Whisper takes minutes. Writing back the list read before it ran dropped every asset registered in
+        # the meantime (14 of them on 2026-11-28). Read the list again and change only these assets.
+        rows = _read_assets(room_id)
+        for row in rows:
+            upd = fresh.get(row.get("id"))
+            if upd:
+                row["metadata"] = {**(row.get("metadata") if isinstance(row.get("metadata"), dict) else {}), **upd}
+        _write_assets(room_id, rows)
     return out
 
 
