@@ -15,9 +15,9 @@ speak: |
   - ダンの各係が読む指示文を、みきさんが読んで直し、前の版に戻す画面です。
   - 試す時は DAN_PROMPTS_DIR を一時の場所にして、本物の指示文を書き換えません。
 shows: []
-fingerprint: 24a3b067c78898ed
-described: 58de93c2969dd05b
-last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で追う操作は記載どおり"
+fingerprint: de372a039817aeb2
+described: 1932df4a22a83476
+last_review: "2026-11-28 箱の中身からコードの欄を外し、裏方4箱をダンの本体にまとめた（説明の9行目・24行目を直した）"
 ---
 # ダンを動かしている指示文
 
@@ -69,9 +69,9 @@ last_review: "2026-11-22 説明は変えない: 依頼を選び、構成図で�
 
 - 見張るファイル: `app/api/prompts_screen.py`, `app/prompts/catalog.json`, `app/services/prompt_store.py`, `frontend/src/app/prompts/circuit/page.tsx`, `frontend/src/app/prompts/page.tsx`, `frontend/src/components/prompts/arch-board.tsx`, `frontend/src/components/prompts/architecture-trace.ts`, `frontend/src/components/prompts/architecture.ts`, `frontend/src/components/prompts/conversation-circuit.tsx`, `frontend/src/components/prompts/development-board.tsx`, `frontend/src/components/prompts/line-diff.ts`, `frontend/src/components/prompts/prompts-chat.tsx`, `frontend/src/components/prompts/prompts-screen.tsx`, `frontend/src/components/prompts/reader-skills.tsx`, `frontend/src/components/prompts/request-playback.tsx`, `frontend/src/components/prompts/skill-library.tsx`, `frontend/src/lib/prompts-api.ts`
 - ラベル: 「図の説明を閉じる」、「引く」、「寄る」、「確認する発言」、「ダンに書く」、「止める」、「送る」、「作業中」、「この箱の直す案」、「閉じる」、「構成図に表示する通話の判断」、「選んだ場所の中身」、「ダンと話す」、「会話を閉じる」、「依頼の流れ」、「時間順の作業」、「再生の操作」、「1段戻る」、「1段進む」、「再生位置」、「再生速度」、「この依頼の会話」、「スキル一覧」、「スキル・参考ページを検索」
-- 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」、「node-facts」、「node-programs」
+- 試験の印: 「dan-change」、「dan-working」、「dan-working-elsewhere」、「node-facts」
 - ボタンの字: 「×」
 - 見出し: 「チャットの直す案のうち、この箱で直すこと」、「プログラムの中にあった頃に直された日」、「動作の設定」、「作業の様子」
 
-<!-- place_map:files {"app/api/prompts_screen.py": "71ed6d9ca9", "app/prompts/catalog.json": "76c1128646", "app/services/prompt_store.py": "3f32aa2266", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/arch-board.tsx": "2809e0014c", "frontend/src/components/prompts/architecture-trace.ts": "b7c601bd50", "frontend/src/components/prompts/architecture.ts": "42e5fa6084", "frontend/src/components/prompts/conversation-circuit.tsx": "5f7ab329b4", "frontend/src/components/prompts/development-board.tsx": "21886e59dd", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "3cbc21d822", "frontend/src/components/prompts/prompts-screen.tsx": "9ead6b73a6", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "d084b2ce2a", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "b703f67e84"} -->
+<!-- place_map:files {"app/api/prompts_screen.py": "71ed6d9ca9", "app/prompts/catalog.json": "76c1128646", "app/services/prompt_store.py": "3f32aa2266", "frontend/src/app/prompts/circuit/page.tsx": "f366dafdc9", "frontend/src/app/prompts/page.tsx": "0fb7f5fefc", "frontend/src/components/prompts/arch-board.tsx": "49d6c447c3", "frontend/src/components/prompts/architecture-trace.ts": "432890d263", "frontend/src/components/prompts/architecture.ts": "bdd27616ab", "frontend/src/components/prompts/conversation-circuit.tsx": "5f7ab329b4", "frontend/src/components/prompts/development-board.tsx": "21886e59dd", "frontend/src/components/prompts/line-diff.ts": "dd4af75399", "frontend/src/components/prompts/prompts-chat.tsx": "3cbc21d822", "frontend/src/components/prompts/prompts-screen.tsx": "b71109c2ff", "frontend/src/components/prompts/reader-skills.tsx": "0619791b29", "frontend/src/components/prompts/request-playback.tsx": "d084b2ce2a", "frontend/src/components/prompts/skill-library.tsx": "d4ed9b43e6", "frontend/src/lib/prompts-api.ts": "b703f67e84"} -->
 <!-- place_map:auto:end -->
