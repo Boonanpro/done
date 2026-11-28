@@ -155,7 +155,9 @@ export type CaptionDesign = {
   // Background box behind the text (the modern "telop bar" look). Absent = no box.
   bg?: { color?: string; opacity?: number; radius?: number; padX?: number; padY?: number };
   // Soft drop shadow on the whole caption block.
-  shadow?: { color?: string; blur?: number; dx?: number; dy?: number };
+  // repeat = the same shadow stacked 1..6 times: a dense edge-like shadow that hugs the glyphs
+  // without a hard stroke (2026-11-28 owner: 縁は0で、文字に貼り付いた濃い影で見せたい).
+  shadow?: { color?: string; blur?: number; dx?: number; dy?: number; repeat?: number };
   letterSpacing?: number;     // multiplier of fontSize (0.02 = subtle tracking)
   // Slant of the whole caption block (box included), in degrees. Negative leans the tops to the
   // right like italics (-9 = the red emphasis look). Clamped to ±30.
@@ -254,7 +256,9 @@ export function captionBoxStyle(design: CaptionDesign, outH: number): CSSPropert
   if (skew) style.transform = `skewX(${skew}deg)`;
   if (design.shadow) {
     const s = design.shadow;
-    style.filter = `drop-shadow(${num(s.dx, 0)}px ${num(s.dy, Math.round(fs * 0.06))}px ${num(s.blur, Math.round(fs * 0.12))}px ${s.color || 'rgba(0,0,0,0.55)'})`;
+    const one = `drop-shadow(${num(s.dx, 0)}px ${num(s.dy, Math.round(fs * 0.06))}px ${num(s.blur, Math.round(fs * 0.12))}px ${s.color || 'rgba(0,0,0,0.55)'})`;
+    const n = Math.max(1, Math.min(6, Math.round(num(s.repeat, 1))));
+    style.filter = Array(n).fill(one).join(' ');
   }
   return style;
 }

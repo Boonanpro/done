@@ -115,3 +115,9 @@ def test_mcp_caption_schema_accepts_the_looks():
         jsonschema.validate(look, srv._CAPTION_STYLE)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({'font': 'Hiragino Sans'}, srv._CAPTION_STYLE)
+
+
+def test_caption_shadow_repeat_is_kept_and_clamped():
+    from app.services.timeline_commands import _caption_sub_style, _CAPTION_SHADOW_KEYS
+    out = _caption_sub_style({"color": "rgba(255,255,255,1)", "blur": 3, "dy": 0, "repeat": 9}, _CAPTION_SHADOW_KEYS)
+    assert out == {"color": "rgba(255,255,255,1)", "blur": 3.0, "dy": 0.0, "repeat": 6.0}
