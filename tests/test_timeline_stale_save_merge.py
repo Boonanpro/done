@@ -95,3 +95,26 @@ def test_browser_number_format_counts_as_unchanged():
     live = seq([clip("a", 0.0, 5.0, scale=1.0, asset_id="dan")])
     out, stats = tr.merge(base, mine, live)
     assert ids(out)["a"]["asset_id"] == "dan" and stats["conflicts_owner_won"] == 0
+
+
+def test_owner_moves_clip_dan_zooms_it_both_survive():
+    """2026-11-28: the owner closed a gap (later clips moved) while Dan zoomed them; the owner's
+    save wrote the old transform back. Different fields of one clip must both survive."""
+    base = seq([clip("a", 10, 15, asset_id="rec", transform={"scale": 1.1}), clip("b", 15, 20, asset_id="rec")])
+    live = seq([clip("a", 10, 15, asset_id="rec", transform={"scale": 2.4, "x": 0.1},
+                     motion_keys=[{"t": 0, "scale": 1.1}]),
+                clip("b", 15, 20, asset_id="blurred", source_start=3)])
+    mine = seq([clip("a", 8, 13, asset_id="rec", transform={"scale": 1.1}), clip("b", 13, 18, asset_id="rec")])
+    out, stats = tr.merge(base, mine, live)
+    got = ids(out)
+    assert got["a"]["timeline_start"] == 8 and got["a"]["timeline_end"] == 13
+    assert got["a"]["transform"] == {"scale": 2.4, "x": 0.1} and got["a"]["motion_keys"]
+    assert got["b"]["timeline_start"] == 13 and got["b"]["asset_id"] == "blurred" and got["b"]["source_start"] == 3
+
+
+def test_field_both_changed_takes_the_owners():
+    base = seq([clip("a", 0, 5, transform={"scale": 1})])
+    live = seq([clip("a", 0, 5, transform={"scale": 2})])
+    mine = seq([clip("a", 1, 5, transform={"scale": 3})])
+    got = ids(tr.merge(base, mine, live)[0])
+    assert got["a"]["transform"] == {"scale": 3} and got["a"]["timeline_start"] == 1

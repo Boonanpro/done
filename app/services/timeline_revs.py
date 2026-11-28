@@ -124,6 +124,23 @@ def _index(seq: dict[str, Any] | None) -> dict[str, tuple[int, int, dict[str, An
     return out
 
 
+def _merge_clip(be: tuple[int, int, dict[str, Any]], me: tuple[int, int, dict[str, Any]],
+                le: tuple[int, int, dict[str, Any]]) -> tuple[int, int, dict[str, Any]]:
+    """A clip both sides changed: live's clip with the fields the owner changed taken from the
+    owner (a field both changed → the owner's). The lane is the owner's if the owner moved it."""
+    bc, mc, lc = be[2], me[2], le[2]
+    out = copy.deepcopy(lc)
+    for k in dict.fromkeys([*bc.keys(), *mc.keys()]):
+        if _sig(mc.get(k)) == _sig(bc.get(k)):
+            continue
+        if k in mc and mc[k] is not None:
+            out[k] = copy.deepcopy(mc[k])
+        else:
+            out.pop(k, None)
+    lane = me[0] if me[0] != be[0] else le[0]
+    return (lane, me[1] if lane == me[0] else le[1], out)
+
+
 def merge(base: dict[str, Any], mine: dict[str, Any], live: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
     """Three-way merge of the owner's save (`mine`, made from `base`) onto the live timeline.
 
@@ -149,6 +166,13 @@ def merge(base: dict[str, Any], mine: dict[str, Any], live: dict[str, Any]) -> t
         elif kl == kb:
             put(me, 1)
             stats["from_owner"] += 1
+        elif be is not None and me is not None and le is not None:
+            # Both changed the clip. Merge field by field: the owner's screen wins only the fields
+            # the owner changed. 2026-11-28: the owner closed a gap (every later clip's
+            # timeline_start moved) while Dan zoomed those clips into the text being read — the
+            # whole-clip rule wrote the owner's old transform back and erased every zoom.
+            put(_merge_clip(be, me, le), 1)
+            stats["conflicts_owner_won"] += 1
         else:
             put(me, 1)
             stats["conflicts_owner_won"] += 1
