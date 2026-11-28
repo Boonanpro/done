@@ -4018,7 +4018,9 @@ export function VideoReviewEditor({
       .filter((c) => {
         if (c.track !== 'caption' && typeof c.text !== 'string') return false;
         const anim = (c.style as CaptionDesign | null | undefined)?.animation;
-        if (anim !== 'karaoke' && anim !== 'typewriter') return false;
+        // タイプ（前半→後半）は書いた区切りで出す。声の語で区切り直すと1〜2字ずつ出てしまうので合わせない
+        // （2026-11-28 本人「1文字ずつ出す字幕はやめてください」）。合わせるのは語ごとに光るカラオケだけ。
+        if (anim !== 'karaoke') return false;
         // Words that already spell this caption were written on purpose (Dan's 前半→後半 reveal, or an
         // earlier sync): keep them. Re-syncing replaced Dan's parts with Whisper words that no longer
         // spell the text, and every editor tab started a full-recording Whisper run (2026-11-28).
