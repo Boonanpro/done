@@ -136,7 +136,29 @@ ${Object.values(CAPTION_OWNER_FONT_FILES).map((f) => `@font-face{font-family:'${
 export type CaptionSpan = {
   s: number; e: number; color?: string; scale?: number;
   font?: CaptionFontId; bold?: boolean; outlineColor?: string; outlineWidth?: number; outlineOpacity?: number;
+  // この言葉だけの影（字幕全体の影の代わりに使う。白い影の字幕の黄色い言葉を黒い影に、など）
+  shadow?: CaptionShadow;
 };
+
+export type CaptionShadow = { color?: string; blur?: number; dx?: number; dy?: number; repeat?: number };
+
+// The CSS filter for a caption shadow (repeat = the same drop-shadow stacked 1..6 times).
+export function captionShadowFilter(s: CaptionShadow, fs: number): string {
+  const one = `drop-shadow(${num(s.dx, 0)}px ${num(s.dy, Math.round(fs * 0.06))}px ${num(s.blur, Math.round(fs * 0.12))}px ${s.color || 'rgba(0,0,0,0.55)'})`;
+  const n = Math.max(1, Math.min(6, Math.round(num(s.repeat, 1))));
+  return Array(n).fill(one).join(' ');
+}
+
+// Font size in output pixels for a design (base = outH * 0.052).
+export function captionFontPx(design: CaptionDesign, outH: number): number {
+  return outH * 0.052 * num(design.fontSize, 1);
+}
+
+// When some words carry their own shadow, the shadow is drawn per run of text instead of on
+// the whole block (a block filter would paint the base shadow over those words too).
+export function captionShadowPerRun(design: CaptionDesign): boolean {
+  return !design.bg && !!design.colorSpans?.some(sp => sp.shadow);
+}
 
 export type CaptionDesign = {
   bold?: boolean;
@@ -157,7 +179,7 @@ export type CaptionDesign = {
   // Soft drop shadow on the whole caption block.
   // repeat = the same shadow stacked 1..6 times: a dense edge-like shadow that hugs the glyphs
   // without a hard stroke (2026-11-28 owner: 縁は0で、文字に貼り付いた濃い影で見せたい).
-  shadow?: { color?: string; blur?: number; dx?: number; dy?: number; repeat?: number };
+  shadow?: CaptionShadow;
   letterSpacing?: number;     // multiplier of fontSize (0.02 = subtle tracking)
   // Slant of the whole caption block (box included), in degrees. Negative leans the tops to the
   // right like italics (-9 = the red emphasis look). Clamped to ±30.
@@ -254,12 +276,7 @@ export function captionBoxStyle(design: CaptionDesign, outH: number): CSSPropert
   }
   const skew = Math.max(-30, Math.min(30, num(design.skew, 0)));
   if (skew) style.transform = `skewX(${skew}deg)`;
-  if (design.shadow) {
-    const s = design.shadow;
-    const one = `drop-shadow(${num(s.dx, 0)}px ${num(s.dy, Math.round(fs * 0.06))}px ${num(s.blur, Math.round(fs * 0.12))}px ${s.color || 'rgba(0,0,0,0.55)'})`;
-    const n = Math.max(1, Math.min(6, Math.round(num(s.repeat, 1))));
-    style.filter = Array(n).fill(one).join(' ');
-  }
+  if (design.shadow && !captionShadowPerRun(design)) style.filter = captionShadowFilter(design.shadow, fs);
   return style;
 }
 
