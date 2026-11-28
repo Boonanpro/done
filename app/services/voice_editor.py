@@ -202,6 +202,24 @@ def turns_text(turns: list[dict[str, Any]], asset_room_id: str, content_id: str,
     return chr(10).join(rows)[-limit:]
 
 
+def moments_text(turns: list[dict[str, Any]], asset_room_id: str, content_id: str) -> str:
+    """Where the owner was in the editor while saying these turns, each place once, in order ('' when nothing was recorded)."""
+    seen: list[dict[str, Any]] = []
+    for t in turns:
+        if t.get('role') != 'user':
+            continue
+        for m in _of(t, content_id):
+            if not any(_same(m, o) for o in seen):
+                seen.append(m)
+    if not seen:
+        return ''
+    try:
+        clips, assets = _clips(asset_room_id, content_id)
+    except Exception:  # noqa: BLE001
+        clips, assets = {}, {}
+    return chr(10).join(moment_text(m, clips, assets) for m in seen[-12:])
+
+
 def last_moment_text(turns: list[dict[str, Any]], asset_room_id: str, content_id: str) -> str:
     """Where the owner was in the editor at the end of his last turn ('' when nothing was recorded)."""
     m = latest_moments(turns, 1, content_id)

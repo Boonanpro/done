@@ -266,7 +266,8 @@ class Prefetch:
                 answers = got.get('answers') or {}
                 choice, probability = voice_router.chosen(answers, 'route')
                 self.dialogue.routing_events.append(dict(
-                    words=text, turn=turn, preliminary=True, route=choice,
+                    words=text, turn=turn, preliminary=True, route=choice, probability=round(probability, 3),
+                    at=time.monotonic(),   # the router hands a request it heard and nobody delegated (Router.unrouted_request)
                     look=voice_router.looks(answers, text, threshold) if answers else None,
                     ms=got.get('elapsed_ms'), model=model,
                     criterion=asked['route']['criteria'].get(choice, ''),

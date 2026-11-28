@@ -112,6 +112,8 @@ class Dialogue:
         self.owner_screen = None  # voice_owner_screen.Screen: the screen he shows in the call, looked at only when needed
         self.screen_seen = ''     # the pictures the router fetched for the request being worked on, as files for its work
         self.looking = None       # Jev said this request needs his screen (True/False); None outside a routed request
+        self.request_words = ''   # the owner's words of the request being handed, all of them (voice_router.Router.run)
+        self.request_from = None  # where in history that request began (turn, characters)
 
     def add(self, role, delta):
         if not delta: return

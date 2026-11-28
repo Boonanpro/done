@@ -435,7 +435,9 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None, *, in
         from app.services import voice_router
         if voice_router.enabled():   # work asked on a routed call is chat Dan's, with the call's transcript (voice_router)
             turns = getattr(dialogue, 'history', dialogue)
-            words = next((t.get('text') for t in reversed(turns) if t.get('role') == 'user' and t.get('text')), '')
+            # the whole request the router handed (Router.run), not only the owner's last turn
+            words = (str(getattr(dialogue, 'request_words', '') or '').strip()
+                     or next((t.get('text') for t in reversed(turns) if t.get('role') == 'user' and t.get('text')), ''))
             out = await voice_router.start_chat_dan(user_id, room_id, dialogue, words or str(args.get('task') or ''),
                                                     internal_check=internal_check)
             if not out.get('accepted'):
