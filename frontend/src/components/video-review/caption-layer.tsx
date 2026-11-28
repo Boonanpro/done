@@ -3,6 +3,7 @@
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { CaptionEditContext, type CaptionEdit } from './caption-word-edit';
 import { HEADING_FONTS, loadHeadingKit } from './adobe-fonts';
+import { revealTokens } from './caption-reveal';
 import type { CSSProperties } from 'react';
 import {
   CAPTION_FONT_FACE_CSS,
@@ -68,30 +69,10 @@ function introStyle(design: CaptionDesign, local: number, outH: number): CSSProp
   return { opacity: Math.min(1, p * 1.4), transform: `scale(${popScale(p)})` };
 }
 
-// Split text into reveal/highlight units. Uses per-word timings when present (Whisper); otherwise
-// keeps ASCII words whole + CJK per character, with even timing across the caption.
-function tokenize(cap: RenderCaption): CaptionWord[] {
-  if (cap.words?.length && cap.words.map(w => w.text).join('').replace(/\s/g, '') === cap.text.replace(/\s/g, '')) return cap.words;
-  const units: string[] = [];
-  const text = cap.text;
-  let i = 0;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch.charCodeAt(0) < 128 && ch.trim()) {
-      let word = '';
-      while (i < text.length && text[i].charCodeAt(0) < 128 && text[i].trim()) word += text[i++];
-      units.push(word);
-    } else {
-      units.push(ch);
-      i++;
-    }
-  }
-  const dur = Math.max(0.01, cap.end - cap.start);
-  return units.map((u, idx) => ({
-    text: u,
-    start: cap.start + (dur * idx) / units.length,
-    end: cap.start + (dur * (idx + 1)) / units.length,
-  }));
+// Split text into reveal/highlight units (caption-reveal.ts). typewriter never reveals one
+// character at a time: whole at once, or by the parts written in words.
+function tokenize(cap: RenderCaption, anim: 'typewriter' | 'karaoke'): CaptionWord[] {
+  return revealTokens(cap, anim);
 }
 
 type ColorSpan = CaptionSpan;
@@ -275,7 +256,7 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
   const edit = useContext(CaptionEditContext);
   const anim = design.animation;
   const wordLevel = anim === 'typewriter' || anim === 'karaoke';
-  const tokens = useMemo(() => (wordLevel ? tokenize(cap) : null), [cap, wordLevel]);
+  const tokens = useMemo(() => (wordLevel ? tokenize(cap, anim === 'karaoke' ? 'karaoke' : 'typewriter') : null), [cap, wordLevel, anim]);
 
   const local = time - cap.start;
   const baseBox = captionBoxStyle(design, outH);
