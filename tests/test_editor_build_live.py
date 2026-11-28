@@ -50,7 +50,7 @@ def test_blank_work_gets_empty_timeline_and_rough_cut_publishes_in_steps(blank, 
     assert res['ok'] and res.get('timeline_updated'), res
 
 
-def test_owner_edit_mid_rough_cut_stops_without_overwriting(blank, monkeypatch):
+def test_owner_trim_mid_rough_cut_survives_while_other_clips_append(blank, monkeypatch):
     start(blank, monkeypatch)
     real_sleep_calls = []
 
@@ -64,8 +64,10 @@ def test_owner_edit_mid_rough_cut_stops_without_overwriting(blank, monkeypatch):
     monkeypatch.setattr(m.time, 'sleep', owner_edits)
     ranges = [{'source_start': i * 20.0, 'source_end': i * 20.0 + 15.0} for i in range(10)]
     res = run('append_clips', {'asset_id': 'rec', 'ranges': ranges})
-    assert not res['ok']
-    assert live(blank)['timeline']['sequence']['tracks'][0]['clips'][0]['source_end'] == 1.0
+    assert res['ok'] and res['placed'] == len(ranges)
+    clips = live(blank)['timeline']['sequence']['tracks'][0]['clips']
+    assert clips[0]['source_end'] == 1.0
+    assert [c['source_start'] for c in clips] == [r['source_start'] for r in ranges]
 
 
 def test_missing_asset_reports_and_places_nothing(blank, monkeypatch):
