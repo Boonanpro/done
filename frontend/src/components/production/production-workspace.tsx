@@ -263,7 +263,7 @@ export function ProductionWorkspace({
           : null;
         // Keep the existing object reference when nothing actually changed, so selectedContent's
         // identity stays stable and dependent effects (loadJobs) don't re-fire on every refresh.
-        if (current && found && found.id === current.id && found.updated_at === current.updated_at) {
+        if (current && found && found.id === current.id && found.updated_at <= current.updated_at) {
           return current;
         }
         return found;
@@ -616,13 +616,12 @@ export function ProductionWorkspace({
     );
     if (res.status === 409) {
       // 画面が直し始めた版がもう残っていない: 上書きせず最新を読み直す（ダンや別の画面の直しを消さない）
-      toast.message('タイムラインが別の所で直されていたので、最新に読み直しました');
       await loadAll();
-      return;
+      throw new Error('別の場所からの変更を読み込みました。');
     }
     if (!res.ok) throw new Error(await res.text());
     const updated = await res.json();
-    setSelectedContent(updated);
+    setSelectedContent(current => current && current.id === updated.id && current.updated_at <= updated.updated_at ? updated : current);
     setContents((prev) => prev.map((content) => (content.id === updated.id ? updated : content)));
   };
 
@@ -829,7 +828,7 @@ export function ProductionWorkspace({
     const mediaUrl = primaryVideo ? assetMediaUrl(primaryVideo) : undefined;
     const videoEditor = (
       <VideoReviewEditor
-        key={primaryVideo ? primaryVideo.id : `content-${selectedContent.id}`}
+        key={selectedContent.id}
         embedded
         compact={compact}
         roomId={roomId}

@@ -149,7 +149,7 @@ def apply_edit(room_id: str, content_id: str, op: str, args: dict[str, Any],
     new_ids = [str(c.get('id')) for t in seq.get('tracks', []) for c in t.get('clips', []) if str(c.get('id')) not in before_ids]
     return {**result, "committed": True, "draft_id": draft["draft_id"], "new_clip_ids": new_ids,
             "changed": True, "changes": changes,
-            "sequence_hash": td.sequence_hash(seq),
+            "sequence_hash": commit["sequence_hash"],
             "note": "エディタに反映します。再生して結果を確認できます"}
 
 

@@ -64,7 +64,7 @@ def commit(draft, baseline, canceled=None):
         td.discard_draft(room_id,draft['draft_id'],lambda *_:None)
         return {'ok':False,'error':'; '.join(result.get('problems',[]))}
     old=scope.clips(draft['base_sequence']);new=scope.clips(draft['sequence'])
-    return {'ok':True,'committed':True,'draft_id':draft['draft_id'],'sequence_hash':td.sequence_hash(draft['sequence']),
+    return {'ok':True,'committed':True,'draft_id':draft['draft_id'],'sequence_hash':result['sequence_hash'],
             'changed':True,'changes':tl.describe_changes(draft['base_sequence'],draft['sequence']),
             'new_clip_ids':list(new.keys()-old.keys()),'changed_clip_ids':[i for i in new if new[i]!=old.get(i)]}
 

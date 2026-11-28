@@ -18,8 +18,8 @@ watches:
   - frontend/src/components/production/production-workspace.tsx
   - frontend/src/components/production/editor-dan-chat.tsx
   - frontend/src/app/production-workspace/page.tsx
-fingerprint: 22ffac45b508027f
-described: e498c235b4b0effe
+fingerprint: c3e05ad204ca21e7
+described: 78855f96d0010d22
 ---
 # エディターの中の「ダンと制作」
 
@@ -29,6 +29,7 @@ described: e498c235b4b0effe
 
 - `library` 制作ライブラリ。左に「新規作成」・作品の一覧・素材のフォルダ、真ん中に作品の絵の一覧と大きな「新規作成」。作品の絵を押すと、その絵の上に「開いています」が出て、組み立て終わるとタイムラインに切り替わる（長い作品で0.1秒ほど。2026-11-19）。会話は無い（前にあったライブラリの部屋の会話は兄弟の部屋として読める）。
 - タイムラインで複数の映像・テロップを選ぶと、プレビュー上で表示中の各クリップに枠が出る。枠をドラッグすると、選んだ物の間隔を保ったまま一緒に動く。
+- タイムラインで音声を詰めている間も、ダンは別の字幕を編集できる。ダンの手の動きは表示だけに使い、クリップを操作すると手の動きよりその操作を優先する。
 - `content-chat` 作品を開いた画面（タイムラインとプレビュー）の右の欄。作品ごとに1つの部屋。この部屋のダンはその作品のタイムラインの道具（mcp__timeline__*）を持ち、再生位置と選んだクリップが「ここ」「これ」になる。
 - `card-thumb` ライブラリの動画の札の右下に出るサムネ（PC はマウスを乗せた時、スマホはいつも）。押すとエディターより先にサムネのページ。サムネだけの札は一覧に出ない。
 - プレビューのテロップをダブルクリックすると、映っている文字に直接入力できる。プレビューか右の本文欄で文字を選び、右の「文字色」「大きさ」を動かすとその部分だけが変わる。タイムラインで隣り合うテロップの端を左右に引くと両方の長さが変わる。
@@ -57,8 +58,8 @@ described: e498c235b4b0effe
 `python scripts/place_map.py stamp editor-room` が書き直す。手で直さない。
 
 - 見張るファイル: `frontend/src/app/production-workspace/page.tsx`, `frontend/src/components/production/editor-dan-chat.tsx`, `frontend/src/components/production/production-workspace.tsx`
-- ラベル: 「ダンと制作」、「欄の幅を変える」、「作品と素材」、「作品」、「素材のフォルダ」、「作品の一覧」
+- ラベル: 「ダンと制作」、「欄の幅を変える」、「素材」、「素材のフォルダ」、「作品の一覧」、「作品の名前」、「作品の操作」
 - 試験の印: 「content-cover」
 
-<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "bea301b706", "frontend/src/components/production/editor-dan-chat.tsx": "2276af678a", "frontend/src/components/production/production-workspace.tsx": "553d433af5"} -->
+<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "b32f8289ff", "frontend/src/components/production/editor-dan-chat.tsx": "2276af678a", "frontend/src/components/production/production-workspace.tsx": "ed95e136cb"} -->
 <!-- place_map:auto:end -->
