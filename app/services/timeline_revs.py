@@ -237,12 +237,34 @@ def _draft_value(base, draft, live, field=None):
                 indexed[key] = item
             maps.append(indexed)
         old, edited, current = maps
-        order = _draft_value(list(old), list(edited), list(current))
+        # Reconcile the order of surviving entries; insert new entries next to
+        # the same surviving neighbour. Two independent insertions can coexist.
+        common = old.keys() & edited.keys() & current.keys()
+        order = _draft_value(*[[key for key in mapping if key in common] for mapping in maps])
+        insertions = {}
+        anchors = {}
+        for mapping in (current, edited):
+            anchor = None
+            for key in reversed(mapping):
+                if key in common:
+                    anchor = key
+                elif key not in old:
+                    if key in anchors:
+                        if anchors[key] != anchor:
+                            raise DraftConflict(field)
+                        continue
+                    anchors[key] = anchor
+                    insertions.setdefault(anchor, []).append(key)
+        ordered = []
+        for key in [*order, None]:
+            ordered.extend(reversed(insertions.get(key, [])))
+            if key is not None:
+                ordered.append(key)
         # Check removed entries too: deletion racing a modification is a conflict.
         merged = {key: _draft_value(old.get(key, _MISSING), edited.get(key, _MISSING),
                                     current.get(key, _MISSING))
                   for key in dict.fromkeys([*old, *edited, *current])}
-        return [merged[key] for key in order]
+        return [merged[key] for key in ordered]
     raise DraftConflict(field)
 
 

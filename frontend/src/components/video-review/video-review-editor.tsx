@@ -1538,6 +1538,7 @@ export function VideoReviewEditor({
     const from = ack ? ack.submitted : savedSequence.current;
     acknowledged.current = null;
     savedSequence.current = remote;
+    if (seqSig(remote) === seqSig(from)) return; // A plain acknowledgement has no remote changes to apply.
     const next = seqSig(from) === seqSig(editSequence) ? remote : rebaseSequence(remote, from, editSequence);
     if (seqSig(next) === seqSig(editSequence)) return;
     closeOwnBurst();
@@ -1552,12 +1553,10 @@ export function VideoReviewEditor({
   // The playhead and the owner's own selection are the owner's: the replay never moves them
   // (11/10 owner: "自分のUIを奪われてしまうのは避けたい"). Dan checks frames server-side.
   const editSequenceRef = useRef(editSequence);
-  const annotationsRef = useRef(annotations);
   const danPlayingRef = useRef(false);
   const onExternalEditRef = useRef(onExternalEdit);
   useEffect(() => {
     editSequenceRef.current = editSequence;
-    annotationsRef.current = annotations;
     danPlayingRef.current = playing;
     onExternalEditRef.current = onExternalEdit;
   });
@@ -2272,6 +2271,7 @@ export function VideoReviewEditor({
   const autoSaveRef = useRef({ save: onSaveTimeline, payload });
   autoSaveRef.current = { save: onSaveTimeline, payload };
   const failedSave = useRef<{ sequence: unknown; annotations: unknown; base: unknown } | null>(null);
+  const canSaveTimeline = !!onSaveTimeline;
   const flushTimeline = useCallback(async () => {
     if (pendingSave.current) return pendingSave.current;
     const { save, payload: current } = autoSaveRef.current;
@@ -2321,7 +2321,7 @@ export function VideoReviewEditor({
   // Sequence and annotation changes share one ordered stream of saves. Only the server
   // acknowledgement advances the base; later edits schedule their own save after that.
   useEffect(() => {
-    if (!onSaveTimeline || pendingSave.current || gestureActive) return;
+    if (!canSaveTimeline || pendingSave.current || gestureActive) return;
     const failed = failedSave.current;
     if (failed && failed.sequence === editSequence && failed.annotations === annotations && failed.base === savedSequence.current) return;
     if (seqSig(editSequence) === seqSig(savedSequence.current) && seqSig(annotations) === lastSyncedAnnSig.current) return;
@@ -2329,7 +2329,7 @@ export function VideoReviewEditor({
       void flushTimeline().catch(error => toast.error('タイムラインを保存できませんでした', { description: String(error).slice(0, 160) }));
     }, 1200);
     return () => window.clearTimeout(timer);
-  }, [editSequence, annotations, saveEpoch, gestureActive, flushTimeline, !!onSaveTimeline]);
+  }, [editSequence, annotations, saveEpoch, gestureActive, flushTimeline, canSaveTimeline]);
 
   const makeDraftAnnotation = useCallback(
     (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>, intentArg: Intent = 'blur'): DraftAnnotation => {

@@ -2,7 +2,7 @@
 
 Tools edit a draft, then publish a complete operation using compare-and-swap.
 Preparation-only drafts stay private until final commit. Human saves are adopted
-before another operation; concurrent unpublished edits produce a conflict.
+before another operation; disjoint concurrent edits can also merge at commit.
 Published assets remain available to the live timeline and its undo history.
 
 Layout: {room_dir}/drafts/{draft_id}.json
@@ -288,7 +288,10 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
             problems += violations(live_seq, merged, draft.get("edit_scope"))
             if problems:
                 return {"ok": False, "conflict": True, "problems": problems}
-            draft["sequence"] = merged
+            draft["sequence"].clear()
+            draft["sequence"].update(merged)
+            if checkpoint and existing:
+                draft["baseline_problems"] = sorted(set(draft.get("baseline_problems", [])) | existing)
         # picture clips are stored in one form (サイズ・左右・上下・キーフレーム): whatever this draft
         # still holds in the old box form converts here — this work only, in place (the draft's
         # base hash below is taken after it)
@@ -398,8 +401,7 @@ def read_edit_feed(room_id: str, content_id: str, after: int) -> tuple[int, list
 def publish_checkpoint(room_id: str, draft_id: str) -> dict[str, Any]:
     """Publish one complete tool transaction, never its intermediate sub-operations.
 
-    The original snapshot remains the authority for scope/approved clips. A manual
-    save changes the CAS hash and stops publication rather than erasing that edit.
+    Each step is validated against its base and against the live sequence if it changed.
     """
     draft = load_draft(room_id, draft_id)
     if not draft.get('live_updates'):

@@ -202,7 +202,7 @@ def test_draft_and_racing_owner_save_keep_both_changes(draft):
     assert live()['tracks'][0]['clips'][1] == {**second, 'timeline_start': 2.5, 'text': 'next caption'}
 
 
-def test_concurrent_owner_lock_and_new_overlaps_are_respected(draft):
+def test_concurrent_owner_lock_is_respected(draft):
     draft['sequence']['tracks'][0]['clips'][0]['timeline_end'] = 3.5
     draft['sequence']['tracks'][0]['clips'][1]['timeline_start'] = 4
     td.save_draft(draft)
@@ -212,3 +212,23 @@ def test_concurrent_owner_lock_and_new_overlaps_are_respected(draft):
     td._write_contents_raw('room', contents)
     assert td.publish_checkpoint('room', draft['draft_id'])['conflict']
     assert live() == owner_seq
+
+
+
+def test_simultaneous_clip_insertions_both_survive_unless_they_overlap(draft):
+    draft['sequence']['tracks'][0]['clips'].append(
+        {'id': 'dan', 'text': 'one', 'timeline_start': 6, 'timeline_end': 7})
+    draft['sequence']['duration'] = 12
+    td.save_draft(draft)
+    contents = td._read_contents_raw('room')
+    owner_seq = contents[0]['timeline']['sequence']
+    owner_seq['duration'] = 12
+    owner_clip = {'id': 'owner', 'text': 'two', 'timeline_start': 6.5, 'timeline_end': 8}
+    owner_seq['tracks'][0]['clips'].append(owner_clip)
+    td._write_contents_raw('room', contents)
+    assert td.publish_checkpoint('room', draft['draft_id'])['conflict']
+    assert live() == owner_seq
+    owner_clip.update(timeline_start=8, timeline_end=9)
+    td._write_contents_raw('room', contents)
+    assert td.publish_checkpoint('room', draft['draft_id'])['published']
+    assert {c['id'] for c in live()['tracks'][0]['clips']} == {'a', 'b', 'dan', 'owner'}

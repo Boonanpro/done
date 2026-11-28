@@ -1282,8 +1282,9 @@ def _publish_step(draft: dict) -> dict:
     if res.get('published'):
         fresh = td.load_draft(ROOM_ID, DRAFT_ID)
         if fresh["sequence"] is not draft["sequence"]:
+            draft["sequence"].clear()
             draft["sequence"].update(fresh["sequence"])
-        for key in ('base_hash', 'published_sequence', 'published_at'):
+        for key in ('base_hash', 'published_sequence', 'published_at', 'baseline_problems'):
             if key in fresh:
                 draft[key] = fresh[key]
     return res
