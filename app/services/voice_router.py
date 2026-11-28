@@ -53,6 +53,13 @@ TO_CHAT_DAN = ('site', 'app', 'make', 'dan')
 ASKING = re.compile(r'(？|\?|くれる|ですか|でしょうか|かな|どれ|どの|合ってる|いい[？?]?$)')
 PROMISE_QUIET_S = 2.0
 PROMISE_TAIL = 70         # the promise is among the last characters of Dan's turn (not 「確認するね。…」 followed by the answer itself)
+# The ear (voice_prefetch) heard a request for work and Dan only said 「聞いてるよ。今やってるからね」: nothing was handed, and
+# the three corrections of 11/27 23:44 (the title top left, the font, the last video's thumbnail) reached no work. When the
+# ear judged the owner's words since the last delegation to be work and nobody handed them, the router hands them itself
+# once the owner has been quiet HEARD_QUIET_S, whatever Dan said.
+HEARD_QUIET_S = 4.0
+WORK_ROUTES = TO_CHAT_DAN + ('change:',)
+REQUEST_CHARS = 4000      # the owner's words of one request: 11/27 23:41 he spoke ~3 min between Dan's 「うん」
 ANSWER_CHARS = 30         # the owner's words this short, after Dan asked back, answer that question: the earlier request goes with them
 LOOK_ASKED = re.compile(r'画面(?:を|も)?(?:見て|みて|見える|見えて|見ながら|確認して)|(?:これ|ここ)(?:を)?見て')
 NO_LOOK = ('status', 'clock', 'reply', 'end', 'stop:')   # answered from the call's own state: nothing on the screen helps
@@ -207,6 +214,8 @@ class Router:
         self.answering = {}         # delegation id -> (label, started): requests the earlier backend (luna) is working on now
         self.last_words = ''        # the request of the last delegation (an answer to Dan's question goes on from it)
         self.promises = set()       # Dan's turns already read for an unrouted promise
+        self.marked_at = 0.0        # when the mark was last moved (time.monotonic())
+        self.heard_handed = 0.0     # the owner's words (Dialogue.heard_at) the router handed itself as a heard request
         if observe_only:
             self.warming = self.watching = None
             return
@@ -233,6 +242,9 @@ class Router:
             try:
                 if self.unrouted_promise() is not None:
                     self.start_promised('promise')
+                elif self.unrouted_request():
+                    self.heard_handed = self.dialogue.heard_at
+                    self.start_promised('heard')
             except Exception as exc:
                 self.record('promise_watch_failed', error_type=type(exc).__name__)
 
@@ -253,6 +265,25 @@ class Router:
         if not any(t['role'] == 'user' for t in self.since_mark()): return None
         return index
 
+    def unrouted_request(self):
+        """True when the ear judged the owner's words since the last delegation to be a request for work (a preliminary
+        route of TO_CHAT_DAN or a change of running work, at the router's threshold), the owner has been quiet
+        HEARD_QUIET_S, Dan has been quiet PROMISE_QUIET_S, and no delegation came after the owner's words."""
+        dialogue = self.dialogue
+        now = time.monotonic()
+        if not dialogue.history or dialogue.heard_at <= 0 or self.heard_handed >= dialogue.heard_at: return False
+        if now - dialogue.heard_at < HEARD_QUIET_S or dialogue.routing_until > now: return False
+        if now - self.spoke.get('dan_words', 0) < PROMISE_QUIET_S: return False
+        if dialogue.delegated_at >= dialogue.heard_at - .5: return False
+        if not any(t['role'] == 'user' and t['text'].strip() for t in self.since_mark()): return False
+        try: threshold = float(prompt_store.text('call/router-threshold'))
+        except Exception: threshold = CONFIDENT
+        since = max(self.marked_at, dialogue.delegated_at)
+        return any(e.get('preliminary') and float(e.get('at') or 0) > since
+                   and str(e.get('route') or '').startswith(WORK_ROUTES)
+                   and float(e.get('probability') or 0) >= threshold
+                   for e in list(getattr(dialogue, 'routing_events', ())))
+
     def start_promised(self, why):
         """Route the owner's words the way a delegation would be routed, without one: what is said goes in as commentary
         with no delegation id."""
@@ -263,6 +294,12 @@ class Router:
 
     def delegated(self, delegation_id):
         created = time.monotonic()
+        if self.heard_handed and self.heard_handed >= self.dialogue.heard_at:   # nothing new said since
+            # the router already handed these words itself (unrouted_request): the same request would start twice
+            self.record('route_already_handed', delegation_id=delegation_id[:40])
+            task = asyncio.ensure_future(self.reply(delegation_id, created, '今の頼みはもう作業に渡してある。', spoken=False))
+            self.tasks.add(task); task.add_done_callback(self.tasks.discard)
+            return
         self.dialogue.routing_until = created + ACK_DELAY_MS / 1000 + SETTLE_MAX_S
         task = asyncio.ensure_future(self.answer(delegation_id, created))
         self.tasks.add(task); task.add_done_callback(self.tasks.discard)
@@ -306,7 +343,7 @@ class Router:
         said = [t['text'].strip() for t in turns if t['role'] == 'user']
         if not said:
             said = [next((t['text'].strip() for t in reversed(self.dialogue.history) if t['role'] == 'user'), '')]
-        words = chr(10).join(said)[-1500:]
+        words = chr(10).join(said)[-REQUEST_CHARS:]
         asked = next((t['text'].strip() for t in reversed(turns) if t['role'] == 'assistant'), '')
         if self.last_words and asked and len(words) <= ANSWER_CHARS and ASKING.search(asked[-60:]):
             return ('頼み: ' + self.last_words[-1200:] + chr(10) + 'ダンの聞き返し: ' + asked[-200:] + chr(10) + '本人の答え: ' + words)
@@ -437,7 +474,10 @@ class Router:
     async def run(self, route, target, span, delegation_id, created):
         words = self.request_words()
         history = self.dialogue.history
+        # the request as one piece for the work it starts (prepare_chat_task): every word of it, and where it began
+        self.dialogue.request_words, self.dialogue.request_from = words, self.mark
         self.mark = (len(history) - 1, len(history[-1]['text'])) if history else (0, 0)
+        self.marked_at = time.monotonic()
         if route == 'status':
             return await self.reply(delegation_id, created, await asyncio.to_thread(self.status_text), spoken=True)
         if route == 'clock':
@@ -870,6 +910,14 @@ def room_title(room_id):
         return ''
 
 
+def request_turns(dialogue, turns):
+    """The owner's turns of the request being handed (Router.run keeps where it began), with their editor moments."""
+    start = getattr(dialogue, 'request_from', None)
+    if not start or not isinstance(turns, list):
+        return []
+    return [t for t in turns[start[0]:] if isinstance(t, dict) and t.get('role') == 'user' and str(t.get('text') or '').strip()]
+
+
 async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=False):
     """Chat Dan takes the work: a parallel job of the room on the parallel-work model (engine 'make', the same harness as the
     chat), with the owner's words and the call's transcript. Nothing in between rewrites the request."""
@@ -888,15 +936,18 @@ async def prepare_chat_task(room_id, dialogue, words, carried='', *, preview=Fal
     if editor is not None:
         from app.services import editor_handoff, timeline_draft
         last = next((turn for turn in reversed(turns) if turn.get('role') == 'user'), {})
-        original = last.get('text') or words
+        # Every word of the request, not its last sentence: on 11/27 23:41 Dan's 「うん」 cut three minutes of corrections into
+        # twenty turns, the work got 「オレンジのテロップを消して」 and the summary and the background went as reference only.
+        original = str(words or '').strip() or last.get('text') or ''
+        asked = request_turns(dialogue, turns) or [last]
         note, frames = voice_editor.note_for(editor.asset_room_id, editor.content_id, turns) if looking else ('', [])
-        moment = await asyncio.to_thread(voice_editor.turns_text, [last], editor.asset_room_id, editor.content_id) if looking else ''
+        moment = await asyncio.to_thread(voice_editor.moments_text, asked, editor.asset_room_id, editor.content_id) if looking else ''
         reference = ''
         if len(turns) > 1 and not preview:
             folder = timeline_draft._room_dir(editor.asset_room_id) / 'assistant' / 'handoffs'
             reference = await asyncio.to_thread(editor_handoff.transcript_reference, folder, turns)
-        # Put the position(s) captured during this utterance alongside its words.
-        positions = moment.removeprefix('本人: ' + original).strip() if moment else ''
+        # Put the position(s) captured while he said it alongside its words.
+        positions = moment
         task = editor_handoff.request_text('', '今回のユーザー発言（原文）:\n' + original,
                     context='\n'.join(filter(None, [positions, f'作品: {editor.content_id}', reference, carried, note.strip()])))
     else:
