@@ -14,7 +14,9 @@
 //     cli_runner が attach_timeline_tools で timeline の道具を足す。editor_runtime（制作の決まり・Codex）は「ダンに指示」クリップの実行
 //     （production-workspace の requestDanEdit → dan_revise → timeline_agent）だけ。Windows 版の画面の「話す」=
 //     editor_assistant_routes /live/session（editor_live）と /reason（editor_reasoning）。Mac の画面版の「話す」はふつうの通話。
-//   動画を作る・直す時の枝（VIDEO_*）の根拠は、各箱の programs と facts に書いた。
+//   動画を作る・直す時の枝（VIDEO_*）の根拠は facts に書いた（ファイル名は git の履歴の 2026-11-28 より前の programs）。
+// 2026-11-28 本人「コードとか実装とかは全部外そう。また後から必要になったタイミングで追加すれば良い」: 箱の中身にファイル名・
+//   番号・英語の名前を出さない。裏方の4つ（画面のサーバー・入口・会話の本体・道具と通話のサーバー）は「ダンの本体」1つにまとめた。
 export interface ArchNode {
   id: string;
   name: string;
@@ -27,8 +29,7 @@ export interface ArchNode {
   skills?: boolean;       // 手順書（.claude/skills）もここで読む
   same?: string;          // 自分の文は無く、この箱と同じ決まりを読む
   group?: 'work';
-  programs?: { path: string; what: string }[];   // この箱で動くプログラム（読むだけ。押しても開かない）
-  facts?: string[];       // コードで確かめた、この箱の動き方（無い物・条件も書く）
+  facts?: string[];       // この箱の動き方（無い物・条件も書く）。みきさんに見える。ファイル名・番号・英語の名前は書かない
   video?: boolean;        // 下の枝「動画を作る・直す時」へ降りる札を付ける
   cutout?: boolean;       // 形どおりに切り抜いた絵（枠も角丸も付けない）
 }
@@ -45,20 +46,20 @@ export interface ArchEdge {
 
 export const BOX_H = 78;
 
+// 2026-11-28 に「ダンの本体」1つにまとめた裏方の4つの古い id（前に出した直す案・地図を開くリンクが指していても、まとめた箱を開く）
+export const NODE_ALIAS: Record<string, string> = { next: 'base', gateway: 'base', core: 'base', sandbox: 'base' };
+
 export const NODES: ArchNode[] = [
   { id: 'owner', name: 'みきさん', model: 'PC・スマホ・エディター・ピンから', icon: 'miki-person', height: 206, x: 0, y: 206, w: 184, cutout: true,
     line: '話しかける・頼む・直す。PC・スマホ・エディター・胸元のピンから。' },
   { id: 'pc', name: 'PC', model: 'ブラウザのダン', icon: 'chat-pc', height: 128, x: 202, y: 24, w: 150,
-    line: 'PC のブラウザでダンを開く。入力欄で文字を送るか、横の電話マークで通話する。',
-    programs: [{path: 'frontend/src/components/layout/project-chat-panel.tsx', what: '入力欄から部屋へ依頼を送り、返事を出す。'}, {path: 'frontend/src/components/voice/voice-session.tsx', what: '電話マークから通話を始める。'}] },
+    line: 'PC のブラウザでダンを開く。入力欄で文字を送るか、横の電話マークで通話する。'},
   { id: 'phone', name: 'スマホ', model: 'ダンのアプリ', icon: 'chat-phone', height: 136, x: 214, y: 168, w: 126,
-    line: 'スマホのアプリでダンを開く。文字を送るか、電話マークで通話する。',
-    programs: [{path: 'mobile/App.tsx', what: 'アプリの画面。チャットの入力と、通話の入口。'}, {path: 'mobile/voice.tsx', what: 'スマホでの通話。'}] },
+    line: 'スマホのアプリでダンを開く。文字を送るか、電話マークで通話する。'},
   { id: 'editor-ui', name: 'エディター', model: '作品とタイムライン', icon: 'editor-screen', height: 120, x: 202, y: 322, w: 150,
     line: '作品を開き、横の「ダンと制作」の会話で頼むか、「話す」で声で頼む。PC でもスマホでも同じ画面。' },
   { id: 'pin', name: 'ダンピン', model: '胸元に付ける', icon: 'pin-cut', height: 120, x: 208, y: 462, w: 138, cutout: true,
-    line: '胸元のピンを押して話すと、つないだスマホのアプリが通話を始める。ピンには文字の入口は無い。',
-    programs: [{path: 'mobile/App.tsx', what: 'ピンからのタップを受け、スマホで通話を開く。'}] },
+    line: '胸元のピンを押して話すと、つないだスマホのアプリが通話を始める。ピンには文字の入口は無い。'},
   { id: 'devices', name: 'チャット', model: '文字で頼む', icon: 'chat', x: 420, y: 196, w: 152,
     line: 'PC・スマホ・エディターの会話から、文字で依頼を送り、同じ所で返事を読む。' },
   { id: 'audio', name: '音声', model: '声で頼む', icon: 'voice', x: 420, y: 560, w: 152,
@@ -67,14 +68,12 @@ export const NODES: ArchNode[] = [
     line: '選んだ依頼に対してダンが実際に返した言葉。' },
   { id: 'skills', name: 'スキルの手順書', model: '全文・参考ページ', icon: 'v-skills', x: 1340, y: 1000, w: 235,
     line: 'ダンが仕事に使う手順書を検索し、読んで編集する。' },
-  { id: 'next', name: '画面のサーバー', model: 'Next.js（dan.paina.info）', icon: 'next', x: 640, y: 330, w: 160,
-    line: '画面を出し、チャットや通話の要求を入口へ渡す。' },
-  { id: 'gateway', name: '入口', model: 'プログラム（9100・8100）', icon: 'gateway', x: 860, y: 330, w: 150,
-    line: '要求を、今動いている版の会話の本体・道具のサーバーへ渡す。ダンを入れ替えても会話を切らないための所。' },
-  { id: 'core', name: '会話の本体', model: 'プログラム（9000）', icon: 'core', x: 1080, y: 120, w: 180,
-    line: 'チャットの1通ごとにチャットのダンを起こし、作業の部屋の仕事を回す。' },
-  { id: 'sandbox', name: '道具と通話のサーバー', model: 'プログラム（8000）', icon: 'sandbox', x: 1080, y: 760, w: 205,
-    line: '通話を作って横で聞き、振り分け・調べもの係・画面係を動かす。エディターの裏もここ。' },
+  { id: 'base', name: 'ダンの本体', model: '家の Mac mini の中', icon: 'core', x: 760, y: 330, w: 230,
+    line: 'みきさんが文字や声で頼んだことを受け取り、チャットのダン・通話のダンへ運ぶ。',
+    facts: ['画面を届ける: dan.paina.info を開いた時に、チャット欄やエディターの画面を出し、送った文字を受け取る。ここが止まると画面が開かない（「502」と出るのはここが返事をしない時）。',
+      '中継する: 受け取った頼みを、今動いている版のダンへ渡す。ダンを新しい版に入れ替えても、会話が途中で切れないようにするため。',
+      'チャットの係: チャットが1通届くたびに、チャットのダンを起こす。チャットの返事が来ない時は、ここが原因のことがある。',
+      '通話の係: 通話を始める準備をし、通話を横で聞いて、振り分け・調べもの係・画面係を動かす。通話の頼みが届かない時は、ここが原因のことがある。'] },
   { id: 'chat', name: 'チャットのダン', model: '部屋で選んだモデル', icon: 'chat', x: 1340, y: 24, w: 210, video: true,
     prompts: ['workspace/user', 'workspace/soul', 'workspace/rules', 'code/command-center'], skills: true,
     line: 'チャットで話し、道具を使って作業する。モデルは部屋ごとに決まる。USER・SOUL・RULES は毎回読む。Done の部屋だけ部屋の役目の文も読む。' },
@@ -129,18 +128,15 @@ export const EDGES: ArchEdge[] = [
   { from: 'phone', to: 'audio', ax: 85, via: [[400, 253], [400, 599]] },
   { from: 'editor-ui', to: 'audio', ax: 75, label: '話す', at: 0.12, via: [[400, 397], [400, 599]] },
   { from: 'pin', to: 'audio', ax: 60, label: 'スマホ経由', at: 0.2, via: [[400, 522], [400, 599]] },
-  // どちらも画面のサーバー → 入口へ。チャットは会話の本体、音声は通話を開く要求だけが道具と通話のサーバーへ行く。
-  { from: 'devices', to: 'next', label: '送る' },
-  { from: 'audio', to: 'next', label: '通話を開く', ax: 22, at: 0.8 },
-  { from: 'next', to: 'gateway' },
-  { from: 'gateway', to: 'core', label: 'チャット', at: 0.85 },
-  { from: 'gateway', to: 'sandbox', label: '通話を開く', at: 0.85 },
-  { from: 'core', to: 'chat' },
-  { from: 'core', to: 'editor' },
+  // どちらもダンの本体へ。チャットはチャットのダンへ、声は通話を開く要求だけがダンの本体を通る。
+  { from: 'devices', to: 'base', label: '送る' },
+  { from: 'audio', to: 'base', label: '通話を開く', ax: 22, at: 0.8 },
+  { from: 'base', to: 'chat', label: 'チャット', at: 0.8 },
+  { from: 'base', to: 'editor', label: '作品の会話', at: 0.8 },
   // 声そのものは、ブラウザ・アプリと GPT-Live（OpenAI）の間を直に流れる
   { from: 'audio', to: 'voice', label: '声（OpenAI と直接）', ax: 56, bx: 39, at: 0.5 },
-  { from: 'sandbox', to: 'voice', label: '通話を準備・横で聞く', b: 'b', bx: 50, at: 0.3 },
-  { from: 'sandbox', to: 'editorTalk', a: 'b', b: 't', label: 'Windows 版のエディター' },
+  { from: 'base', to: 'voice', b: 't', bx: 50, label: '通話を準備・横で聞く', at: 0.7 },
+  { from: 'base', to: 'editorTalk', a: 'b', b: 'l', label: 'Windows 版のエディター', at: 0.6 },
   { from: 'voice', to: 'router', label: '任せる' },
   { from: 'router', to: 'lookup', label: '調べる' },
   { from: 'router', to: 'stage', label: '見せる', at: 0.75 },
@@ -158,7 +154,7 @@ export const EDGES: ArchEdge[] = [
 // ---- 動画を作る・直す時（構成図の「チャットのダン」「エディターのダンと制作」「並行作業」から降りる枝）----
 // 2026-11-23 本人「動画の作成や編集がチャットのダンや並行作業に届いて、その後にどういうスキルやコンポーネントがあって、それをどう
 // 読み込んでいるからこうなっている。だからここを直せばいいんじゃないかってことが分かるページ」。箱と矢印は11/23にコードで確かめた順。
-// 仕組みを変えたら、ここの programs・facts も直すこと。
+// 仕組みを変えたら、ここの facts も直すこと。
 export const VIDEO_W = 1000;
 export const VIDEO_H = 1190;
 
@@ -167,35 +163,29 @@ export const VIDEO_NODES: ArchNode[] = [
     line: '動画を作って・直して、と頼む。頼む場所で、下の4つのどれに届くかが決まる。' },
   { id: 'v-chat', name: 'チャットのダン', model: '部屋のモデル', icon: 'chat', x: 50, y: 160, w: 215, same: 'chat',
     line: 'ふだんのチャットで頼んだ時。',
-    facts: ['作品の名前が話に出た時・その部屋の作品をエディターで開いている時（10分以内）だけ、タイムラインの道具が付く。それ以外の会話では、タイムラインを直接は触れない。'],
-    programs: [{ path: 'app/api/chat_routes.py', what: '1通ごとに、話に出た作品を探して（_auto_timeline_refs）チャットのダンを起こす。' }] },
+    facts: ['作品の名前が話に出た時・その部屋の作品をエディターで開いている時（10分以内）だけ、タイムラインの道具が付く。それ以外の会話では、タイムラインを直接は触れない。']},
   { id: 'v-editor', name: 'エディターのダンと制作', model: '部屋のモデル', icon: 'editor', x: 285, y: 160, w: 215, same: 'chat',
     line: 'エディターの中の会話で頼んだ時。作品ごとの隠れた部屋で、中身はふつうのチャット。',
-    facts: ['この部屋では、開いている作品のタイムラインの道具がいつも付く。', '画面に「タイムラインから送った指示の一覧」と「今のタイムラインの様子」が足される。'],
-    programs: [{ path: 'app/services/editor_rooms.py', what: '作品ごとの部屋を作り、元の部屋のモデルを引き継ぐ。' }, { path: 'app/services/editor_instructions.py', what: 'room_work_text でピン・ペンの指示の履歴を会話に足す。' }] },
+    facts: ['この部屋では、開いている作品のタイムラインの道具がいつも付く。', '画面に「タイムラインから送った指示の一覧」と「今のタイムラインの様子」が足される。']},
   { id: 'v-parallel', name: '並行作業', model: '部屋の作業用モデル', icon: 'parallel', x: 520, y: 160, w: 215, same: 'parallel',
     line: 'タイムラインのピン・ペン・枠で指示した時と、通話で「作って・直して」と言った時。作品の部屋の会話を引き継いだ別のダンが動く。',
-    facts: ['ピン・ペン・枠は、1つの指示ごとに並行作業が1つ起きる。指示した区間・場所・印を付けたコマの絵が依頼に付く。', '通話からは、振り分けが「作る・直す」と決めた時。エディターから話していれば、その時の再生位置と指した所が付く。', '終わると部屋のダンが起こされ、結果を短く返す（エディターの指示は会話に出さない）。'],
-    programs: [{ path: 'app/services/editor_instructions.py', what: 'ピン・ペン・枠の指示を依頼の文にして、並行作業を起こす。' }, { path: 'app/services/voice_router.py', what: '通話の「作る・直す」を、作品の部屋の並行作業にする。' }, { path: 'app/services/parallel_job_runner.py', what: '部屋の会話を引き継いで起こし、タイムラインの道具を付け、終わったら部屋へ返す。' }] },
+    facts: ['ピン・ペン・枠は、1つの指示ごとに並行作業が1つ起きる。指示した区間・場所・印を付けたコマの絵が依頼に付く。', '通話からは、振り分けが「作る・直す」と決めた時。エディターから話していれば、その時の再生位置と指した所が付く。', '終わると部屋のダンが起こされ、結果を短く返す（エディターの指示は会話に出さない）。']},
   { id: 'v-codex', name: '「ダンに指示」の実行', model: 'Codex（GPT-6 Astra）', icon: 'codex', x: 755, y: 160, w: 215,
-    line: 'タイムラインに置いた「ダンに指示」のクリップを実行した時だけ。ほかの3つと違い、制作の決まりを足して読む。',
-    programs: [{ path: 'frontend/src/components/production/production-workspace.tsx', what: 'requestDanEdit が直しの仕事（dan_revise）を作る。' }, { path: 'app/services/timeline_agent.py', what: '仕事の担当を起こし、選んだクリップ・メモ・作品の流れを依頼に付ける。' }, { path: 'app/services/editor_runtime.py', what: 'チャットのダンと同じ決まりに、右の制作の決まりを足して Codex に渡す。' }] },
+    line: 'タイムラインに置いた「ダンに指示」のクリップを実行した時だけ。ほかの3つと違い、制作の決まりを足して読む。'},
 
   { id: 'v-rules', name: 'チャットのダンと同じ決まり', model: '毎回、決まりの頭に入る', icon: 'v-rules', x: 50, y: 320, w: 685,
     prompts: ['workspace/user', 'workspace/soul', 'workspace/rules', 'work/parallel-job-rules', 'work/confirmation-rule', 'work/editor-handoff'],
     line: 'USER・SOUL・RULES と、並行作業なら並行作業の決まり。動画のためだけの決まりは、ここには無い。',
-    facts: ['決まりの中に、手順書（スキル）全部の名前と1行の説明の一覧が入る。動画の手順書の中身は、ここではまだ読まれない。'],
-    programs: [{ path: 'app/agent/cli_runner.py', what: '_build_system_prompt が決まりを組み立てる。スキルの一覧もここで入る。' }] },
+    facts: ['決まりの中に、手順書（スキル）全部の名前と1行の説明の一覧が入る。動画の手順書の中身は、ここではまだ読まれない。']},
   { id: 'v-prod', name: '制作の決まり', model: 'プログラムの中（読むだけ）', icon: 'v-rules', x: 755, y: 320, w: 215,
     prompts: ['code/editor-runtime-notes', 'code/editor-production-budget', 'code/editor-production-authority', 'code/editor-execution-contract', 'code/editor-creative-direction', 'code/editor-first-artifact', 'code/editor-film-plan'],
     line: '「ダンに指示」の実行だけが読む7つの文（約5,600字）。チャットのダン・エディターの会話・並行作業は読まない。' },
 
   { id: 'v-skills', name: '手順書を選んで開く', model: 'ダンが一覧から選ぶ', icon: 'v-skills', x: 50, y: 480, w: 440,
     prompts: ['skill/talking-demo-editing', 'skill/video-draft', 'skill/explainer-video', 'skill/post-production', 'skill/video-direction', 'skill/creative-studio', 'skill/popout', 'skill/studio', 'skill/talk-script', 'skill/media-gen'],
-    line: 'ダンが「動画の頼みだ」と判断したら、一覧から合う手順書を選んで check_skill で開く。',
-    facts: ['自動で開かれる手順書は無い。開くかどうか・どれを開くかはダンの判断。開かずに作り始めることもできる。', '例外は「/スキル名」と打った時だけで、その時は手順書の本文が頼みに付く。', '話す人の動画は talking-demo-editing。開くと手順書の本文は返るが、案件の決まり（references/）は返らない。'],
-    programs: [{ path: 'app/agent/v2/tools.py', what: 'check_skill。.claude/skills の手順書を返す（この画面で直した版があればそちら）。' }] },
-  { id: 'v-home', name: 'Claude Code の本体の棚', model: '~/.claude/skills', icon: 'v-skills', x: 520, y: 480, w: 215,
+    line: 'ダンが「動画の頼みだ」と判断したら、一覧から合う手順書を選んで開く。',
+    facts: ['自動で開かれる手順書は無い。開くかどうか・どれを開くかはダンの判断。開かずに作り始めることもできる。', '例外は「/スキル名」と打った時だけで、その時は手順書の本文が頼みに付く。', '話す人の動画は「話しながら見せる動画の編集」の手順書。開くと手順書の本文は読めるが、案件の決まりは一緒には付いてこない。']},
+  { id: 'v-home', name: 'Claude Code の本体の棚', model: 'Claude Code に入っている手順書', icon: 'v-skills', x: 520, y: 480, w: 215,
     line: 'HyperFrames（8本）・media-use・motion-graphics・product-launch-video の11本。部屋のモデルが Claude Code の時だけ、Claude Code の Skill の道具で開ける。',
     facts: ['上の一覧には載らず、この画面でも読めない。Codex の部屋では使えない。'] },
 
@@ -206,31 +196,25 @@ export const VIDEO_NODES: ArchNode[] = [
 
   { id: 'v-parts', name: '素材と部品', model: 'その都度ダンが選ぶ', icon: 'v-parts', x: 50, y: 790, w: 290,
     line: 'タイムラインに置く物。撮った映像・制作ライブラリの素材・AIで作る絵と映像・Envato・After Effects・HyperFrames。',
-    facts: ['Envatoの部品はエディターの一覧で見本を確認できる。ダンは作品に使う文字や写真を渡し、After Effectsで書き出した映像をタイムラインに置く。', '制作の方法の一覧は5つ（production_methods）。部品の棚（71個）・見せ方の型（6個）・参考の棚（37個）は Windows 版の「話す」からしか引けない。', '11/22 に試した「見せ方の棚」（人気動画30場面）は、試しの中だけで本番の作業には入っていない。'],
-    programs: [{ path: 'app/services/envato_shelf.py', what: '作品の文字・数値・写真をEnvatoのテンプレートに入れ、After Effectsで書き出す。' }, { path: 'scripts/production_library.py', what: '制作ライブラリの素材と作品を探す・登録する・サムネを作る。' }, { path: 'app/timeline_mcp_server.py', what: 'generate_image・generate_video・import_media で素材をタイムラインへ入れる。' }, { path: 'docs/production-methods.json', what: '制作の方法5つと、確かめ済みかどうか。' }] },
-  { id: 'v-timeline', name: 'タイムラインの道具', model: '57個（mcp__timeline__）', icon: 'v-tltools', x: 365, y: 790, w: 290,
+    facts: ['Envatoの部品はエディターの一覧で見本を確認できる。ダンは作品に使う文字や写真を渡し、After Effectsで書き出した映像をタイムラインに置く。', '制作の方法の一覧は5つ。部品の棚（71個）・見せ方の型（6個）・参考の棚（37個）は Windows 版の「話す」からしか引けない。', '11/22 に試した「見せ方の棚」（人気動画30場面）は、試しの中だけで本番の作業には入っていない。']},
+  { id: 'v-timeline', name: 'タイムラインの道具', model: '57個', icon: 'v-tltools', x: 365, y: 790, w: 290,
     line: 'クリップを置く・切る・動かす・字幕・音・範囲の効果。1手ごとに形を確かめて、みきさんの画面へすぐ出す。',
-    facts: ['どの入口でも、同じ道具の箱（timeline_mcp_server.py）を使う。', '道具を使わず、ダンがその場で書いたプログラムで作品を書き換えることもできてしまう（11/22 の棚の試しの②はこれで、手順書の確かめを通らなかった）。'],
-    programs: [{ path: 'app/timeline_mcp_server.py', what: '57個の道具の入口。' }, { path: 'app/services/timeline_commands.py', what: 'タイムラインを変える1手ずつの処理。' }, { path: 'app/services/timeline_draft.py', what: '下書きを持ち、1手ごとに画面へ出し、最後に作品へ保存する。' }] },
+    facts: ['どの入口から頼んでも、同じ57個の道具を使う。', '道具を使わず、ダンがその場で書いたプログラムで作品を書き換えることもできてしまう（11/22 の棚の試しの②はこれで、手順書の確かめを通らなかった）。']},
   { id: 'v-frames', name: 'コマを見る・書き出す', model: 'ダンが時刻を選ぶ', icon: 'v-frames', x: 680, y: 790, w: 290,
     line: '好きな時刻のコマを絵にする・一部だけ書き出す・書き出した動画を Gemini に見せる。',
-    facts: ['切れ目と、重ねた絵・字幕の切り替えを全部数えて見るプログラムは無い。どの時刻を見るかはダンが選ぶ（11/22 の②はここで2コマしか見ず、ぶつっと切れたのを見落とした）。'],
-    programs: [{ path: 'app/services/sequence_window.py', what: 'タイムラインの好きな時刻のコマ・区間を書き出す。' }, { path: 'app/services/timeline_context.py', what: 'render_frame の道具。Mac では sequence_window を使う。' }, { path: 'app/api/production_asset_routes.py', what: '_render_sequence_job。export_timeline・watch_render の書き出し。' }] },
+    facts: ['切れ目と、重ねた絵・字幕の切り替えを全部数えて見るプログラムは無い。どの時刻を見るかはダンが選ぶ（11/22 の②はここで2コマしか見ず、ぶつっと切れたのを見落とした）。']},
 
   { id: 'v-gate', name: '返事の前の関所', model: 'チャットの番の終わりに動く', icon: 'v-gate', x: 50, y: 950, w: 420,
     line: '30秒以上の動画をチャットに貼る番だけ、2つを確かめ、足りなければ返事を止めて差し戻す。',
-    facts: ['1. 動画の手順書のどれか1つを、見出しまで全部読んだか。', '2. 前に動画を出してからのみきさんの発言を、指摘として記録したか。', '同じ理由で止めるのは2回まで。エディターの部屋で動画を貼らない番は止めず、裏で指摘を拾う。', '「ダンに指示」の実行（Codex）には、この関所は掛からない。'],
-    programs: [{ path: 'scripts/hook_video_feedback_gate.py', what: 'Claude Code の番の終わり（Stop）に動く関所。' }] },
+    facts: ['1. 動画の手順書のどれか1つを、見出しまで全部読んだか。', '2. 前に動画を出してからのみきさんの発言を、指摘として記録したか。', '同じ理由で止めるのは2回まで。エディターの部屋で動画を貼らない番は止めず、裏で指摘を拾う。', '「ダンに指示」の実行（Codex）には、この関所は掛からない。']},
   { id: 'v-show', name: 'みきさんに見せる', model: 'エディター・チャット', icon: 'v-show', x: 500, y: 950, w: 470,
     line: 'タイムラインは直すたびにみきさんのエディターに出る。チャットには、押すとエディターで開くサムネを返す。',
-    facts: ['並行作業の結果は、部屋のダンが起こされて短く返す。エディターのピン・ペンの指示の結果は、会話には出さない。'],
-    programs: [{ path: 'scripts/production_library.py', what: 'thumb で、作品をエディターで開くサムネを作る。' }] },
+    facts: ['並行作業の結果は、部屋のダンが起こされて短く返す。エディターのピン・ペンの指示の結果は、会話には出さない。']},
 
   { id: 'v-learn', name: '指摘から手順書を育てる', model: '裏の並行作業（1日3回まで）', icon: 'v-learn', x: 50, y: 1090, w: 600,
     prompts: ['skill/talking-demo-editing/learning', 'skill/talking-demo-editing/sources/generalization-log'],
     line: 'みきさんの指摘を記録すると、裏の作業が案件の決まりを書き足す。2つ以上の案件で同じ失敗が出た時だけ、手順書の本文に上げる。',
-    facts: ['記録は ~/.dan/video-learning/ledger.json。書き足した後、前と後を伏せて比べてから本番に入れる。', '案件の決まりだけの直しは references/ と記録だけ触れる。手順書の本文の直しには、別の案件での比べが要る。'],
-    programs: [{ path: 'scripts/video_learning.py', what: 'record（指摘を記録）・sweep（会話から指摘を拾う）・complete（作業の終わり）。' }, { path: 'app/services/video_learning.py', what: '記録し、育てる作業を起こす（同時に1つ・1日3回まで）。' }] },
+    facts: ['指摘はダンの中の記録帳に残る。書き足した後、前と後を伏せて比べてから本番に入れる。', '案件の決まりだけの直しは、案件の決まりと記録帳だけ触れる。手順書の本文の直しには、別の案件での比べが要る。']},
 ];
 
 export const VIDEO_EDGES: ArchEdge[] = [
@@ -242,7 +226,7 @@ export const VIDEO_EDGES: ArchEdge[] = [
   { from: 'v-editor', to: 'v-rules', bx: 342 },
   { from: 'v-parallel', to: 'v-rules', bx: 577 },
   { from: 'v-codex', to: 'v-prod' },
-  { from: 'v-rules', to: 'v-skills', ax: 220, label: 'check_skill で開く' },
+  { from: 'v-rules', to: 'v-skills', ax: 220, label: '手順書を開く' },
   { from: 'v-rules', to: 'v-home', ax: 577, dashed: true, label: 'Claude Code の時だけ' },
   { from: 'v-skills', to: 'v-cases', label: '「始める前に読む」' },
   { from: 'v-cases', to: 'v-timeline', ax: 380, bx: 90, label: '手順どおりに組む' },

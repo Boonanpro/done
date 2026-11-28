@@ -6,18 +6,17 @@
 // 使う所: /prompts（app/prompts/page.tsx）と、開発室のボードの「指示文」（artifacts/dev-lead）。
 // 裏側は app/api/prompts_screen.py、文の置き場所と履歴は app/services/prompt_store.py。
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { ArrowLeft, BookOpen, Cpu, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, ChevronDown, History, Loader2, Lock, PenLine, RotateCcw, Save, Sparkles, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { READER_EXAMPLES, readerGroups, ReaderSkills } from './reader-skills';
-import { ProgramEditor } from './program-editor';
 import { SkillLibrary } from './skill-library';
 import { Button } from '@/components/ui/button';
 import { SideResizeHandle, useSideWidth } from '@/components/ui/side-resize';
 import { ApiError } from '@/lib/api-client';
 import { promptsApi, type PromptItem, type PromptSummary, type PromptVersion, type PromptWorking } from '@/lib/prompts-api';
 import { cn } from '@/lib/utils';
-import { BOARD_NODES, NODES, VIDEO_NODES, type ArchNode } from './architecture';
+import { BOARD_NODES, NODE_ALIAS, NODES, VIDEO_NODES, type ArchNode } from './architecture';
 import { useCall } from '@/components/voice/call-provider';
 import { useDevelopmentBoard, TurnDecision, type Turn } from './development-board';
 import { TextChange } from '@/components/chat/map-plan';
@@ -57,7 +56,7 @@ function DiffView({ before, after }: { before: string; after: string }) {
 
 const WHO: Record<string, string> = { owner: 'みきさん', dan: 'ダン', seed: '元の文' };
 // 前の画面（家の絵）の場所の名前で開かれた時の行き先
-const OLD_PLACE: Record<string, string> = { work: 'parallel' };
+const OLD_PLACE: Record<string, string> = { work: 'parallel', ...NODE_ALIAS };
 const BY_ID = new Map([...NODES, ...BOARD_NODES].map(n => [n.id, n]));
 const VIDEO_IDS = new Set(VIDEO_NODES.map(n => n.id));
 /** 「動画を作る・直す時」の枝を見ているか（?place=video か、その中の箱） */
@@ -625,8 +624,8 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
   const parameters = here.filter(p => p.kind === 'probability' || p.kind === 'jev_model');
   const editable = here.filter(p => !p.readonly && !parameters.includes(p));
   const readonly = here.filter(p => p.readonly);
-  // 読む文が無く、プログラムと動き方だけの箱（動画の枝の道具など）は、右の全文の枠を出さずに横いっぱいに出す
-  const progOnly = !!node && !here.length && !!(node.programs?.length || node.facts?.length);
+  // 読む文が無く、動き方だけの箱（動画の枝の道具など）は、右の全文の枠を出さずに横いっぱいに出す
+  const progOnly = !!node && !here.length && !!node.facts?.length;
 
   useEffect(() => {   // 狭い画面では、選んだ物の所まで送る
     if (reader && !id) { mapTop.current?.scrollIntoView({ block: 'start' }); return; }
@@ -790,16 +789,6 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
               <ul className="mt-2 space-y-2">{readonly.map(row)}</ul>
             </details>
           ) : null}
-          {node?.programs?.length ? (
-            <div className="space-y-1.5" data-testid="node-programs">
-              <h3 className="flex items-center gap-1 text-sm font-semibold text-sky-900"><Cpu className="h-4 w-4" />ここで動くプログラム</h3>
-              <ul className="space-y-1.5">{node.programs.map(pr => <li key={pr.path} className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2">
-                <div className="break-all font-mono text-[12px] text-sky-900">{pr.path}</div>
-                <div className="text-sm text-stone-700">{pr.what}</div>
-              </li>)}</ul>
-            </div>
-          ) : null}
-          {node && <ProgramEditor key={node.id} node={node.id} onChat={() => { if (window.innerWidth < 1024) setTalkOpen(true); }} />}
           {node?.same ? (
             <p className="text-sm text-stone-600">
               ここは「<button type="button" className="font-semibold text-amber-800 underline" onClick={() => onGo({ place: node.same! })}>{BY_ID.get(node.same)?.name}</button>」と同じ決まりも読みます。
@@ -807,7 +796,7 @@ export function PromptsScreen({ place, id, onGo, embedded = false }: {
           ) : null}
           {node && node.id in READER_EXAMPLES && <button className="text-sm font-semibold text-teal-800 underline" type="button" onClick={() => navigate({ place: 'reader-' + node.id })}>{node.name}が読むスキルを開く</button>}
           {node && !here.length && !node.same && loaded && !error ? (
-            <p className="text-sm text-stone-500">ここはプログラムだけで動いていて、モデルが読む指示文はありません。</p>
+            <p className="text-sm text-stone-500">ここには、ダンの動きを変える言葉（指示文）はありません。困った事があれば、ダンに言えば直します。</p>
           ) : null}
           {loose.length ? (
             <details>

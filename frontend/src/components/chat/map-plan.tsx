@@ -11,7 +11,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, MapPin } from 'lucide-react';
 
-import { BOARD_NODES, BOX_H, type ArchNode } from '@/components/prompts/architecture';
+import { BOARD_NODES, BOX_H, NODE_ALIAS, type ArchNode } from '@/components/prompts/architecture';
 import { announcePlan, focusMapBox } from '@/lib/map-focus';
 import { promptRequest } from '@/lib/prompts-api';
 import type { MapPlanInput } from '@/lib/chat-shapes/schema';
@@ -65,7 +65,8 @@ export function TextChange({ quote, rewrite, light }: { quote?: string | null; r
 }
 
 export function MapPlanView({ plan, box }: { plan: MapPlanInput; box: string }) {
-  const changes = useMemo(() => plan.changes || [], [plan.changes]);
+  // 前に出した案の古い箱（裏方の4つ）は、まとめた「ダンの本体」に付ける
+  const changes = useMemo(() => (plan.changes || []).map((c) => (c?.node && NODE_ALIAS[c.node] ? { ...c, node: NODE_ALIAS[c.node] } : c)), [plan.changes]);
   const [layout, setLayout] = useState<Record<string, Box>>({});
   useEffect(() => { let live = true; void boardLayout().then((l) => { if (live) setLayout(l); }); return () => { live = false; }; }, []);
   const marks = useMemo(() => {

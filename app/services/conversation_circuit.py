@@ -105,7 +105,7 @@ def voice_steps(rows, jobs):
         if phase == 'route_chosen':
             activity = f'依頼を「{detail}」に振り分けました。'
         if phase == 'function_done':
-            node = 'sandbox'
+            node = 'base'
             activity = row.get('activity') or activity_phrase(row.get('name') or '', {}) or '道具から結果が返りました。'
         events.append(step(at, node, label, detail, activity=activity, prompts=row.get('prompts', []),
                            ms=row.get('elapsed_ms', row.get('ms', row.get('transcribe_ms')))))
