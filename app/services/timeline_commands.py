@@ -436,7 +436,8 @@ _CAPTION_STYLE_KEYS = {"font", "fontSize", "maxWidth", "textAlign", "color", "ou
 # Sub-keys of the nested caption style objects, with the numeric ones clamped to a sane range
 # (relative units: bg radius/padding are fractions of the font size, shadow in output px).
 _CAPTION_BG_KEYS = {"color": None, "opacity": (0.0, 1.0), "radius": (0.0, 2.0), "padX": (0.0, 3.0), "padY": (0.0, 3.0)}
-_CAPTION_SHADOW_KEYS = {"color": None, "blur": (0.0, 200.0), "dx": (-200.0, 200.0), "dy": (-200.0, 200.0)}
+_CAPTION_SHADOW_KEYS = {"color": None, "blur": (0.0, 200.0), "dx": (-200.0, 200.0), "dy": (-200.0, 200.0),
+                        "repeat": (1.0, 6.0)}
 
 # Font ids the caption renderer knows. Mirrors the keys of CAPTION_FONTS in
 # frontend/src/components/video-review/caption-design.ts (tests/test_caption_font_ids.py
@@ -705,7 +706,7 @@ def set_clip(seq: dict[str, Any], *, clip_id: str, text: str | None = None,
         cleaned = _sanitize_caption_style(style) or {}
         if set(cleaned) != set(style):
             return {"ok": False, "error": "Invalid caption style value; no changes applied. bg takes "
-                    "{color,opacity,radius,padX,padY}, shadow takes {color,blur,dx,dy} (numbers except color)."}
+                    "{color,opacity,radius,padX,padY}, shadow takes {color,blur,dx,dy,repeat} (numbers except color; repeat 1-6 stacks the shadow for a dense edge)."}
         style = cleaned
         if "emphasis" in style:
             final_text = str(text) if text is not None else str(clip.get("text") or "")
