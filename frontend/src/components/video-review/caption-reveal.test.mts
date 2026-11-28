@@ -11,4 +11,7 @@ const two = revealTokens({ text: 'そう言ってくれて\n嬉しいですね',
 assert.deepEqual(two.map((t) => [t.text, t.start, t.end]), [['そう言ってくれて\n', 10, 10.8], ['嬉しいですね', 10.8, 12]]);
 // カラオケは語ごとに光らせるので、時刻が無ければ1字ずつ割る（今までどおり）
 assert.equal(revealTokens({ text: 'あいう', start: 0, end: 3 }, 'karaoke').length, 3);
+// 字幕だけ前へ詰めて語が元の時刻のまま: 語ごと字幕の頭へ寄せ、後半も字幕の中で出す
+const moved = revealTokens({ text: '早く売ってしまいたい\n処理してしまいたい', start: 878.92, end: 881.08, words: [{ text: '早く売ってしまいたい\n', start: 889.54, end: 890.78 }, { text: '処理してしまいたい', start: 890.78, end: 891.7 }] }, 'typewriter');
+assert.deepEqual(moved.map((t) => [t.text, +t.start.toFixed(2)]), [['早く売ってしまいたい\n', 878.92], ['処理してしまいたい', 880.16]]);
 console.log('caption-reveal ok');
