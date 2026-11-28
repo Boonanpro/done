@@ -16,10 +16,10 @@ const edgeIds = new Set(EDGES.map(e => e.from + '/' + e.to));
 // Infrastructure between these endpoints belongs to the architecture. Its individual
 // hops have no timestamps in the event stream, so display those lines dashed.
 const entryPaths: Record<string, string[]> = {
-  chat: ['owner', 'pc', 'devices', 'next', 'gateway', 'core', 'chat'],
+  chat: ['owner', 'pc', 'devices', 'base', 'chat'],
   voice: ['owner', 'pc', 'audio', 'voice'],
   router: ['owner', 'pc', 'audio', 'voice', 'router'],
-  editor: ['owner', 'editor-ui', 'devices', 'next', 'gateway', 'core', 'editor'],
+  editor: ['owner', 'editor-ui', 'devices', 'base', 'editor'],
 };
 
 export function stepNode(step?: CircuitStep) {

@@ -453,8 +453,7 @@ export function ArchBoard({ trace, skills, onSkills, counts, active, glow, onPic
                     <span className="line-clamp-2 block text-[14px] font-bold leading-tight text-stone-900">{n.name}</span>
                     <span className="mt-0.5 block truncate text-[11px] leading-tight text-stone-500">{n.model}</span>
                     {count ? <span className="mt-1 inline-block rounded-full bg-amber-100 px-1.5 text-[11px] font-semibold text-amber-900">指示文 {count}</span>
-                      : n.same ? <span className="mt-1 inline-block text-[11px] text-stone-400">{BY_ID.get(n.same)?.name}と同じ文</span>
-                      : n.programs?.length ? <span className="mt-1 inline-block rounded-full bg-sky-100 px-1.5 text-[11px] font-semibold text-sky-900">プログラム {n.programs.length}</span> : null}
+                      : n.same ? <span className="mt-1 inline-block text-[11px] text-stone-400">{BY_ID.get(n.same)?.name}と同じ文</span> : null}
                   </span>
                 </button>}
                 {hasStrip(n.id) && <div style={{ top: b.h, height: STRIP }}
