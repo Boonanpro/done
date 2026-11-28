@@ -173,6 +173,26 @@ def start() -> None:
     if not dist or not (FRONTEND / dist / "BUILD_ID").exists():
         raise SystemExit("no build yet: run `python scripts/frontend_prod.py build` first")
     _validate_pwa(FRONTEND / dist)
+    if _launchd_managed():
+        # On the Mac, launchd (com.dan.frontend, KeepAlive) owns port 3000. Killing the port made launchd
+        # respawn its own server from the state file while ours lost the port: the dashboard kept serving a
+        # pruned build and every page but /login answered 500 for half an hour (2026-11-28). Let launchd
+        # restart it on the build recorded above.
+        _publish_pwa(FRONTEND / dist)
+        st["dist"] = dist
+        st["started_at"] = time.time()
+        _save_state(st)
+        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], check=True)
+        for i in range(60):
+            if _health(PORT) and _serves(dist):
+                pid = subprocess.run(["lsof", "-nP", f"-iTCP:{PORT}", "-sTCP:LISTEN", "-t"], capture_output=True, text=True).stdout.split()
+                st["pid"] = int(pid[0]) if pid else None
+                _save_state(st)
+                log(f"started via launchd dist={dist} port={PORT} ({i * 0.5:.1f}s)")
+                _prune_builds(keep=dist)
+                return
+            time.sleep(0.5)
+        raise SystemExit("frontend did not become healthy within 30s; see frontend-prod-3000.log")
     old_pid = st.get("pid")
     # 先に新プロセスを別ポートで上げてから入れ替える手もあるが、同一ポートで
     # 待ち受ける必要があるので「止めて→上げる」（実測 数秒の空白）。
@@ -207,6 +227,26 @@ def start() -> None:
             return
         time.sleep(0.5)
     raise SystemExit("frontend did not become healthy within 30s; see frontend-prod-3000.log")
+
+
+LAUNCHD_LABEL = "com.dan.frontend"
+
+
+def _launchd_managed() -> bool:
+    if sys.platform != "darwin":
+        return False
+    r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def _serves(dist: str) -> bool:
+    """The server on PORT runs `dist` (a page outside /login renders, so its chunks exist)."""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/caption-frame", headers={"User-Agent": "frontend_prod"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status == 200
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _prune_builds(keep: str) -> None:
