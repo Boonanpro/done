@@ -249,6 +249,11 @@ def automated_notice(detected_message: Dict[str, Any]) -> bool:
     「俺がやることねえなら報告すんなや。余計な報告何回もしてくんな」）。"""
     si = detected_message.get("sender_info") or {}
     sender = f"{si.get('from') or ''} {si.get('email') or ''} {si.get('name') or ''}"
+    if "notifications@vercel.com" in sender.lower():
+        # ダンの作業の枝（dan/…）のプレビューの組み立ての知らせ。本番は follow_github で入るので本人がすることは無い
+        # （11/28 制作の部屋が PR ごとに起こされた）。お客さんのサイトや本番の知らせは今までどおり起こす。
+        return bool(re.search(r"preview deployment", detected_message.get("subject") or "", re.I)
+                    and re.search(r"on branch dan/", detected_message.get("content") or ""))
     if "notifications@github.com" not in sender.lower():
         return False
     # GitHub Actions の実行結果（「PR run failed: scope-check」など）は、差出人がリポジトリの持ち主の名前で届き
