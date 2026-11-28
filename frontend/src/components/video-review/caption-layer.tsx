@@ -10,6 +10,7 @@ import {
   type CaptionDesign, type CaptionSpan, captionFont,
   captionAnchorStyle,
   captionBoxStyle,
+  captionFontPx, captionShadowFilter, captionShadowPerRun,
   captionTextStyle, captionStrokeColor, outlinePercent,
   easeOut,
   popScale,
@@ -87,9 +88,13 @@ function spanAt(spans: ColorSpan[] | undefined, idx: number): ColorSpan | undefi
   return undefined;
 }
 // 範囲の大きさ: 行の他の文字に対する倍率（強調の言葉だけ大きく）
-function spanStyle(sp: ColorSpan | undefined): CSSProperties | undefined {
-  if (!sp) return undefined;
+// shadow: 言葉ごとに影を描く時の、この字幕の影（sp に影が無い文字に使う）
+type RunShadow = { base?: string; fs: number };
+function spanStyle(sp: ColorSpan | undefined, shadow?: RunShadow): CSSProperties | undefined {
+  const runFilter = shadow ? (sp?.shadow ? captionShadowFilter(sp.shadow, shadow.fs) : shadow.base) : undefined;
+  if (!sp) return runFilter ? { filter: runFilter } : undefined;
   const st: CSSProperties = {};
+  if (runFilter) st.filter = runFilter;
   if (sp.color) { st.color = sp.color; st.WebkitTextFillColor = sp.color; }
   if (sp.font) {
     const font = captionFont(sp.font);
@@ -112,7 +117,7 @@ function spanStyle(sp: ColorSpan | undefined): CSSProperties | undefined {
 
 // テキストをスパン境界で分割し、色付き区間を <span> で包む。gradient 使用時は
 // WebkitTextFillColor が transparent になっているため両方上書きする。
-function textRuns(text: string, spans: ColorSpan[] = [], offset = 0) {
+function textRuns(text: string, spans: ColorSpan[] = [], offset = 0, shadow?: RunShadow) {
   const limit = offset + text.length;
   const cuts = new Set([offset, limit]);
   for (const span of spans) {
@@ -121,13 +126,13 @@ function textRuns(text: string, spans: ColorSpan[] = [], offset = 0) {
   }
   const points = [...cuts].sort((a, b) => a - b);
   return points.slice(0, -1).map((start, i) => ({
-    start, text: text.slice(start - offset, points[i + 1] - offset), style: spanStyle(spanAt(spans, start)),
+    start, text: text.slice(start - offset, points[i + 1] - offset), style: spanStyle(spanAt(spans, start), shadow),
   }));
 }
 
-function renderSpanned(text: string, spans?: ColorSpan[], offset = 0, highlight?: string) {
+function renderSpanned(text: string, spans?: ColorSpan[], offset = 0, highlight?: string, shadow?: RunShadow) {
   if (!spans?.length) return text;
-  return textRuns(text, spans, offset).map(run =>
+  return textRuns(text, spans, offset, shadow).map(run =>
     run.style ? <span key={run.start} style={highlight ? { ...run.style, color: highlight, WebkitTextFillColor: highlight } : run.style}>{run.text}</span> : run.text);
 }
 
@@ -156,7 +161,7 @@ function textPoint(el: HTMLElement, offset: number): [Node, number] {
 
 // The browser owns the live DOM (and IME composition). Repaint style runs on a
 // committed change, retaining both ends of a backwards or forwards selection.
-function EditableCaption({ cap, style, edit }: { cap: RenderCaption; style: CSSProperties; edit: CaptionEdit }) {
+function EditableCaption({ cap, style, edit, shadow }: { cap: RenderCaption; style: CSSProperties; edit: CaptionEdit; shadow?: RunShadow }) {
   const ref = useRef<HTMLParagraphElement>(null);
   const composing = useRef(false);
   const point = useRef(edit.point);
@@ -167,7 +172,7 @@ function EditableCaption({ cap, style, edit }: { cap: RenderCaption; style: CSSP
     const caret = pendingCaret.current;
     pendingCaret.current = null;
     const selection = caret == null ? offsets(el) : [caret, caret];
-    const children: Node[] = textRuns(cap.text, cap.design?.colorSpans).map(run => {
+    const children: Node[] = textRuns(cap.text, cap.design?.colorSpans, 0, shadow).map(run => {
       if (!run.style) return document.createTextNode(run.text);
       const span = document.createElement('span');
       span.textContent = run.text;
@@ -184,7 +189,7 @@ function EditableCaption({ cap, style, edit }: { cap: RenderCaption; style: CSSP
     if (selection && document.activeElement === el) {
       window.getSelection()?.setBaseAndExtent(...textPoint(el, selection[0]), ...textPoint(el, selection[1]));
     }
-  }, [cap.text, cap.design?.colorSpans]);
+  }, [cap.text, cap.design?.colorSpans, shadow?.base, shadow?.fs]);
   useLayoutEffect(() => {
     const el = ref.current!;
     el.focus({ preventScroll: true });
@@ -280,6 +285,9 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
   const highlight = design.highlightColor || '#ffe14d';
   const hlScale = num(design.highlightScale, 1.12);
   const colorSpans = design.colorSpans;
+  const runShadow: RunShadow | undefined = captionShadowPerRun(design)
+    ? { base: design.shadow ? captionShadowFilter(design.shadow, captionFontPx(design, outH)) : undefined, fs: captionFontPx(design, outH) }
+    : undefined;
   // トークン先頭の文字インデックス（範囲色をトークン単位に対応付ける）。Whisper 語は
   // 空白がトークンに含まれないことがあるので progressive indexOf で照合する
   const tokenOffsets = useMemo(() => {
@@ -295,7 +303,7 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
 
   let content: React.ReactNode;
   if (edit && edit.id === cap.id) {
-    content = <EditableCaption cap={cap} style={textStyle} edit={edit} />;
+    content = <EditableCaption cap={cap} style={textStyle} edit={edit} shadow={runShadow} />;
   } else if (tokens) {
     content = (
       <p style={textStyle}>
@@ -303,7 +311,7 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
           const spoken = time >= tok.end;
           const activeWord = time >= tok.start && time < tok.end;
           const offset = tokenOffsets?.[i] ?? 0;
-          const runs = renderSpanned(tok.text, colorSpans, offset, anim === 'karaoke' && activeWord ? highlight : undefined);
+          const runs = renderSpanned(tok.text, colorSpans, offset, anim === 'karaoke' && activeWord ? highlight : undefined, runShadow);
           if (anim === 'typewriter') {
             // reveal: hide tokens not yet reached (keep layout stable via visibility)
             const shown = time >= tok.start;
@@ -339,7 +347,7 @@ function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: nu
       </p>
     );
   } else {
-    content = <p style={textStyle}>{renderSpanned(cap.text, colorSpans)}</p>;
+    content = <p style={textStyle}>{renderSpanned(cap.text, colorSpans, 0, undefined, runShadow)}</p>;
   }
 
   const motion = captionMotionAt(cap,time);
