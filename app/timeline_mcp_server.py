@@ -155,6 +155,7 @@ _STR = {"type": "string"}
 _CAPTION_STYLE = {'type':'object','additionalProperties':False,'properties':{
     'font':{'type':'string','enum':list(tc.CAPTION_FONT_IDS),'description':'字幕フォントのID。noto-sans(源ノ角ゴシック。標準は極太900)/dela-gothic(極太)/zen-maru(角丸)/reggae/mplus-rounded(丸ポップ)/rocknroll/mincho(しっぽり明朝)/hiragino-w6・hiragino-w8(ヒラギノ角ゴ。普通の字幕を上品に)/toppan-mincho(凸版文久見出し明朝ExtraBold。赤箱に白明朝など)。Adobe Fontsの太い見出しはkozuka-heavy(小塚ゴシックH)、neokuro(ネオクロ)、ryo-display(りょうDisplay EB)、shuei-ymincho(秀英横太明朝B)、v7-maru(VDL V7丸ゴシックEB)。省略でnoto-sans。'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
     'color':{'type':'string'},'outlineColor':{'type':'string'},'outlineWidth':{'type':'number'},
+    'outlineOpacity':{'type':'number','minimum':0,'maximum':1,'description':'フチの濃さ。0は透明、1は不透明。'},
     'maxWidth':{'type':'number','description':'画面幅に対する比率。'},
     'textAlign':{'type':'string','enum':['left','center','right']},
     'x':{'type':'number','description':'中央からの横移動量。0が中央、正は右。画面幅に対する比率。'},
@@ -1280,6 +1281,8 @@ def _publish_step(draft: dict) -> dict:
     res = td.publish_checkpoint(ROOM_ID, DRAFT_ID)
     if res.get('published'):
         fresh = td.load_draft(ROOM_ID, DRAFT_ID)
+        if fresh["sequence"] is not draft["sequence"]:
+            draft["sequence"].update(fresh["sequence"])
         for key in ('base_hash', 'published_sequence', 'published_at'):
             if key in fresh:
                 draft[key] = fresh[key]

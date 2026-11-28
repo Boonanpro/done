@@ -70,7 +70,7 @@ import { CaptionEditContext, moveWordStyles, styleWords, type WordLook, type Wor
 import { CaptionLayer, type RenderCaption } from './caption-layer';
 import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
 import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, riderIds, rippleDeleteMain, rippleMoveGroups, rippleTrim } from './ripple-edit';
-import { applyRoll, applySlide, applySlip, editPoints, multiTrimMoved, insertBlock, overwriteMoved, resolveFree, touchingNeighbor, trimRoom, withPartners, type Placement } from './timeline-ops';
+import { applyRoll, applySlide, applySlip, editPoints, multiTrimMoved, insertBlock, overwriteMoved, resolveFree, selectionRoll, touchingNeighbor, trimRoom, withPartners, type Placement } from './timeline-ops';
 
 /** A form control whose value is a timeline setting (slider, number box, select, checkbox…), not
  *  free text. `typing` = only the ones still being typed into (number boxes). */
@@ -223,7 +223,7 @@ export type CaptionStyle = CaptionDesign & {
 // True when the caption's current design matches a preset (for highlighting the active chip).
 function captionMatchesPreset(current: CaptionStyle | null | undefined, design: CaptionDesign): boolean {
   const s = (current || {}) as CaptionDesign;
-  const keys: (keyof CaptionDesign)[] = ['font', 'color', 'outlineColor', 'outlineWidth', 'animation'];
+  const keys: (keyof CaptionDesign)[] = ['font', 'color', 'outlineColor', 'outlineWidth', 'outlineOpacity', 'animation'];
   return keys.every((k) => JSON.stringify(s[k] ?? null) === JSON.stringify(design[k] ?? null));
 }
 
@@ -612,7 +612,7 @@ export type ClipLane = { zone: 'visual' | 'audio'; layer: number };
  *  lowest lane where it overlaps nothing, so overlapping clips never share a lane (a lane with
  *  overlaps hides the clips underneath and they can't be grabbed). Audio lanes don't change the
  *  mix, so packing changes nothing in the output. */
-export function computeClipLanes(tracks: Array<{ type?: string | null; clips?: SequenceClip[] | null }>): Map<string, ClipLane> {
+export function computeClipLanes(tracks: Array<{ type?: string | null; clips?: SequenceClip[] | null }>, displaced?: Map<string, number>): Map<string, ClipLane> {
   const out = new Map<string, ClipLane>();
   let visualIndex = -1;
   const audioPending: Array<{ clip: SequenceClip; group: number; order: number }> = [];
@@ -655,6 +655,36 @@ export function computeClipLanes(tracks: Array<{ type?: string | null; clips?: S
     groupTop = Math.max(groupTop, layer);
     out.set(String(clip.id), { zone: 'audio', layer });
   }
+  // Split a colliding layer within its own stacking band, so a caption never
+  // crosses an unrelated foreground graphic. Audio and picture lanes are independent.
+  for (const zone of ['visual', 'audio'] as const) {
+    const groups = new Map<number, SequenceClip[]>();
+    for (const t of tracks) for (const c of t.clips || []) {
+      const lane = out.get(String(c.id));
+      if (lane?.zone !== zone) continue;
+      if (!groups.has(lane.layer)) groups.set(lane.layer, []);
+      groups.get(lane.layer)!.push(c);
+    }
+    const levels = [...groups.keys()].sort((a, b) => a - b);
+    levels.forEach((level, i) => {
+      const rows: { end: number; clips: SequenceClip[] }[] = [];
+      for (const c of groups.get(level)!.sort((a, b) => a.timeline_start - b.timeline_start)) {
+        let row = rows.find(r => c.timeline_start >= r.end - 0.001);
+        if (!row) { row = { end: -Infinity, clips: [] }; rows.push(row); }
+        row.clips.push(c);
+        row.end = c.timeline_end;
+      }
+      const step = Math.min(1, ((levels[i + 1] ?? Infinity) - level) / rows.length);
+      rows.forEach((row, j) => {
+        if (!j) return;
+        const layer = level + j * step;
+        for (const c of row.clips) {
+          out.set(String(c.id), { zone, layer });
+          displaced?.set(String(c.id), layer);
+        }
+      });
+    });
+  }
   return out;
 }
 
@@ -671,13 +701,16 @@ export function laneSwitchedOff(sw: LaneSwitches | null | undefined, key: string
  *  2026-11-17 本人「プレミアやダヴィンチのように、段ごとに表示・非表示、音を出す・出さないのボタンを」。 */
 export function dropSwitchedOff<T extends EditSequence | null | undefined>(seq: T): T {
   const sw = seq?.lane_switches;
-  if (!seq || !sw || !Object.keys(sw).some((k) => laneSwitchedOff(sw, k))) return seq;
-  const lanes = computeClipLanes(seq.tracks || []);
+  if (!seq) return seq;
+  const displaced = new Map<string, number>();
+  const lanes = computeClipLanes(seq.tracks || [], displaced);
+  if (!displaced.size && !Object.keys(sw || {}).some(k => laneSwitchedOff(sw, k))) return seq;
   const off = (c: SequenceClip) => {
     const lane = c.id != null ? lanes.get(String(c.id)) : undefined;
     return !!lane && laneSwitchedOff(sw, `${lane.zone}-${lane.layer}`);
   };
-  return { ...seq, tracks: (seq.tracks || []).map((t) => ({ ...t, clips: (t.clips || []).filter((c) => !off(c)) })) } as T;
+  return { ...seq, tracks: (seq.tracks || []).map((t) => ({ ...t, clips: (t.clips || []).filter((c) => !off(c)).map(c =>
+    displaced.has(String(c.id)) ? { ...c, layer: displaced.get(String(c.id)) } : c) })) } as T;
 }
 
 /** まとめて動かすクリップの新しい段。shift の段（zone）にあるクリップを、段の並び（layers は小さい順）の中で
@@ -1331,7 +1364,6 @@ export function VideoReviewEditor({
     const aggs: Agg[] = [];
 
     let counter = 0;
-    const clipLanes = computeClipLanes(tracks);
     for (const track of tracks) {
       for (const clip of track.clips || []) {
         const lane = clipLanes.get(String(clip.id)) || { zone: track.type === 'audio' ? 'audio' : 'visual', layer: 0 };
@@ -1396,7 +1428,7 @@ export function VideoReviewEditor({
     };
 
     return [...buildZone('visual'), ...buildZone('audio')];
-  }, [editSequence, annotations, extraLanes, laneFreeze, laneScale]);
+  }, [editSequence, clipLanes, annotations, extraLanes, laneFreeze, laneScale]);
 
   // Y-geometry of each lane within the tracks column, for vertical drag hit-testing.
   const laneGeom = useMemo(() => {
@@ -4715,8 +4747,8 @@ export function VideoReviewEditor({
           if (nb && (!captionEdge || nb.track === 'caption' || typeof nb.text === 'string')) {
             const nbIds = linkAV ? withPartners(editSequence, [String(nb.id)]) : [String(nb.id)];
             toolDragRef.current = mode === 'end'
-              ? { tool: 'roll', snap: editSequence, ids, prevIds: ids, nextIds: nbIds, room: { minStart: 0, maxEnd: Infinity } }
-              : { tool: 'roll', snap: editSequence, ids, prevIds: nbIds, nextIds: ids, room: { minStart: 0, maxEnd: Infinity } };
+              ? { tool: 'roll', snap: editSequence, ids, prevIds: ids, nextIds: nbIds, room: { minStart: -Infinity, maxEnd: Infinity } }
+              : { tool: 'roll', snap: editSequence, ids, prevIds: nbIds, nextIds: ids, room: { minStart: -Infinity, maxEnd: Infinity } };
           }
         } else if (timelineTool === 'slip' && mode === 'move') {
           toolDragRef.current = { tool: 'slip', snap: editSequence, ids, prevIds: [], nextIds: [], room: { minStart: 0, maxEnd: Infinity } };
@@ -4732,6 +4764,11 @@ export function VideoReviewEditor({
             room: trimRoom(editSequence, clip.id, lanesNow, new Set(all), annPlacementsRef.current),
           };
         }
+      }
+      if (editSequence && inMulti && timelineTool === 'select' && mode !== 'move') {
+        const selection = selectionRoll(editSequence, selectedSequenceClipIds, clip.id, mode, clipLanes,
+          linkAV, isLockedClip, annPlacementsRef.current);
+        if (selection) toolDragRef.current = { tool: 'roll', snap: editSequence, ids: selectedSequenceClipIds, ...selection };
       }
       // Alt（Mac は Option）を押しながら真ん中をつかむと、写しを作って写しの方を引きずる
       // （Premiere・DaVinci と同じ）。元のクリップはその場に残る。詰める ON でメインの映像なら、写しを
@@ -4870,6 +4907,7 @@ export function VideoReviewEditor({
         if (td.tool === 'roll') {
           const edge = sequenceClipDrag.mode === 'end' ? sequenceClipDrag.originalTimelineEnd : sequenceClipDrag.originalTimelineStart;
           if (snapEnabled && Math.abs(edge + d - liveTimeRef.current) < snapTolR) d = liveTimeRef.current - edge;
+          d = clamp(d, td.room.minStart, td.room.maxEnd);
           setEditSequence(applyRoll(td.snap, td.prevIds, td.nextIds, d, durOf).seq);
         } else if (td.tool === 'slip') {
           setEditSequence(applySlip(td.snap, td.ids, d, durOf).seq);
@@ -7372,6 +7410,15 @@ export function VideoReviewEditor({
                                 step="0.25"
                                 value={letters.outlineWidth ?? 1}
                                 onChange={(e) => setCaptionLetters({ outlineWidth: Number(e.target.value) })}
+                                className="w-full"
+                              />
+                            </label>
+                            <label className="block text-xs">
+                              フチの濃さ {Math.round((letters.outlineOpacity ?? 1) * 100)}%
+                              <input
+                                type="range" min="0" max="1" step="0.01"
+                                value={letters.outlineOpacity ?? 1}
+                                onChange={(e) => setCaptionLetters({ outlineOpacity: Number(e.target.value) })}
                                 className="w-full"
                               />
                             </label>

@@ -126,7 +126,7 @@ def _place_visual(seq: dict[str, Any], ts: float, te: float, *, lane: int | None
         if t.get('locked') or t.get('hidden'):
             return None, f"lane {lane} is locked or hidden"
         if not _span_free(t, ts, te):
-            return None, f"lane {lane} not free at {ts:.2f}-{te:.2f}"
+            return _place_visual(seq, ts, te, min_lane=min_lane)
         return lane, t
     order = range(len(tracks) - 1, -1, -1) if above else range(len(tracks))
     for i in order:
@@ -220,7 +220,7 @@ def append_clip(seq: dict[str, Any], assets: dict, *, asset_id: str, source_star
     te = ts + duration
     base = _track_of_type(seq, "video")
     if not _span_free(base, ts, te):
-        return {"ok": False, "error": f"base lane not free at {ts:.2f}-{te:.2f} (use insert_clip mode=ripple, or another time)"}
+        _, base = _place_visual(seq, ts, te)
     vid = _new_id("clip_ag_v")
     clip: dict[str, Any] = {
         "id": vid, "asset_id": asset_id,
@@ -380,15 +380,6 @@ def move_clip(seq: dict[str, Any], *, clip_id: str, new_start: float) -> dict[st
     if clip.get("link_id"):
         targets = [c for _, _, c in _all_clips(seq) if c.get("link_id") == clip.get("link_id")]
     d = max(0.0, _f(new_start)) - _f(clip.get("timeline_start"))
-    ids = {str(c.get("id")) for c in targets}
-    for c in targets:
-        nts = _f(c.get("timeline_start")) + d
-        nte = _f(c.get("timeline_end")) + d
-        # destination must be free on that clip's own lane
-        for t in _tracks(seq):
-            if any(str(x.get("id")) == str(c.get("id")) for x in t.get("clips") or []):
-                if not _span_free(t, nts, nte, ignore=ids):
-                    return {"ok": False, "error": f"destination not free on {t.get('type')} lane at {nts:.2f}-{nte:.2f}"}
     for c in targets:
         c["timeline_start"] = round(_f(c.get("timeline_start")) + d, 3)
         c["timeline_end"] = round(_f(c.get("timeline_end")) + d, 3)
@@ -431,7 +422,7 @@ def add_overlay(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_st
     return {"ok": True, "clip_id": cid}
 
 
-_CAPTION_STYLE_KEYS = {"font", "fontSize", "maxWidth", "textAlign", "color", "outlineColor", "outlineWidth", "x", "y",
+_CAPTION_STYLE_KEYS = {"font", "fontSize", "maxWidth", "textAlign", "color", "outlineColor", "outlineWidth", "outlineOpacity", "x", "y",
                        "bg", "shadow", "skew", "letterSpacing", "colorSpans", "emphasis"}
 # Sub-keys of the nested caption style objects, with the numeric ones clamped to a sane range
 # (relative units: bg radius/padding are fractions of the font size, shadow in output px).
@@ -587,6 +578,13 @@ def _sanitize_caption_style(style: dict[str, Any] | None) -> dict[str, Any] | No
             if fv > 8.0:  # px指定と思われる値は相対単位へ換算（64px ≈ 1.0）
                 fv = fv / 64.0
             out[k] = max(0.0, min(3.0, fv))
+        elif k == "outlineOpacity":
+            try:
+                opacity = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(opacity):
+                out[k] = max(0.0, min(1.0, opacity))
         elif k == "maxWidth":
             try:
                 out[k] = max(0.05, min(2.0, float(v)))
@@ -668,7 +666,7 @@ def insert_freeze(seq: dict[str, Any], assets: dict, *, source_clip_id: str, at_
     te = ts + max(MIN_CLIP, _f(duration))
     base = _track_of_type(seq, "video")
     if not _span_free(base, ts, te):
-        return {"ok": False, "error": f"base lane not free at {ts:.2f}-{te:.2f}"}
+        _, base = _place_visual(seq, ts, te)
     fs = _f(at_source_time) if at_source_time is not None else _f(src.get("source_end")) - 0.05
     cid = _new_id("clip_ag_fz")
     base.setdefault("clips", []).append({
@@ -694,7 +692,7 @@ def set_clip(seq: dict[str, Any], *, clip_id: str, text: str | None = None,
         font_err = caption_font_error(style)
         if font_err:
             return {"ok": False, "error": font_err}
-        for key in ('fontSize', 'maxWidth', 'outlineWidth', 'x', 'y', 'skew', 'letterSpacing'):
+        for key in ('fontSize', 'maxWidth', 'outlineWidth', 'outlineOpacity', 'x', 'y', 'skew', 'letterSpacing'):
             if key in style and not (key == 'skew' and style[key] is None):
                 try:
                     value = float(style[key])

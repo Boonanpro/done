@@ -50,7 +50,7 @@ export function overwriteMoved<S extends RSeq>(snap: S, moved: Map<string, Parti
       const cl = lanes.get(String(c0.id));
       const c = (track.type === 'audio' && cl && !Number.isFinite((c0 as OClip).layer as number) ? { ...c0, layer: cl.layer } : c0) as OClip;
       const mv = moved.get(String(c.id));
-      if (mv) { out.push({ ...c, ...mv, ...(cl && mv.layer === undefined ? { layer: c.layer ?? cl.layer } : {}) }); continue; }
+      if (mv) { out.push({ ...c, ...mv, ...(cl && mv.layer === undefined ? { layer: cl.layer } : {}) }); continue; }
       const lane = laneKey(lanes, String(c.id));
       const t = targets.find((x) => x.lane === lane && x.id !== c.id && x.ae > c.timeline_start + 0.001 && x.as < c.timeline_end - 0.001);
       if (!t) { out.push(c); continue; }
@@ -237,7 +237,7 @@ type DurOf = (c: OClip) => number; // 素材の長さ（秒）。分からない
 /** 頭を d 秒動かした時に、素材の外へ出ない・0.1秒より短くならない範囲。 */
 function headRoom(c: OClip, _durOf: DurOf): [number, number] {
   const sp = Number(c.speed) > 0 ? Number(c.speed) : 1;
-  const lo = hasSource(c) ? -Number(c.source_start || 0) / sp : Number.NEGATIVE_INFINITY;
+  const lo = c.kind !== 'image' && hasSource(c) ? -Number(c.source_start || 0) / sp : Number.NEGATIVE_INFINITY;
   return [lo, c.timeline_end - c.timeline_start - 0.1];
 }
 function tailRoom(c: OClip, durOf: DurOf): [number, number] {
@@ -255,7 +255,7 @@ function patch<S extends RSeq>(seq: S, f: (c: OClip) => Partial<OClip> | null): 
 }
 const moveHead = (c: OClip, d: number): Partial<OClip> => ({
   timeline_start: r2(c.timeline_start + d),
-  ...(hasSource(c) ? { source_start: r3(Math.max(0, Number(c.source_start || 0) + srcAdvance(c, d))) } : {}),
+  ...(c.kind !== 'image' && hasSource(c) ? { source_start: r3(Math.max(0, Number(c.source_start || 0) + srcAdvance(c, d))) } : {}),
   ...(c.motion_keys && c.motion_keys.length ? { motion_keys: c.motion_keys.map((k) => ({ ...k, t: Number((k.t - d).toFixed(4)) })) } : {}),
 });
 const moveTail = (c: OClip, d: number): Partial<OClip> => ({
@@ -295,6 +295,50 @@ export function multiTrimMoved(
   return out;
 }
 
+/** A selected stack can contain a caption with a touching neighbour and a picture
+ *  with a free edge. Move those edges together and roll the neighbouring edge. */
+export function selectionRoll(
+  seq: RSeq, selected: string[], grabbed: string, side: 'start' | 'end', lanes: Map<string, RLane>,
+  linked: boolean, locked: (id: string) => boolean, extra: Placement[],
+) {
+  const expand = (ids: string[]) => linked ? withPartners(seq, ids) : ids;
+  const same = new Set(expand(selected));
+  const opposite = new Set<string>();
+  const seam = touchingNeighbor(seq, grabbed, side, lanes);
+  // Grabbing the join between two selected clips edits the shared join only.
+  if (seam && same.has(String(seam.id))) {
+    for (const id of expand([String(seam.id)])) same.delete(id);
+  }
+  for (const id of same) {
+    const neighbor = touchingNeighbor(seq, id, side, lanes);
+    if (neighbor) for (const n of expand([String(neighbor.id)])) opposite.add(n);
+  }
+  if (!opposite.size) return null;
+  const heads = side === 'start' ? same : opposite;
+  const tails = side === 'end' ? same : opposite;
+  const clips = allClips(seq);
+  let min = -Infinity, max = Infinity;
+  for (const c of clips) {
+    const id = String(c.id);
+    if (!heads.has(id) && !tails.has(id)) continue;
+    if (locked(id)) { min = 0; max = 0; break; }
+    // Ignore only the edges that will move out of the way at this very join.
+    if (heads.has(id)) {
+      const prev = touchingNeighbor(seq, id, 'start', lanes);
+      const ignore = new Set([id]);
+      if (prev && tails.has(String(prev.id))) ignore.add(String(prev.id));
+      min = Math.max(min, trimRoom(seq, id, lanes, ignore, extra).minStart - c.timeline_start);
+    }
+    if (tails.has(id)) {
+      const next = touchingNeighbor(seq, id, 'end', lanes);
+      const ignore = new Set([id]);
+      if (next && heads.has(String(next.id))) ignore.add(String(next.id));
+      max = Math.min(max, trimRoom(seq, id, lanes, ignore, extra).maxEnd - c.timeline_end);
+    }
+  }
+  return { prevIds: [...tails], nextIds: [...heads], room: { minStart: min, maxEnd: max } };
+}
+
 /** ロール: 左のクリップ（と相方）の終わりと右のクリップ（と相方）の頭を一緒に d 秒動かす。全体の長さは変わらない。
  *  動ける範囲に収めた d を返す。 */
 export function applyRoll<S extends RSeq>(seq: S, leftIds: string[], rightIds: string[], d: number, durOf: DurOf): { seq: S; d: number } {
@@ -307,7 +351,11 @@ export function applyRoll<S extends RSeq>(seq: S, leftIds: string[], rightIds: s
   const dd = Math.min(hi, Math.max(lo, d));
   if (!Number.isFinite(dd) || Math.abs(dd) < 1e-6) return { seq, d: 0 };
   const L = new Set(leftIds.map(String)), R = new Set(rightIds.map(String));
-  return { seq: patch(seq, (c) => (L.has(String(c.id)) ? moveTail(c, dd) : R.has(String(c.id)) ? moveHead(c, dd) : null)), d: dd };
+  return { seq: patch(seq, (c) => {
+    const id = String(c.id);
+    if (!L.has(id) && !R.has(id)) return null;
+    return { ...(L.has(id) ? moveTail(c, dd) : {}), ...(R.has(id) ? moveHead(c, dd) : {}) };
+  }), d: dd };
 }
 
 /** スリップ: 置き場所と長さはそのままで、使う素材の区間だけを d 秒ずらす（右へ引くと素材の前の方が見える）。 */
