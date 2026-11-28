@@ -20,3 +20,12 @@ def test_github_actions_run_mail_is_automated():
     assert automated_notice({**m, "subject": "[Boonanpro/done] Run failed: tests - main (abc1234)"})
     assert not automated_notice({**m, "subject": "Re: [Boonanpro/done] 開発室の構成図 (PR #1102)"})
     assert not automated_notice({"sender_info": {"from": "x@example.com"}, "subject": "[a/b] PR run failed: x"})
+
+
+def test_vercel_preview_mail_for_dan_branch_is_automated():
+    m = {"sender_info": {"from": "Vercel <notifications@vercel.com>"},
+         "subject": "Preview deployment failed for frontend",
+         "content": "The preview deployment for project frontend failed on branch dan/prompts-map-no-code at commit 1ba42e1."}
+    assert automated_notice(m)
+    assert not automated_notice({**m, "subject": "Production deployment failed for kittoku"})
+    assert not automated_notice({**m, "content": "failed on branch main at commit abc"})
