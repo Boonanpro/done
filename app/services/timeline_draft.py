@@ -258,7 +258,8 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
     problems = validate(draft["sequence"], room_id)
     if draft.get("base_sequence") is not None:
         from app.services.timeline_scope import violations
-        problems += violations(draft["base_sequence"], draft["sequence"], draft.get("edit_scope"))
+        problems += violations(draft.get("published_sequence") or draft["base_sequence"],
+                               draft["sequence"], draft.get("edit_scope"))
     if problems:
         return {"ok": False, "conflict": False, "problems": problems}
     with ContentsLock(room_id):
@@ -271,14 +272,23 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
         live_seq = _content_sequence(content)
         live_hash = sequence_hash(live_seq) if live_seq else ""
         if live_hash != draft["base_hash"]:
-            return {
-                "ok": False,
-                "conflict": True,
-                "problems": [
-                    "ジョブ実行中にタイムラインが手動編集されています。上書きせず中止しました"
-                    f"（base={draft['base_hash'][:8]} live={live_hash[:8]}）。"
-                ],
-            }
+            from app.services.timeline_revs import DraftConflict, merge_draft
+            from app.services.timeline_scope import violations
+            base = draft.get("published_sequence") or draft.get("base_sequence")
+            try:
+                if base is None or live_seq is None or sequence_hash(base) != draft["base_hash"]:
+                    raise DraftConflict()
+                merged = merge_draft(base, draft["sequence"], live_seq)
+            except DraftConflict:
+                return {"ok": False, "conflict": True, "problems": [
+                    "同じ箇所が同時に編集されたため、ダンの変更は保存していません。"]}
+            # The owner may have locked a clip or changed timing since the draft started.
+            existing = set(validate(live_seq, room_id))
+            problems = [p for p in validate(merged, room_id) if p not in existing]
+            problems += violations(live_seq, merged, draft.get("edit_scope"))
+            if problems:
+                return {"ok": False, "conflict": True, "problems": problems}
+            draft["sequence"] = merged
         # picture clips are stored in one form (サイズ・左右・上下・キーフレーム): whatever this draft
         # still holds in the old box form converts here — this work only, in place (the draft's
         # base hash below is taken after it)
@@ -310,7 +320,8 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
     else:
         draft["committed_at"] = time.time()
     save_draft(draft)
-    return {"ok": True, "conflict": False, "problems": []}
+    return {"ok": True, "conflict": False, "problems": [],
+            "sequence_hash": sequence_hash(draft["sequence"])}
 
 
 def describe_changes(before, after):

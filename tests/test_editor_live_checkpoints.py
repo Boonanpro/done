@@ -176,3 +176,39 @@ def test_overlap_saved_before_draft_does_not_block_ai_edit(tmp_path, monkeypatch
     result = tool('set_clip', {'clip_id': 'a', 'text': 'AI'})
     assert result['timeline_updated'], result
     assert [c['text'] for c in live()['tracks'][0]['clips']] == ['AI', 'keep']
+
+
+def test_draft_and_racing_owner_save_keep_both_changes(draft):
+    draft['sequence']['tracks'][0]['clips'][0]['text'] = 'edited caption'
+    td.save_draft(draft)
+    contents = td._read_contents_raw('room')
+    owner = contents[0]['timeline']['sequence']['tracks'][0]['clips']
+    owner[0]['timeline_end'] = 2
+    owner[1]['timeline_start'] = 2
+    td._write_contents_raw('room', contents)
+
+    saved = td.publish_checkpoint('room', draft['draft_id'])
+    assert saved['published'] and saved['sequence_hash'] == td.sequence_hash(live())
+    first, second = live()['tracks'][0]['clips']
+    assert (first['text'], first['timeline_end'], second['timeline_start']) == ('edited caption', 2, 2)
+    # A second checkpoint races another manual move. Compare with the last publication.
+    d = td.load_draft('room', draft['draft_id'])
+    d['sequence']['tracks'][0]['clips'][1]['text'] = 'next caption'
+    td.save_draft(d)
+    contents = td._read_contents_raw('room')
+    contents[0]['timeline']['sequence']['tracks'][0]['clips'][1]['timeline_start'] = 2.5
+    td._write_contents_raw('room', contents)
+    assert td.publish_checkpoint('room', draft['draft_id'])['published']
+    assert live()['tracks'][0]['clips'][1] == {**second, 'timeline_start': 2.5, 'text': 'next caption'}
+
+
+def test_concurrent_owner_lock_and_new_overlaps_are_respected(draft):
+    draft['sequence']['tracks'][0]['clips'][0]['timeline_end'] = 3.5
+    draft['sequence']['tracks'][0]['clips'][1]['timeline_start'] = 4
+    td.save_draft(draft)
+    contents = td._read_contents_raw('room')
+    owner_seq = contents[0]['timeline']['sequence']
+    owner_seq['tracks'][0]['clips'][0]['locked'] = True
+    td._write_contents_raw('room', contents)
+    assert td.publish_checkpoint('room', draft['draft_id'])['conflict']
+    assert live() == owner_seq

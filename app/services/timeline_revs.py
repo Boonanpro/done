@@ -200,3 +200,52 @@ def merge(base: dict[str, Any], mine: dict[str, Any], live: dict[str, Any]) -> t
         tracks.append(tr)
     out["tracks"] = tracks
     return out, stats
+
+
+class DraftConflict(ValueError):
+    """The same value (or incompatible list order) changed on both sides."""
+
+
+_MISSING = object()
+
+
+def _draft_value(base, draft, live, field=None):
+    if draft == base or draft == live:
+        return live
+    if live == base:
+        return draft
+    if all(isinstance(value, dict) for value in (base, draft, live)):
+        merged = {}
+        for key in dict.fromkeys([*live, *draft, *base]):
+            value = _draft_value(base.get(key, _MISSING), draft.get(key, _MISSING),
+                                 live.get(key, _MISSING), key)
+            if value is not _MISSING:
+                merged[key] = value
+        return merged
+    if field in ("tracks", "clips") and all(isinstance(v, list) for v in (base, draft, live)):
+        # A clip's position in an array is not its identity. Old tracks can lack IDs:
+        # match those by position only when the layout is stable.
+        maps = []
+        for items in (base, draft, live):
+            indexed = {}
+            for index, item in enumerate(items):
+                key = item.get("id") if isinstance(item, dict) else None
+                if key is None and field == "tracks" and len(base) == len(draft) == len(live):
+                    key = ("legacy", index)
+                if key is None or key in indexed:
+                    raise DraftConflict(field)
+                indexed[key] = item
+            maps.append(indexed)
+        old, edited, current = maps
+        order = _draft_value(list(old), list(edited), list(current))
+        # Check removed entries too: deletion racing a modification is a conflict.
+        merged = {key: _draft_value(old.get(key, _MISSING), edited.get(key, _MISSING),
+                                    current.get(key, _MISSING))
+                  for key in dict.fromkeys([*old, *edited, *current])}
+        return [merged[key] for key in order]
+    raise DraftConflict(field)
+
+
+def merge_draft(base, draft, live):
+    """Reapply compatible draft edits onto live; reject competing edits atomically."""
+    return copy.deepcopy(_draft_value(base, draft, live))

@@ -68,7 +68,7 @@ import { AdobeFontChoices } from './adobe-font-choices';
 import { isRetiredFont } from './adobe-fonts';
 import { CaptionEditContext, moveWordStyles, styleWords, type WordLook, type WordRange } from './caption-word-edit';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
-import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
+import { applyOwnStep, rebaseSequence, type HistSnapshot, type HistStep } from './undo-history';
 import { closeMainGaps, insertPoints, mainGapAt, mainLayerOf, riderIds, rippleDeleteMain, rippleMoveGroups, rippleTrim } from './ripple-edit';
 import { applyRoll, applySlide, applySlip, editPoints, multiTrimMoved, insertBlock, overwriteMoved, resolveFree, selectionRoll, touchingNeighbor, trimRoom, withPartners, type Placement } from './timeline-ops';
 
@@ -352,6 +352,7 @@ type TimelineLane = {
 };
 
 export type EditSequence = {
+  _rev?: string;
   frame_rate?: number;
   version?: number;
   format?: string;
@@ -1294,13 +1295,16 @@ export function VideoReviewEditor({
   const clipLanes = useMemo(() => computeClipLanes(editSequence?.tracks || []), [editSequence]);
   // メインの段（映像のクリップがある一番下の映像の段）。詰める（リップル）はこの段のクリップに効く。
   const mainLayer = useMemo(() => mainLayerOf(editSequence?.tracks || [], clipLanes), [editSequence, clipLanes]);
-  // プレビューには、段の頭で切った段（非表示・消音）のクリップを渡さない
-  // ダンの手を見せている間、プレビューは途中の形を追わずに、ダンが保存した最後の形を流す。
-  // 途中の形はタイムラインの動きを見せるための物で、切ったクリップの後ろ半分が元のクリップと重なった形などが
-  // 1秒に何度も入れ替わる。それをプレビューが追うと、再生中に絵がカクつき、音が二重に鳴っていた（2026-11-25）。
-  const [previewHold, setPreviewHold] = useState<EditSequence | null>(null);
-  const previewSource = previewHold ?? editSequence;
-  const previewSequence = useMemo(() => dropSwitchedOff(previewSource), [previewSource]);
+  // Replay frames are a timeline decoration. The preview, edit commands, undo and saves
+  // always read the actual working sequence, even while the hand is moving.
+  const [replayFrame, setReplayFrame] = useState<{
+    sequence: EditSequence; start: EditSequence; final: EditSequence;
+  } | null>(null);
+  const shownSequence = replayFrame && (editSequence === replayFrame.start || seqSig(editSequence) === seqSig(replayFrame.final))
+    ? replayFrame.sequence : editSequence;
+  const shownLanes = useMemo(() => shownSequence === editSequence ? clipLanes
+    : computeClipLanes(shownSequence?.tracks || []), [shownSequence, editSequence, clipLanes]);
+  const previewSequence = useMemo(() => dropSwitchedOff(editSequence), [editSequence]);
   const laneSwitches = editSequence?.lane_switches;
   const toggleLaneSwitch = useCallback((key: string) => {
     const field = key.startsWith('visual-') ? 'hidden' : 'muted';
@@ -1355,7 +1359,7 @@ export function VideoReviewEditor({
   // Order top→bottom: visual instructions, captions, effects, overlay video
   // layers, base video (middle), audio lanes by role, audio instructions.
   const timelineLanes = useMemo<TimelineLane[]>(() => {
-    const tracks = editSequence?.tracks || [];
+    const tracks = shownSequence?.tracks || [];
     // NLE-style free layers: the only fixed rule is visual-on-top / audio-on-bottom.
     // Within each zone, layers are free — any clip/annotation can sit on any layer,
     // higher layer = closer to front (z-order). Roles/types are per-item badges, not
@@ -1366,7 +1370,7 @@ export function VideoReviewEditor({
     let counter = 0;
     for (const track of tracks) {
       for (const clip of track.clips || []) {
-        const lane = clipLanes.get(String(clip.id)) || { zone: track.type === 'audio' ? 'audio' : 'visual', layer: 0 };
+        const lane = shownLanes.get(String(clip.id)) || { zone: track.type === 'audio' ? 'audio' : 'visual', layer: 0 };
         let itemType = 'video';
         if (track.type === 'audio') itemType = 'audio';
         else if (track.type === 'caption' || clip.track === 'caption') itemType = 'caption';
@@ -1428,7 +1432,7 @@ export function VideoReviewEditor({
     };
 
     return [...buildZone('visual'), ...buildZone('audio')];
-  }, [editSequence, clipLanes, annotations, extraLanes, laneFreeze, laneScale]);
+  }, [shownSequence, shownLanes, annotations, extraLanes, laneFreeze, laneScale]);
 
   // Y-geometry of each lane within the tracks column, for vertical drag hit-testing.
   const laneGeom = useMemo(() => {
@@ -1510,59 +1514,36 @@ export function VideoReviewEditor({
     }
     return ids;
   }, [allSequenceClips, linkAV, selectedSequenceClipIds]);
-  // Sync the working copy from the prop ONLY when its content genuinely changes
-  // (e.g. a fresh Dan render), NOT on every parent re-render / poll. The parent
-  // re-creates an equal-value sequence object on each poll; without this guard the
-  // effect would reset editSequence every few seconds and wipe in-progress manual
-  // edits (drag/trim/delete appeared to "do nothing").
-  // The single source of truth for "what value is in sync with the backend". Advanced when we
-  // adopt a parent value AND when we autosave. The parent polls and can lag (serve a value the
-  // backend had a moment ago); comparing the INCOMING value against this — not against the live
-  // edit — means a stale echo (== lastSynced) is skipped, so local edits/undo aren't reverted
-  // during the save lag. Only an incoming value that differs from lastSynced is a genuine new
-  // baseline (Dan render / external change) → adopt it and reset the undo history. Canonical
-  // compare ignores key order / number reformat from the round-trip.
   const danReplayingRef = useRef(false);
-  const lastSyncedSig = useRef<string>(seqSig(initialSequence));
-  // この画面が今の中身を作り始めた版（サーバーの _rev）。保存の時に送り、サーバーは版が進んでいれば
-  // 画面が知らない直しを残してクリップごとに重ねる（2026-11-25 寝ていたタブの保存がダンの直し72か所を消した）
-  const revOf = (seq: unknown) => (seq && typeof seq === 'object' ? ((seq as { _rev?: string })._rev ?? null) : null);
-  const baseRevRef = useRef<string | null>(revOf(initialSequence));
-  // Annotations (blur boxes etc.) autosave separately — the sequence sig doesn't cover them, so
-  // without this a drawn blur never reaches the backend/export. Echo-safe via seqSig.
-  const lastSyncedAnnSig = useRef<string>(seqSig(initialAnnotations || []));
-  // Every value the editor itself has held (current + recent past). The parent POLLS the server
-  // (loadAll every few seconds) and can hand back a value that LAGS our latest edit — e.g. right
-  // after we save a resize, an in-flight poll returns the pre-save length. Comparing only against
-  // the single lastSynced sig, that lagging echo looks like an external change and gets adopted
-  // for one frame ("revert to old length, then back"). A value we've ALREADY produced locally is
-  // never a genuine external change, so down-sync skips it. Only a sig we've never held (a real
-  // Dan render /外部更新) is adopted. Bounded so it can't grow without limit.
-  const localSeqSigs = useRef<Set<string>>(new Set([seqSig(initialSequence)]));
+  const savedSequence = useRef(initialSequence || null);
+  const pendingSave = useRef<Promise<void> | null>(null);
+  const acknowledged = useRef<{ submitted: EditSequence | null } | null>(null);
+  const [saveEpoch, setSaveEpoch] = useState(0);
+  const gestureActive = !!(sequenceClipDrag || timelineDrag || pendingTimelineDrag || dragCrop || isPointerDown);
+  const lastSyncedAnnSig = useRef(seqSig(initialAnnotations || []));
   const localAnnSigs = useRef<Set<string>>(new Set([seqSig(initialAnnotations || [])]));
   const rememberLocalSig = (set: React.MutableRefObject<Set<string>>, sig: string) => {
     const s = set.current;
     s.add(sig);
     if (s.size > 80) s.delete(s.values().next().value as string);
   };
-  useEffect(() => { rememberLocalSig(localSeqSigs, seqSig(editSequence)); }, [editSequence]);
   useEffect(() => { rememberLocalSig(localAnnSigs, seqSig(annotations)); }, [annotations]);
-  useEffect(() => {
-    const sig = seqSig(initialSequence);
-    // Dan's steps are being replayed; the replay itself ends on the saved value.
-    if (danReplayingRef.current) return;
-    // サーバーの中身がこの画面の同期点と同じなら、その版を基にしてよい
-    if (sig === lastSyncedSig.current && revOf(initialSequence)) baseRevRef.current = revOf(initialSequence);
-    // Skip if this is the current sync point OR any state we've held locally (a lagging poll echo).
-    if (sig === lastSyncedSig.current || localSeqSigs.current.has(sig)) return;
-    lastSyncedSig.current = sig;
-    baseRevRef.current = revOf(initialSequence);
-    // genuine new baseline (Dan or another screen): keep the owner's undo history, close any
-    // open burst first, and pre-sync histPrevRef so the change isn't recorded as an owner step.
+  // A drag computes from its pointer-down snapshot. Receive changes after pointer-up.
+  // A PATCH response belongs to the snapshot sent; any later keystrokes stay on top.
+  useLayoutEffect(() => {
+    if (gestureActive || pendingSave.current) return;
+    const remote = initialSequence || null;
+    const ack = acknowledged.current;
+    if (!ack && remote === savedSequence.current) return;
+    const from = ack ? ack.submitted : savedSequence.current;
+    acknowledged.current = null;
+    savedSequence.current = remote;
+    const next = seqSig(from) === seqSig(editSequence) ? remote : rebaseSequence(remote, from, editSequence);
+    if (seqSig(next) === seqSig(editSequence)) return;
     closeOwnBurst();
-    histPrevRef.current = { annotations, sequence: initialSequence || null };
-    setEditSequence(initialSequence || null);
-  }, [annotations, initialSequence]);
+    histPrevRef.current = { annotations, sequence: next };
+    setEditSequence(next);
+  }, [initialSequence, gestureActive, saveEpoch, annotations, editSequence]);
 
   // ---- Dan's hands: every step Dan publishes on this content is replayed here as motion ----
   // The edit itself is already saved on the server the instant Dan makes it; only the SHOWING is
@@ -1591,16 +1572,20 @@ export function VideoReviewEditor({
   const feedQueueRef = useRef<Array<{ entries: DanFeedEntry[]; sequence: EditSequence | null; stale?: boolean }>>([]);
   const feedRunningRef = useRef(false);
 
-  const adoptShown = useCallback((seq: EditSequence | null) => {
-    // Same as adopting a new baseline from the server: no autosave, no undo step, and the
-    // owner's own undo history stays.
-    const sig = seqSig(seq);
-    lastSyncedSig.current = sig;
-    if (revOf(seq)) baseRevRef.current = revOf(seq);
-    rememberLocalSig(localSeqSigs, sig);
-    closeOwnBurst();
-    histPrevRef.current = { annotations: annotationsRef.current, sequence: seq };
-    setEditSequence(seq);
+  const replayGeneration = useRef(0);
+  useEffect(() => {
+    const interrupt = () => {
+      replayGeneration.current++;
+      feedQueueRef.current = [];
+      setReplayFrame(null);
+    };
+    window.addEventListener('pointerdown', interrupt, true);
+    window.addEventListener('keydown', interrupt, true);
+    return () => {
+      interrupt();
+      window.removeEventListener('pointerdown', interrupt, true);
+      window.removeEventListener('keydown', interrupt, true);
+    };
   }, []);
 
   /** Where the hand goes for the clips Dan touches: on the clip when the owner can see it, else
@@ -1679,26 +1664,23 @@ export function VideoReviewEditor({
         // 届いてから時間がたった直しは、動きで再生せずに今の形へすぐ合わせる（後から再生しない）。
         const pending = feedQueueRef.current;
         if (document.hidden || pending.some((b) => b.stale)) {
-          const last = pending[pending.length - 1];
           feedQueueRef.current = [];
-          const start = editSequenceRef.current;
-          if (last?.sequence && start && seqSig(start) === lastSyncedSig.current) adoptShown(last.sequence);
           continue;
         }
         const batch = feedQueueRef.current.shift()!;
         const finalSeq = batch.sequence;
         const start = editSequenceRef.current;
         // A manual edit not yet saved: never paint over it; the normal sync decides.
-        if (!finalSeq || !start || seqSig(start) !== lastSyncedSig.current) continue;
+        if (!finalSeq || !start || seqSig(start) !== seqSig(savedSequence.current) || pendingSave.current) continue;
         danReplayingRef.current = true;
         setDanReplay(true);
-        setPreviewHold(finalSeq);
+        const generation = replayGeneration.current;
         const steps = buildDanSteps(batch.entries, start);
         const stepMs = steps.length > 14 ? Math.max(260, Math.round(9000 / steps.length)) : 700;
         const shown = clipStateMap(start);
         for (const step of steps) {
           // 途中でタブが隠れたら、残りは動かさずに最後の形へ
-          if (document.hidden) break;
+          if (document.hidden || generation !== replayGeneration.current) break;
           const vanish = step.filter((c) => c.removed).map((c) => String(c.clip_id));
           const ids = step.map((c) => String(c.clip_id));
           if (vanish.length) {
@@ -1713,26 +1695,26 @@ export function VideoReviewEditor({
             if (!shown.has(id)) appear.push(id);
             shown.set(id, { ...(shown.get(id) || {}), ...(ch.after || {}) });
           }
-          adoptShown(assembleDanSequence(shown, start, finalSeq));
+          if (generation !== replayGeneration.current) break;
+          setReplayFrame({ sequence: assembleDanSequence(shown, start, finalSeq), start, final: finalSeq });
           const kept = ids.filter((id) => !vanish.includes(id));
           setDanTouch({ ids: kept, appear, vanish: [] });
           if (kept.length) await pointDanAt(kept);
           await wait(stepMs);
         }
-        adoptShown(finalSeq);
-        setPreviewHold(null);
+        setReplayFrame(null);
         await wait(250);
         danReplayingRef.current = false;
       }
     } finally {
       danReplayingRef.current = false;
       feedRunningRef.current = false;
-      setPreviewHold(null);
+      setReplayFrame(null);
       setDanReplay(false);
       setDanTouch({ ids: [], appear: [], vanish: [] });
       window.setTimeout(() => { if (!feedRunningRef.current) { danTargetRef.current = []; setDanCursor(null); } }, 900);
     }
-  }, [adoptShown, pointDanAt]);
+  }, [pointDanAt]);
 
   // プレビューの上でマウスを置いた・押した所。通話で「ここ」と言いながら指した所をダンが分かるよう、下の知らせに足す
   // （2026-11-17。読むのは通話: app/services/voice_editor.py）。同じ所なら知らせ直さない
@@ -1826,6 +1808,7 @@ export function VideoReviewEditor({
         );
         if (res.ok) {
           const data = (await res.json()) as { last?: number; entries?: DanFeedEntry[]; sequence?: EditSequence | null; now?: number };
+          if (stopped) return;
           const opened = feedAfterRef.current < 0;
           feedAfterRef.current = Math.max(feedAfterRef.current, Number(data.last || 0));
           if (!opened && data.entries?.length) {
@@ -2286,6 +2269,32 @@ export function VideoReviewEditor({
     void loadSession();
   }, [loadSession]);
 
+  const autoSaveRef = useRef({ save: onSaveTimeline, payload });
+  autoSaveRef.current = { save: onSaveTimeline, payload };
+  const failedSave = useRef<{ sequence: unknown; annotations: unknown; base: unknown } | null>(null);
+  const flushTimeline = useCallback(async () => {
+    if (pendingSave.current) return pendingSave.current;
+    const { save, payload: current } = autoSaveRef.current;
+    if (!save) return;
+    const snapshot = savedSequence.current;
+    const task = (async () => {
+      try {
+        await save({ ...current, base_rev: snapshot?._rev });
+        acknowledged.current = { submitted: current.sequence || null };
+        lastSyncedAnnSig.current = seqSig(current.annotations);
+        failedSave.current = null;
+      } catch (error) {
+        failedSave.current = { sequence: current.sequence, annotations: current.annotations, base: snapshot };
+        throw error;
+      } finally {
+        pendingSave.current = null;
+        setSaveEpoch(n => n + 1);
+      }
+    })();
+    pendingSave.current = task;
+    return task;
+  }, []);
+
   const saveSession = useCallback(async () => {
     if (!videoPath && !videoUrl) {
       toast.error('動画パスかURLを指定してください');
@@ -2300,42 +2309,27 @@ export function VideoReviewEditor({
         body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
-      await onSaveTimeline?.({ ...payload, base_rev: baseRevRef.current });
+      await flushTimeline();
       toast.success('レビュー情報を保存しました');
     } catch (error) {
       toast.error('保存に失敗しました', { description: String(error).slice(0, 180) });
     } finally {
       setIsSaving(false);
     }
-  }, [onSaveTimeline, payload, videoPath, videoUrl]);
+  }, [flushTimeline, payload, videoPath, videoUrl]);
 
-  // Auto-save manual edits (debounced) so a page refresh keeps them. The parent
-  // re-creates onSaveTimeline/payload on every poll-driven re-render, so we hold them
-  // in a ref and re-arm the debounce ONLY when the edited sequence actually changes
-  // (canonical compare) — otherwise the timer would be cleared every couple seconds and
-  // never fire, and we'd re-save echoes/undo round-trips in a loop.
-  const autoSaveRef = useRef<{ save?: typeof onSaveTimeline; payload: SessionPayload }>({ save: onSaveTimeline, payload });
-  autoSaveRef.current = { save: onSaveTimeline, payload };
+  // Sequence and annotation changes share one ordered stream of saves. Only the server
+  // acknowledgement advances the base; later edits schedule their own save after that.
   useEffect(() => {
-    const sig = seqSig(editSequence);
-    if (sig === lastSyncedSig.current) return; // unchanged since last sync/save -> nothing to save
+    if (!onSaveTimeline || pendingSave.current || gestureActive) return;
+    const failed = failedSave.current;
+    if (failed && failed.sequence === editSequence && failed.annotations === annotations && failed.base === savedSequence.current) return;
+    if (seqSig(editSequence) === seqSig(savedSequence.current) && seqSig(annotations) === lastSyncedAnnSig.current) return;
     const timer = window.setTimeout(() => {
-      lastSyncedSig.current = sig; // our save is now the known in-sync value (parent echoes skip)
-      void autoSaveRef.current.save?.({ ...autoSaveRef.current.payload, base_rev: baseRevRef.current });
+      void flushTimeline().catch(error => toast.error('タイムラインを保存できませんでした', { description: String(error).slice(0, 160) }));
     }, 1200);
     return () => window.clearTimeout(timer);
-  }, [editSequence]);
-
-  // Autosave annotation edits (blur boxes etc.) — separate from the sequence save above.
-  useEffect(() => {
-    const sig = seqSig(annotations);
-    if (sig === lastSyncedAnnSig.current) return;
-    const timer = window.setTimeout(() => {
-      lastSyncedAnnSig.current = sig;
-      void autoSaveRef.current.save?.({ ...autoSaveRef.current.payload, base_rev: baseRevRef.current });
-    }, 1200);
-    return () => window.clearTimeout(timer);
-  }, [annotations]);
+  }, [editSequence, annotations, saveEpoch, gestureActive, flushTimeline, !!onSaveTimeline]);
 
   const makeDraftAnnotation = useCallback(
     (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>, intentArg: Intent = 'blur'): DraftAnnotation => {
