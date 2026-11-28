@@ -7686,9 +7686,22 @@ def _words_for_caption(
     return out
 
 
+_AUDIO_ANALYSIS_LOCKS: dict[str, threading.Lock] = {}
+_AUDIO_ANALYSIS_LOCKS_GUARD = threading.Lock()
+
+
 def _ensure_audio_analysis(room_id: str, asset_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Return {asset_id: analysis(segments with words)} using cached metadata.audio_analysis when
-    present, else running dan_audio_check --words once and caching it on the asset."""
+    present, else running dan_audio_check --words once and caching it on the asset.
+    One run per room at a time: concurrent caption syncs used to start the same whole-recording
+    Whisper eight times over (16 processes on one Mac, 2026-11-28); the waiters then read the cache."""
+    with _AUDIO_ANALYSIS_LOCKS_GUARD:
+        lock = _AUDIO_ANALYSIS_LOCKS.setdefault(room_id, threading.Lock())
+    with lock:
+        return _ensure_audio_analysis_locked(room_id, asset_ids)
+
+
+def _ensure_audio_analysis_locked(room_id: str, asset_ids: list[str]) -> dict[str, dict[str, Any]]:
     whisper_model = os.environ.get("DAN_PLAN_WHISPER_MODEL", "medium")
     assets = _read_assets(room_id)
     by_id = {a.get("id"): a for a in assets}

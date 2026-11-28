@@ -4019,6 +4019,11 @@ export function VideoReviewEditor({
         if (c.track !== 'caption' && typeof c.text !== 'string') return false;
         const anim = (c.style as CaptionDesign | null | undefined)?.animation;
         if (anim !== 'karaoke' && anim !== 'typewriter') return false;
+        // Words that already spell this caption were written on purpose (Dan's 前半→後半 reveal, or an
+        // earlier sync): keep them. Re-syncing replaced Dan's parts with Whisper words that no longer
+        // spell the text, and every editor tab started a full-recording Whisper run (2026-11-28).
+        const ws = (c as { words?: { text: string }[] | null }).words;
+        if (ws?.length && ws.map((w) => w.text).join('').replace(/\s/g, '') === String(c.text || '').replace(/\s/g, '')) return false;
         const sig = `${c.timeline_start}|${c.timeline_end}|${anim}`;
         return autoSyncSigRef.current.get(String(c.id)) !== sig;
       })
